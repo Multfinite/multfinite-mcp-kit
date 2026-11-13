@@ -2,7 +2,9 @@
   "metamcp": {
     "repository": "https://github.com/metatool-ai/metamcp.git",
     "revision": "05818ec2767b946f98d280ae9cefa401f0362d62",
-    "composeMinimum": "2.24.4"
+    "composeMinimum": "2.24.4",
+    "frontendPort": 13008,
+    "backendPort": 13009
   },
   "nodeVersion": "24.22.3",
   "npmVersion": "11.11.1",

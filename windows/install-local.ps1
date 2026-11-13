@@ -381,7 +381,8 @@ catch { Fail "LOCAL stack: $($_.Exception.Message)" }
 Write-Host "`nSettings: $BaseDir\config\local-settings.json"
 Write-Host "Secrets:  $PrivateDir\secrets.json (keep private)"
 Write-Host 'MetaMCP login: .\windows\run-local.ps1 credentials'
-Write-Host 'Commands: .\windows\run-local.ps1 status | logs | restart | stop'
+Write-Host 'Commands: .\windows\run-local.ps1 status | logs | restart | stop | ports'
+Write-Host 'Change existing MetaMCP ports: .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009'
 Note 'Obsidian requires its Local REST API plugin and key; the server waits until configured.'
 if ($Failures.Count -gt 0) {
     Write-Host "`nInstallation is incomplete. Fix the errors above and rerun this script; existing configuration and data are preserved." -ForegroundColor Red

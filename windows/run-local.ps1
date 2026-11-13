@@ -8,13 +8,19 @@
     .\windows\run-local.ps1 logs obsidian
     .\windows\run-local.ps1 credentials
     .\windows\run-local.ps1 logs metamcp
+    .\windows\run-local.ps1 ports
+    .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009
 #>
 [CmdletBinding()]
 param(
     # init is used by the installer; it never replaces existing settings.
-    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
+    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
     [string]$Command = 'start',
-    [string]$Server = ''
+    [string]$Server = '',
+    [ValidateRange(0, 65535)]
+    [int]$WebPort = 0,
+    [ValidateRange(0, 65535)]
+    [int]$BackendPort = 0
 )
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'This script must be run in a Windows user session.' }
@@ -403,6 +409,14 @@ try {
         'logs'         { if ($Server -eq 'metamcp') { Show-MetaLogs } else { Show-Logs $Server } }
         'credentials'  { Show-MetaCredentials }
         'seed'            { Repair-MetaSeed }
+        'ports'           { Show-MetaPorts }
+        'set-ports'       {
+            if (-not $PSBoundParameters.ContainsKey('WebPort') -or -not $PSBoundParameters.ContainsKey('BackendPort')) {
+                throw 'Use set-ports -WebPort <port> -BackendPort <port-or-0>.'
+            }
+            Set-MetaPorts $WebPort $BackendPort
+            Start-LocalStack
+        }
         'gateway-start'   { Start-Gateway }
         'gateway-stop'    { Stop-Gateway }
         'gateway-restart' { Stop-Gateway; Start-Gateway }

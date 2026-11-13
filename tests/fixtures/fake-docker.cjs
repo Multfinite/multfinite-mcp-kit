@@ -13,7 +13,10 @@ if (!stateFile || !traceFile) process.exit(90);
 const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { container: {}, volume: {}, network: {}, image: {}, seeds: 0 };
 const save = () => fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
 fs.appendFileSync(traceFile, `${JSON.stringify(args)}\n`);
-const polluted = Object.keys(process.env).filter((name) => /^(COMPOSE_|POSTGRES_|BOOTSTRAP_|METAMCP_)/i.test(name) || /^(DOCKER_HOST|DOCKER_CONTEXT|DATABASE_URL|APP_URL|BETTER_AUTH_SECRET)$/i.test(name));
+const isCompose = args[0] === '--context' && args[1] === 'desktop-linux' && args[2] === 'compose';
+const polluted = Object.keys(process.env).filter((name) =>
+  (/^(COMPOSE_|POSTGRES_|BOOTSTRAP_|METAMCP_)/i.test(name) || /^(DOCKER_HOST|DOCKER_CONTEXT|DATABASE_URL|APP_URL|BETTER_AUTH_SECRET)$/i.test(name)) &&
+  !(isCompose && name.toUpperCase() === 'APP_URL'));
 if (polluted.length) { console.error(`unrelated environment leaked: ${polluted.join(',')}`); process.exit(91); }
 function fail(message, code = 1) { console.error(message); process.exit(code); }
 function input() { return new Promise((resolve) => { let data = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (part) => data += part); process.stdin.on('end', () => resolve(data)); }); }
@@ -26,9 +29,11 @@ function composeConfig(e, clone) {
   const appEnv = { ...e,
     POSTGRES_HOST: 'postgres', POSTGRES_PORT: '5432', POSTGRES_USER: 'metamcp_user', POSTGRES_DB: 'metamcp_db',
     DATABASE_URL: `postgresql://metamcp_user:${e.POSTGRES_PASSWORD}@postgres:5432/metamcp_db`, NEXT_PUBLIC_APP_URL: e.APP_URL };
+  const ports = [{ host_ip: process.env.MCP_TEST_UNSAFE_PORT ? '0.0.0.0' : '127.0.0.1', published: e.MCPKIT_METAMCP_PORT, target: 12008, protocol: 'tcp' }];
+  if (Number(e.MCPKIT_METAMCP_BACKEND_PORT) > 0) ports.push({ host_ip: '127.0.0.1', published: e.MCPKIT_METAMCP_BACKEND_PORT, target: 12009, protocol: 'tcp' });
   return { services: {
     app: { image: e.MCPKIT_IMAGE, container_name: `${e.MCPKIT_PROJECT}-app`, build: { context: clone, dockerfile: 'Dockerfile' },
-      ports: [{ host_ip: process.env.MCP_TEST_UNSAFE_PORT ? '0.0.0.0' : '127.0.0.1', published: e.MCPKIT_METAMCP_PORT, target: 12008, protocol: 'tcp' }], labels,
+      ports, labels,
       volumes: [{ type: 'volume', source: 'uv_cache', target: '/home/nextjs/.cache/uv' }], environment: appEnv },
     postgres: { image: 'postgres:16-alpine', container_name: `${e.MCPKIT_PROJECT}-postgres`, labels,
       volumes: [{ type: 'volume', source: 'postgres_data', target: '/var/lib/postgresql/data' }],
@@ -49,6 +54,11 @@ async function main() {
     const envPath = command[command.indexOf('--env-file') + 1];
     if (process.env.MCPKIT_ENV_FILE !== envPath) fail('wrong private env file');
     const e = envFile(envPath);
+    // Compose shell interpolation overrides the initial values in the env
+    // file. Model that for an existing installation whose ports were changed.
+    for (const name of ['APP_URL', 'MCPKIT_METAMCP_PORT', 'MCPKIT_METAMCP_BACKEND_PORT', 'MCPKIT_IMAGE']) {
+      if (process.env[name] !== undefined) e[name] = process.env[name];
+    }
     if (project !== e.MCPKIT_PROJECT) fail('wrong project');
     const operation = command.find((x) => ['config', 'build', 'up', 'ps'].includes(x));
     if (operation === 'config') {
@@ -63,11 +73,24 @@ async function main() {
     const labels = { 'com.multfinite.mcpkit.instance': e.MCPKIT_INSTANCE, 'com.docker.compose.project': project };
     if (operation === 'build') { state.image[e.MCPKIT_IMAGE] = labels; save(); return; }
     if (operation === 'up') {
-      if (!command.includes('--no-recreate') || !command.includes('--no-build')) fail('missing preservation flags');
-      for (const suffix of ['app', 'postgres']) state.container[`${project}-${suffix}`] ||= labels;
+      const recreate = command.includes('--force-recreate');
+      if (!command.includes('--no-build') || (recreate ? (!command.includes('--no-deps') || command.at(-1) !== 'app') : !command.includes('--no-recreate'))) fail('missing preservation flags');
+      if (recreate && process.env.MCP_TEST_RECREATE_FAIL) fail('simulated port conflict');
+      const postgresOnly = command.at(-1) === 'postgres';
+      const appOnly = command.at(-1) === 'app';
+      if (!postgresOnly) state.container[`${project}-app`] ||= labels;
+      if (!appOnly) state.container[`${project}-postgres`] ||= labels;
       for (const suffix of ['postgres_data', 'uv_cache']) state.volume[`${project}_${suffix}`] ||= labels;
       state.network[`${project}_metamcp-network`] ||= labels;
-      state.running = true; state.upCalls = (state.upCalls || 0) + 1; save(); return;
+      if (!postgresOnly) {
+        state.running = true;
+        state.lastAppImage = e.MCPKIT_IMAGE;
+        state.lastFrontendPort = e.MCPKIT_METAMCP_PORT;
+        state.lastBackendPort = e.MCPKIT_METAMCP_BACKEND_PORT;
+        state.lastAppUrl = e.APP_URL;
+      }
+      if (recreate) state.appRecreates = (state.appRecreates || 0) + 1;
+      state.upCalls = (state.upCalls || 0) + 1; save(); return;
     }
     if (operation === 'ps') { console.log(`${project}-app running\n${project}-postgres running`); return; }
     fail('Unexpected compose operation');
@@ -83,6 +106,12 @@ async function main() {
     return;
   }
   if (command[0] === 'stop') { state.running = false; state.stopCalls = (state.stopCalls || 0) + 1; save(); return; }
+  if (command[0] === 'commit') {
+    const container = command.at(-2); const image = command.at(-1);
+    if (!state.container[container] || state.image[image]) fail('cannot snapshot container');
+    state.image[image] = state.container[container]; state.snapshots = (state.snapshots || 0) + 1; save();
+    console.log('sha256:synthetic'); return;
+  }
   if (command[0] === 'logs') { console.log('synthetic MetaMCP log'); return; }
   if (command[0] === 'exec' && command.includes('sh') && command.includes('-c')) {
     const script = command.at(-1);

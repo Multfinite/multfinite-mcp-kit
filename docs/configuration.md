@@ -215,18 +215,27 @@ Graphiti, Cognee, Memory Bank и GDrive подключаются к MetaMCP по
 |---|---|
 | `config\local-settings.json` | `hostId`, `listenHost`, `port`, `projectsDir`, `writingDir`, `everythingSdkPath`, `obsidianHost`, `obsidianPort` и необязательные TLS-параметры шлюза. Настройки уже существующей установки сохраняются. Для автоматического локального Docker-маршрута нужен IPv4 loopback без TLS: `127.0.0.1`. |
 | `config\private\secrets.json` | `gatewayApiKey`, `obsidianApiKey`, `dbhubDsn`. Не отправляйте файл и его содержимое в чат. При изменении Obsidian/DBHub выполните `restart`. |
-| `config\private\metamcp.env` | Сгенерированные отдельные параметры PostgreSQL, секрет auth и первоначальный логин/пароль MetaMCP. Не удаляйте и не перезаписывайте: потеря файла не приводит к автоматической смене существующих паролей. Команда `credentials` показывает первоначальный логин. |
-| `config\private\metamcp-state.json` | Идентификатор отдельного Compose-проекта, путь клона и выбранный порт. Храните вместе с секретами и PostgreSQL volume. |
-| `$env:MCPKIT_METAMCP_PORT` | Порт интерфейса только при **первой** настройке; по умолчанию `12008`. Например, `$env:MCPKIT_METAMCP_PORT = '12080'`. На уже созданную установку переменная не влияет. |
+| `config\private\metamcp.env` | Сгенерированные параметры PostgreSQL, секрет auth и первоначальный логин/пароль MetaMCP. Не удаляйте и не перезаписывайте. Команда `credentials` показывает первоначальный логин. Сохранённые при первой установке значения порта и APP_URL переопределяются действующим состоянием. |
+| `config\private\metamcp-state.json` | Идентификатор Compose-проекта, путь клона и действующие порты. Храните вместе с секретами и PostgreSQL volume; изменяйте порты командой `set-ports`, а не вручную. |
+| `$env:MCPKIT_METAMCP_PORT`, `$env:MCPKIT_METAMCP_BACKEND_PORT` | Порты Windows только при **первой** настройке; по умолчанию `13008` и `13009`. `MCPKIT_METAMCP_BACKEND_PORT=0` не публикует backend. Для существующей установки используйте `set-ports`. |
 | `$env:MCPKIT_DOCKER_START_TIMEOUT`, `$env:MCPKIT_METAMCP_START_TIMEOUT` | Необязательные таймауты запуска Docker Desktop и MetaMCP в секундах. |
 
 Старые `config\.env` и `config\mcp-local.json` не изменяются. При первом создании `local-settings.json` существующие валидные `PROJECTS_DIR`, `WRITING_DIR`, `DBHUB_DSN` и `OBSIDIAN_API_KEY` читаются из старого `.env` буквально; дальнейшие изменения старых файлов не обновляют действующие настройки. JSON-пути Windows должны содержать удвоенные обратные слеши.
 
-Установщик клонирует закреплённую версию upstream MetaMCP и собирает её в отдельный образ; существующий посторонний каталог `metamcp` не используется и не меняется. Отдельный Compose-проект хранит PostgreSQL и кэш в собственных volumes. `start` применяет `--no-recreate`, `stop` останавливает только принадлежащие комплекту контейнеры, не удаляя их и volumes. Пароли и bootstrap-пользователь создаются случайно; учётные записи не пересоздаются. При запуске upstream сначала разрешает создание первоначального пользователя, после чего локальная регистрация закрывается. UI доступен только через `127.0.0.1`, PostgreSQL не публикуется.
+Проверить и изменить порты существующей установки:
+
+```powershell
+.\windows\run-local.ps1 ports
+.\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009
+```
+
+Frontend обслуживает UI и MCP endpoint; backend напрямую доступен только на loopback и не нужен для обычного подключения. Чтобы его не публиковать, укажите `-BackendPort 0`. Порты внутри контейнера остаются 12008/12009. `port` в `local-settings.json` — отдельный порт шлюза Windows, а не MetaMCP.
+
+Установщик клонирует закреплённую версию upstream MetaMCP и собирает её в отдельный образ; существующий посторонний каталог `metamcp` не используется и не меняется. Отдельный Compose-проект хранит PostgreSQL и кэш в собственных volumes. Обычный `start` применяет `--no-recreate`, `stop` не удаляет контейнеры и volumes. Для изменения портов требуется пересоздать только app-контейнер: скрипт сохраняет его записываемый слой в локальном Docker-образе и запускает новый контейнер из него. Образ может содержать секреты; не публикуйте его. База, volumes и пароли не изменяются. Если изменение не удалось, оно остаётся ожидающим и повторяется при `start`. Пароли и bootstrap-пользователь создаются случайно; учётные записи не пересоздаются. При запуске upstream сначала разрешает создание первоначального пользователя, после чего локальная регистрация закрывается. UI и backend доступны только через `127.0.0.1`, PostgreSQL не публикуется.
 
 13 локальных серверов регистрируются автоматически в приватном endpoint `local-<hostId>`. Личный API-ключ этого владельца доступен в UI MetaMCP → API Keys. Ключ Windows-шлюза не совпадает с клиентским ключом MetaMCP. `seed` добавляет недостающие записи, не перезаписывая изменённые записи и отключённые mappings. Данные и права Docker, ACL Windows и резервные копии БД необходимо защищать: серверы могут выполнять команды, управлять рабочим столом и изменять файлы.
 
-Команды: `start`, `stop`, `restart`, `status`, `logs [имя]`, `credentials`, `seed`. Логи MetaMCP: `logs metamcp`; логи отдельного сервера: `logs codebase-memory-mcp`. Docker Desktop должен быть в режиме Linux containers; связь `host.docker.internal` со шлюзом проверяется при запуске, но без изменения firewall или расширения listener на LAN.
+Команды: `start`, `stop`, `restart`, `status`, `logs [имя]`, `credentials`, `seed`, `ports`, `set-ports`. Логи MetaMCP: `logs metamcp`; логи отдельного сервера: `logs codebase-memory-mcp`. Docker Desktop должен быть в режиме Linux containers; связь `host.docker.internal` со шлюзом проверяется при запуске, но без изменения firewall или расширения listener на LAN.
 
 ## `linux/services/docker-compose.yml`
 
@@ -249,7 +258,7 @@ Compose объявляет изолированные Docker-сети `multfinit
 - Linux использует фиксированный базовый путь `${HOME}/mcp-global/{config,data,metamcp}`. Windows по умолчанию использует `$env:USERPROFILE\mcp-local` и поддерживает переопределение через `$env:MCP_LOCAL_DIR`. Это переменная среды PowerShell, а не настройка Linux `.env`.
 - Если исполняемый файл Docker отсутствует, Linux-инсталлятор устанавливает официальный Engine и Compose plugin и при необходимости добавляет текущего пользователя в группу `docker`. Группа даёт права, эквивалентные администраторским; после изменения членства может потребоваться новый вход. Уже установленный Docker, существующие APT-репозитории и keyrings не заменяются; если daemon недоступен или plugin отсутствует при наличии Docker, установщик сообщает об этом и не переустанавливает Docker.
 - Linux-инсталлятор задаёт фиксированные имена контейнеров `neo4j-mcp` и `qdrant-mcp`, публикует Neo4j на `7474`/`7687`, Qdrant на `6333`/`6334`, включает Neo4j plugin `apoc` и хранит их данные в `~/mcp-global/data/{neo4j,qdrant}`. Эти параметры не настраиваются переменными `.env`; изменение портов, образов или mount-путей требует редактирования `linux/install-global.sh` и соответствующей сетевой конфигурации. Пароль нового Neo4j контейнера — исключение, он читается из `NEO4J_PASSWORD`.
-- MetaMCP installer настраивает стандартный адрес `http://localhost:12008`; run-скрипт проверяет health на внутреннем порту `12008`. Если меняете адрес/публикацию порта, согласуйте Compose MetaMCP, `APP_URL`, `NEXT_PUBLIC_APP_URL`, health check и URL клиентов; одного изменения публичных URL может быть недостаточно.
+- Linux GLOBAL по умолчанию использует `http://localhost:12008`; его run-скрипт проверяет health на внутреннем порту `12008`. При изменении публичного адреса согласуйте Compose, `APP_URL`, `NEXT_PUBLIC_APP_URL` и URL клиентов. Windows LOCAL использует отдельную команду `set-ports`, описанную выше.
 - `TEST_DATABASE_URL` используется только интеграционным тестом `tests/test-global-seed.sh` и должен указывать на отдельную тестовую PostgreSQL БД, в которой можно создавать и удалять схемы. Пример: `TEST_DATABASE_URL='postgresql://user:password@localhost:5432/test_db' bash tests/test-global-seed.sh`. Не используйте production БД.
 
 ## Где применять изменения

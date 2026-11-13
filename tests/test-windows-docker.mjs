@@ -59,7 +59,7 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
   const env = { ...process.env, ...setup.env, OS: 'Windows_NT', USERPROFILE: home, HOME: home, MCP_LOCAL_DIR: base,
     PATH: `${bin}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`,
     POSTGRES_PASSWORD: 'unrelated-database-password', APP_URL: 'https://unrelated.example',
-    DOCKER_CONTEXT: 'unrelated-remote-context', COMPOSE_FILE: 'unrelated.yml', MCPKIT_METAMCP_PORT: '12080' };
+    DOCKER_CONTEXT: 'unrelated-remote-context', COMPOSE_FILE: 'unrelated.yml', MCPKIT_METAMCP_PORT: '12080', MCPKIT_METAMCP_BACKEND_PORT: '0' };
   const existingClone = path.join(base, 'metamcp'); fs.mkdirSync(existingClone); fs.writeFileSync(path.join(existingClone, 'do-not-touch.txt'), 'existing user clone');
   const legacy = path.join(base, 'config/.env'); fs.mkdirSync(path.dirname(legacy), { recursive: true }); fs.writeFileSync(legacy, 'OTHER=keep\n');
   try {
@@ -78,7 +78,7 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     assert.doesNotMatch(first.stdout, /SSH|VPN|configure and register/i);
     const metaFile = path.join(base, 'config/private/metamcp-state.json'); const meta = readJson(metaFile);
     const metaEnvFile = path.join(base, 'config/private/metamcp.env'); const metaEnv = readEnv(metaEnvFile);
-    assert.equal(meta.port, 12080); assert.equal(meta.envCreated, true);
+    assert.equal(meta.port, 12080); assert.equal(meta.backendPort, 0); assert.equal(meta.envCreated, true);
     assert.match(meta.cloneDir, /metamcp-kit-[a-f0-9]{16}$/);
     assert.equal(fs.readFileSync(path.join(existingClone, 'do-not-touch.txt'), 'utf8'), 'existing user clone');
     assert.equal(fs.existsSync(path.join(meta.cloneDir, '.env')), false, 'secrets must stay outside the Docker build context');
@@ -152,6 +152,30 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     assert.notEqual(collision.status, 0); assert.match(collision.stdout, /not owned by this kit/);
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls, beforeCollision);
     dockerState.container[app] = oldLabels; writeJson(setup.env.MCP_TEST_DOCKER_STATE, dockerState);
+
+    // An old installation had no backend-port or pending-change fields.
+    // A failed switch keeps its DB, secrets, and app snapshot for a retry.
+    const legacyState = readJson(metaFile);
+    delete legacyState.backendPort; delete legacyState.portsPending; delete legacyState.appImage;
+    writeJson(metaFile, legacyState);
+    const oldVolumes = readJson(setup.env.MCP_TEST_DOCKER_STATE).volume;
+    const failedChange = invoke({ ...env, MCP_TEST_RECREATE_FAIL: '1' }, setup.runner, 'set-ports', '-WebPort', '13008', '-BackendPort', '13009');
+    assert.notEqual(failedChange.status, 0); assert.match(failedChange.stdout, /simulated port conflict/);
+    const pending = readJson(metaFile);
+    assert.equal(pending.port, 13008); assert.equal(pending.backendPort, 13009); assert.equal(pending.portsPending, true);
+    assert.match(pending.appImage, /-app-backup:[0-9]{14}-[a-f0-9]{8}$/);
+    assert.equal(fs.readFileSync(metaEnvFile, 'utf8'), envBefore);
+    assert.deepEqual(readJson(setup.env.MCP_TEST_DOCKER_STATE).volume, oldVolumes);
+    success(invoke(env, setup.runner, 'start'));
+    const changed = readJson(metaFile); const changedDocker = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.equal(changed.portsPending, false); assert.equal(changed.port, 13008); assert.equal(changed.backendPort, 13009);
+    assert.equal(changedDocker.lastAppImage, changed.appImage);
+    assert.equal(changedDocker.lastFrontendPort, '13008'); assert.equal(changedDocker.lastBackendPort, '13009');
+    assert.equal(changedDocker.lastAppUrl, 'http://localhost:13008');
+    assert.ok(changedDocker.snapshots >= 2); assert.equal(changedDocker.appRecreates, 1);
+    assert.deepEqual(changedDocker.volume, oldVolumes); assert.equal(fs.readFileSync(metaEnvFile, 'utf8'), envBefore);
+    success(invoke(env, setup.runner, 'start'));
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).appRecreates, 1);
     success(invoke(env, setup.runner, 'stop'));
   } finally {
     try { invoke(env, setup.runner, 'stop'); } catch { /* fixture cleanup */ }

@@ -3,6 +3,7 @@
 $MetaStateFile = Join-Path $PrivateDir 'metamcp-state.json'
 $MetaEnvFile = Join-Path $PrivateDir 'metamcp.env'
 $MetaOverride = Join-Path $ScriptDir 'metamcp.local.yml'
+$MetaBackendOverride = Join-Path $ScriptDir 'metamcp-backend.local.yml'
 
 function Quote-NativeArgument([string]$Value) {
     # Windows C runtime quoting, also usable for ProcessStartInfo on POSIX.
@@ -154,6 +155,21 @@ function Get-MetaState {
         $state.ownerEmail -cne ('local-' + $state.instanceId + '@mcpkit.local') -or
         ($state.port -isnot [int] -and $state.port -isnot [long]) -or $state.port -lt 1 -or $state.port -gt 65535 -or
         $state.envCreated -isnot [bool]) { throw "Invalid MetaMCP state; existing files were not changed: $MetaStateFile" }
+    # Old installations published only the frontend. Do not change their
+    # ports or recreate their app unless the user explicitly asks to do so.
+    if (-not $state.PSObject.Properties['backendPort']) { $state | Add-Member -NotePropertyName backendPort -NotePropertyValue 0 }
+    if (-not $state.PSObject.Properties['portsPending']) { $state | Add-Member -NotePropertyName portsPending -NotePropertyValue $false }
+    if (-not $state.PSObject.Properties['appImage']) { $state | Add-Member -NotePropertyName appImage -NotePropertyValue '' }
+    if (($state.backendPort -isnot [int] -and $state.backendPort -isnot [long]) -or
+        $state.backendPort -lt 0 -or $state.backendPort -gt 65535 -or
+        ($state.backendPort -ne 0 -and $state.backendPort -eq $state.port) -or
+        $state.portsPending -isnot [bool] -or $state.appImage -isnot [string]) {
+        throw "Invalid MetaMCP port state; existing files were not changed: $MetaStateFile"
+    }
+    $imagePattern = '^' + [regex]::Escape($state.project) + '-app-backup:[0-9]{14}-[a-f0-9]{8}$'
+    if ($state.appImage -and $state.appImage -cnotmatch $imagePattern) {
+        throw 'Unexpected MetaMCP app image in local state; existing files were not changed.'
+    }
     $first = [IO.Path]::GetFullPath((Join-Path $BaseDir 'metamcp'))
     $second = [IO.Path]::GetFullPath((Join-Path $BaseDir ('metamcp-kit-' + $state.instanceId)))
     if (-not $state.cloneDir -or -not [IO.Path]::IsPathRooted($state.cloneDir)) { throw 'Invalid MetaMCP clone path in local state.' }
@@ -166,12 +182,27 @@ function Initialize-MetaState {
     if (-not $state) {
         if (Test-Path -LiteralPath $MetaEnvFile) { throw "An existing MetaMCP env file has no matching kit state. It was preserved: $MetaEnvFile" }
         $id = New-RandomHex 8
-        $port = 12008
+        # These defaults and environment overrides apply only to a new instance.
+        # Use set-ports for an existing instance; do not rewrite its secrets.
+        $port = [int]$Manifest.metamcp.frontendPort
+        $backendPort = [int]$Manifest.metamcp.backendPort
         if ($env:MCPKIT_METAMCP_PORT) {
             if ($env:MCPKIT_METAMCP_PORT -notmatch '^\d{1,5}$' -or [int]$env:MCPKIT_METAMCP_PORT -lt 1 -or [int]$env:MCPKIT_METAMCP_PORT -gt 65535) {
                 throw 'MCPKIT_METAMCP_PORT must be a port between 1 and 65535.'
             }
             $port = [int]$env:MCPKIT_METAMCP_PORT
+        }
+        if ($env:MCPKIT_METAMCP_BACKEND_PORT) {
+            if ($env:MCPKIT_METAMCP_BACKEND_PORT -notmatch '^\d{1,5}$' -or [int]$env:MCPKIT_METAMCP_BACKEND_PORT -gt 65535) {
+                throw 'MCPKIT_METAMCP_BACKEND_PORT must be between 1 and 65535, or 0 to keep the backend unpublished.'
+            }
+            $backendPort = [int]$env:MCPKIT_METAMCP_BACKEND_PORT
+        }
+        if ($port -lt 1 -or $port -gt 65535 -or $backendPort -lt 0 -or $backendPort -gt 65535 -or
+            ($backendPort -ne 0 -and $backendPort -eq $port)) { throw 'Invalid or duplicate MetaMCP frontend/backend ports.' }
+        $gatewayPort = (Get-Configuration).settings.port
+        if ($port -eq $gatewayPort -or ($backendPort -ne 0 -and $backendPort -eq $gatewayPort)) {
+            throw 'MetaMCP ports must differ from the Windows gateway port in config/local-settings.json.'
         }
         $clone = Join-Path $BaseDir 'metamcp'
         if (Test-Path -LiteralPath $clone) {
@@ -180,6 +211,7 @@ function Initialize-MetaState {
             Write-Host "An existing metamcp directory was preserved; the kit will use $clone instead."
         }
         $candidate = [ordered]@{ version = 1; instanceId = $id; project = 'mcpkit-win-' + $id; port = $port;
+            backendPort = $backendPort; portsPending = $false; appImage = '';
             ownerEmail = 'local-' + $id + '@mcpkit.local'; cloneDir = [IO.Path]::GetFullPath($clone); envCreated = $false }
         $null = Save-Json $MetaStateFile $candidate -CreateOnly
         $state = Get-MetaState
@@ -204,7 +236,7 @@ function Initialize-MetaState {
             'BOOTSTRAP_DISABLE_REGISTRATION_SSO=true', "BOOTSTRAP_API_KEYS=$keys",
             "METAMCP_ADMIN_EMAILS=$($state.ownerEmail)",
             "MCPKIT_INSTANCE=$($state.instanceId)", "MCPKIT_PROJECT=$($state.project)",
-            "MCPKIT_METAMCP_PORT=$($state.port)", "MCPKIT_IMAGE=$image"
+            "MCPKIT_METAMCP_PORT=$($state.port)", "MCPKIT_METAMCP_BACKEND_PORT=$($state.backendPort)", "MCPKIT_IMAGE=$image"
         )
         # CreateNew avoids ever replacing a user's existing secrets, including
         # if another installation races this one.
@@ -228,13 +260,29 @@ function Read-MetaEnv {
     }
     return $values
 }
+function Get-MetaImage($State) {
+    if ($State.appImage) { return [string]$State.appImage }
+    return ($State.project + '-metamcp:' + $Manifest.metamcp.revision.Substring(0, 12))
+}
 function Get-ComposeArguments($State, [string[]]$Subcommand) {
-    return @('--context', 'desktop-linux', 'compose', '--project-name', $State.project,
+    $arguments = @('--context', 'desktop-linux', 'compose', '--project-name', $State.project,
         '--project-directory', $State.cloneDir, '--env-file', $MetaEnvFile,
-        '-f', (Join-Path $State.cloneDir 'docker-compose.yml'), '-f', $MetaOverride) + $Subcommand
+        '-f', (Join-Path $State.cloneDir 'docker-compose.yml'), '-f', $MetaOverride)
+    if ($State.backendPort -gt 0) { $arguments += @('-f', $MetaBackendOverride) }
+    return $arguments + $Subcommand
 }
 function Invoke-Compose($State, [string[]]$Subcommand, [int]$TimeoutSeconds = 60) {
-    return Invoke-Docker (Get-ComposeArguments $State $Subcommand) '' $TimeoutSeconds @{ MCPKIT_ENV_FILE = $MetaEnvFile }
+    # State is the authoritative source for ports. Shell interpolation takes
+    # precedence over old values in the private env file, so credentials and
+    # the original file remain byte-for-byte intact when ports are changed.
+    $envs = @{
+        MCPKIT_ENV_FILE = $MetaEnvFile
+        MCPKIT_METAMCP_PORT = [string]$State.port
+        MCPKIT_METAMCP_BACKEND_PORT = [string]$State.backendPort
+        MCPKIT_IMAGE = (Get-MetaImage $State)
+        APP_URL = 'http://localhost:' + $State.port
+    }
+    return Invoke-Docker (Get-ComposeArguments $State $Subcommand) '' $TimeoutSeconds $envs
 }
 function Invoke-Git([string[]]$GitArguments, [int]$TimeoutSeconds = 300) {
     $git = Get-Command 'git.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -278,14 +326,17 @@ function Test-MetaCompose($State) {
     $pg = $config.services.postgres
     $serviceNames = @($config.services.PSObject.Properties.Name | Sort-Object)
     if (($serviceNames -join ',') -cne 'app,postgres' -or -not $app -or -not $pg) { throw 'Unexpected MetaMCP Compose services; no containers were started.' }
-    $expectedImage = $State.project + '-metamcp:' + $Manifest.metamcp.revision.Substring(0, 12)
+    $expectedImage = Get-MetaImage $State
     if ($app.image -cne $expectedImage -or $app.container_name -cne ($State.project + '-app') -or
         $pg.image -cne 'postgres:16-alpine' -or $pg.container_name -cne ($State.project + '-postgres')) { throw 'Unexpected local Docker images or container names; no containers were started.' }
     if (-not $app.build -or -not $app.build.context -or [IO.Path]::GetFullPath([string]$app.build.context) -ine [IO.Path]::GetFullPath($State.cloneDir) -or
         $app.build.dockerfile -ne 'Dockerfile') { throw 'Unexpected MetaMCP build context; no image was built.' }
-    $ports = @($app.ports)
-    if ($ports.Count -ne 1 -or $ports[0].host_ip -cne '127.0.0.1' -or [string]$ports[0].published -cne [string]$State.port -or
-        [int]$ports[0].target -ne 12008 -or $ports[0].protocol -ne 'tcp' -or ($pg.ports -and @($pg.ports).Count -gt 0)) {
+    $ports = @($app.ports | Where-Object { $_ })
+    $frontend = @($ports | Where-Object { $_.host_ip -ceq '127.0.0.1' -and [string]$_.published -ceq [string]$State.port -and [int]$_.target -eq 12008 -and $_.protocol -ceq 'tcp' })
+    $backend = @($ports | Where-Object { $_.host_ip -ceq '127.0.0.1' -and [string]$_.published -ceq [string]$State.backendPort -and [int]$_.target -eq 12009 -and $_.protocol -ceq 'tcp' })
+    $expectedCount = if ($State.backendPort -gt 0) { 2 } else { 1 }
+    if ($ports.Count -ne $expectedCount -or $frontend.Count -ne 1 -or
+        ($State.backendPort -gt 0 -and $backend.Count -ne 1) -or ($pg.ports -and @($pg.ports).Count -gt 0)) {
         throw 'Unsafe published ports in MetaMCP Compose configuration; no containers were started.'
     }
     if ($app.extra_hosts -and @($app.extra_hosts).Count -gt 0) { throw 'Unexpected host aliases in MetaMCP Compose; no containers were started.' }
@@ -346,8 +397,11 @@ function Test-MetaResources($State) {
     $null = Test-OwnedDockerObject 'network' ($State.project + '_metamcp-network') $State
 }
 function Ensure-MetaImage($State) {
-    $image = $State.project + '-metamcp:' + $Manifest.metamcp.revision.Substring(0, 12)
+    $image = Get-MetaImage $State
     if (Test-OwnedDockerObject 'image' $image $State) { return }
+    if ($State.appImage) {
+        throw "The preserved MetaMCP app image is missing; restore it before starting: $image"
+    }
     # Do not send a modified or untracked user file to the Docker build context.
     if ((Invoke-Git @('-C', $State.cloneDir, 'rev-parse', 'HEAD')) -cne $Manifest.metamcp.revision -or
         (Invoke-Git @('-C', $State.cloneDir, 'status', '--porcelain', '--ignored', '--untracked-files=all'))) {
@@ -436,6 +490,26 @@ function Exit-MetaLock($Lock) {
     $Lock.Dispose()
     Remove-Item -LiteralPath (Join-Path $PrivateDir 'metamcp.lock') -Force -ErrorAction SilentlyContinue
 }
+function Save-MetaAppImage($State) {
+    $app = $State.project + '-app'
+    if (-not (Test-OwnedDockerObject 'container' $app $State)) { return '' }
+    # Port bindings cannot be changed on an existing container. Stop only the
+    # verified kit app, snapshot its writable layer, and run the replacement
+    # from that snapshot. The PostgreSQL and uv-cache volumes remain attached.
+    $stamp = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
+    $image = $State.project + '-app-backup:' + $stamp + '-' + (New-RandomHex 4)
+    $probe = Invoke-Docker @('--context', 'desktop-linux', 'image', 'inspect', '--format', '{{.Id}}', $image)
+    if ($probe.code -eq 0) { throw 'The generated MetaMCP backup image name already exists; nothing was overwritten.' }
+    if ($probe.stderr -notmatch '(?i)(no such image|not found)') { Assert-DockerResult $probe 'backup image inspection' }
+    Write-Host 'Stopping the kit MetaMCP app and preserving its writable layer before changing ports...'
+    $stop = Invoke-Docker @('--context', 'desktop-linux', 'stop', '--time', '20', $app) '' 180
+    Assert-DockerResult $stop 'MetaMCP app stop for port change'
+    $commit = Invoke-Docker @('--context', 'desktop-linux', 'commit', '--change', ('LABEL com.multfinite.mcpkit.instance=' + $State.instanceId), $app, $image) '' 600
+    Assert-DockerResult $commit 'MetaMCP app backup'
+    if (-not (Test-OwnedDockerObject 'image' $image $State)) { throw 'The MetaMCP app backup could not be verified; the old container was kept.' }
+    Write-Host "Preserved app image: $image (local only; it may contain secrets)."
+    return $image
+}
 function Start-MetaMcp {
     $lock = Enter-MetaLock
     try {
@@ -446,15 +520,80 @@ function Start-MetaMcp {
         Test-MetaResources $state
         Ensure-MetaImage $state
         Test-MetaResources $state
-        $start = Invoke-Compose $state @('up', '-d', '--no-recreate', '--no-build') 600
-        Assert-DockerResult $start 'MetaMCP start'
+        if ($state.portsPending) {
+            # Changing published ports requires replacing only the app. Keep a
+            # retry marker until Compose has created the new binding. Never
+            # recreate the database, remove volumes, or touch other projects.
+            $database = Invoke-Compose $state @('up', '-d', '--no-recreate', '--no-build', 'postgres') 600
+            Assert-DockerResult $database 'MetaMCP database start'
+            $snapshot = Save-MetaAppImage $state
+            if ($snapshot) {
+                $state.appImage = $snapshot
+                $null = Save-Json $MetaStateFile $state
+                Test-MetaCompose $state
+                Test-MetaResources $state
+            }
+            $start = Invoke-Compose $state @('up', '-d', '--no-deps', '--force-recreate', '--no-build', 'app') 600
+            Assert-DockerResult $start 'MetaMCP start with new ports'
+            $state.portsPending = $false
+            $null = Save-Json $MetaStateFile $state
+        } else {
+            $start = Invoke-Compose $state @('up', '-d', '--no-recreate', '--no-build') 600
+            Assert-DockerResult $start 'MetaMCP start'
+        }
         Wait-MetaMcp $state
         Invoke-MetaSeed $state $false
         Test-MetaBridge $state
         $settings = (Get-Configuration).settings
         Write-Host "MetaMCP: http://localhost:$($state.port)"
         Write-Host "MCP endpoint: http://localhost:$($state.port)/metamcp/local-$($settings.hostId)/mcp"
+        if ($state.backendPort -gt 0) { Write-Host "MetaMCP backend (loopback only): http://localhost:$($state.backendPort)" }
         Write-Host 'Initial login: .\windows\run-local.ps1 credentials (keep it private). The private API key is in the MetaMCP UI.'
+    } finally { Exit-MetaLock $lock }
+}
+function Show-MetaPorts {
+    $state = Get-MetaState
+    if (-not $state) {
+        Write-Host "New-install defaults: frontend $($Manifest.metamcp.frontendPort), backend $($Manifest.metamcp.backendPort)."
+        Write-Host 'Override before first install with MCPKIT_METAMCP_PORT and MCPKIT_METAMCP_BACKEND_PORT.'
+        return
+    }
+    Write-Host "Frontend / MCP endpoint (loopback): $($state.port)"
+    if ($state.backendPort -gt 0) { Write-Host "Backend (loopback): $($state.backendPort)" }
+    else { Write-Host 'Backend: not published on the Windows host.' }
+    if ($state.portsPending) { Write-Host 'The change is pending; run start to retry it.' }
+    Write-Host "Managed port state: $MetaStateFile"
+    Write-Host 'Change it with: run-local.ps1 set-ports -WebPort <port> -BackendPort <port-or-0>'
+}
+function Set-MetaPorts([int]$FrontendPort, [int]$BackendPort) {
+    if ($FrontendPort -lt 1 -or $FrontendPort -gt 65535 -or $BackendPort -lt 0 -or $BackendPort -gt 65535 -or
+        ($BackendPort -ne 0 -and $FrontendPort -eq $BackendPort)) {
+        throw 'WebPort must be 1-65535; BackendPort must be a different port or 0 to keep the backend unpublished.'
+    }
+    $lock = Enter-MetaLock
+    try {
+        $state = Get-MetaState
+        if (-not $state) { throw 'MetaMCP is not initialized. Set MCPKIT_METAMCP_PORT and MCPKIT_METAMCP_BACKEND_PORT before the first install.' }
+        $gatewayPort = (Get-Configuration).settings.port
+        if ($FrontendPort -eq $gatewayPort -or ($BackendPort -ne 0 -and $BackendPort -eq $gatewayPort)) {
+            throw 'MetaMCP ports must differ from the Windows gateway port in config/local-settings.json.'
+        }
+        Ensure-DesktopDocker
+        Assert-MetaClone $state
+        Test-MetaCompose $state
+        Test-MetaResources $state
+        if ($state.port -ne $FrontendPort -or $state.backendPort -ne $BackendPort) {
+            $state.port = $FrontendPort
+            $state.backendPort = $BackendPort
+            $state.portsPending = $true
+            # Validate the proposed config before saving; existing credentials
+            # and the database are never edited by a port change.
+            Test-MetaCompose $state
+            $null = Save-Json $MetaStateFile $state
+            Write-Host "Saved MetaMCP host ports: frontend $FrontendPort, backend $BackendPort (0 = unpublished)."
+        } elseif ($state.portsPending) {
+            Write-Host 'The requested port change is already pending; retrying it.'
+        } else { Write-Host 'The requested MetaMCP ports are already configured.' }
     } finally { Exit-MetaLock $lock }
 }
 function Stop-MetaMcp {
