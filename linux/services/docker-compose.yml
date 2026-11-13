@@ -1,0 +1,111 @@
+# Kit-owned sidecars. These use separate Docker networks, publish no host
+# ports, and do not change the user's MetaMCP Compose files. The run script
+# attaches only the existing app container to these networks.
+services:
+  mcpkit-graphiti:
+    image: zepai/knowledge-graph-mcp:standalone
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$OPENAI_API_KEY" ]; then
+          echo 'Graphiti needs OPENAI_API_KEY; edit the kit config and run apply-services.' >&2
+          exec sleep infinity
+        fi
+        exec uv run --no-sync main.py --transport http --host 0.0.0.0 --database-provider neo4j
+    environment:
+      NEO4J_URI: ${MCPKIT_NEO4J_URI}
+      NEO4J_USER: ${MCPKIT_NEO4J_USER}
+      NEO4J_PASSWORD: ${MCPKIT_NEO4J_PASSWORD}
+      NEO4J_DATABASE: ${MCPKIT_NEO4J_DATABASE:-neo4j}
+      OPENAI_API_KEY: ${MCPKIT_OPENAI_API_KEY:-}
+      MODEL_NAME: ${MCPKIT_GRAPHITI_MODEL:-gpt-4o-mini}
+      EMBEDDER_MODEL: ${MCPKIT_GRAPHITI_EMBEDDER_MODEL:-text-embedding-3-small}
+      GRAPHITI_GROUP_ID: ${MCPKIT_GRAPHITI_GROUP_ID:-multfinite-mcp-kit-global}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    # Neo4j may still be starting on a fresh installation.
+    restart: unless-stopped
+    networks: [graphiti]
+
+  mcpkit-cognee:
+    image: cognee/cognee-mcp:main
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if { [ "$$LLM_PROVIDER" = openai ] && [ -z "$$LLM_API_KEY" ]; } ||
+           { [ "$$EMBEDDING_PROVIDER" = openai ] && [ -z "$$EMBEDDING_API_KEY" ]; }; then
+          echo 'Cognee needs provider keys; edit the kit config and run apply-services.' >&2
+          exec sleep infinity
+        fi
+        exec /app/entrypoint.sh
+    environment:
+      TRANSPORT_MODE: http
+      MCP_ALLOWED_HOSTS: "mcpkit-cognee:*"
+      LLM_PROVIDER: ${MCPKIT_COGNEE_LLM_PROVIDER:-openai}
+      LLM_API_KEY: ${MCPKIT_COGNEE_LLM_API_KEY:-}
+      LLM_MODEL: ${MCPKIT_COGNEE_LLM_MODEL:-gpt-4o-mini}
+      LLM_ENDPOINT: ${MCPKIT_COGNEE_LLM_ENDPOINT:-}
+      EMBEDDING_PROVIDER: ${MCPKIT_COGNEE_EMBEDDING_PROVIDER:-openai}
+      EMBEDDING_API_KEY: ${MCPKIT_COGNEE_EMBEDDING_API_KEY:-}
+      EMBEDDING_MODEL: ${MCPKIT_COGNEE_EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIMENSIONS: ${MCPKIT_COGNEE_EMBEDDING_DIMENSIONS:-1536}
+      SYSTEM_ROOT_DIRECTORY: /cognee-storage/system
+      DATA_ROOT_DIRECTORY: /cognee-storage/data
+    volumes:
+      - cognee_system:/cognee-storage/system
+      - cognee_data:/cognee-storage/data
+    restart: unless-stopped
+    networks: [cognee]
+
+  # These two upstream servers are stdio-only. The small Node image installs
+  # their official packages and the proxy; each gets its own persistent volume.
+  mcpkit-memory-bank:
+    image: multfinite-mcp-kit-node-mcp:1
+    build: ./node-mcp
+    pull_policy: never
+    environment:
+      MEMORY_BANK_ROOT: /mcpkit/memory
+    command: ["mcp-proxy", "--host", "0.0.0.0", "--port", "8000", "--server", "stream", "--", "mcp-server-memory-bank"]
+    volumes:
+      - memory_data:/mcpkit/memory
+    restart: unless-stopped
+    networks: [memory]
+
+  mcpkit-gdrive:
+    image: multfinite-mcp-kit-node-mcp:1
+    pull_policy: never
+    depends_on: [mcpkit-memory-bank]
+    environment:
+      GDRIVE_CREDENTIALS_PATH: /mcpkit/gdrive/credentials.json
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while [ ! -s /mcpkit/gdrive/credentials.json ]; do
+          echo 'Waiting for Google Drive OAuth credentials; see the kit README.' >&2
+          sleep 30
+        done
+        exec mcp-proxy --host 0.0.0.0 --port 8000 --server stream -- mcp-server-gdrive
+    volumes:
+      - gdrive_data:/mcpkit/gdrive
+    restart: unless-stopped
+    networks: [gdrive]
+
+networks:
+  graphiti:
+    name: multfinite-mcp-kit-global-graphiti
+  cognee:
+    name: multfinite-mcp-kit-global-cognee
+  memory:
+    name: multfinite-mcp-kit-global-memory
+  gdrive:
+    name: multfinite-mcp-kit-global-gdrive
+
+volumes:
+  cognee_system:
+    name: multfinite-mcp-kit-global-cognee-system
+  cognee_data:
+    name: multfinite-mcp-kit-global-cognee-data
+  memory_data:
+    name: multfinite-mcp-kit-global-memory-data
+  gdrive_data:
+    name: multfinite-mcp-kit-global-gdrive-data
