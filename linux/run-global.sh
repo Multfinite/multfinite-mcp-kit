@@ -115,9 +115,11 @@ load_seed_config() {
 # existing MetaMCP app is attached to it. Values are passed through the process
 # environment, never as shell arguments or printed in the log.
 services_compose() (
-    unset NEO4J_URI NEO4J_USER NEO4J_USERNAME NEO4J_PASSWORD NEO4J_DATABASE OPENAI_API_KEY
-    unset GRAPHITI_MODEL GRAPHITI_EMBEDDER_MODEL GRAPHITI_GROUP_ID COGNEE_LLM_PROVIDER COGNEE_LLM_API_KEY COGNEE_LLM_MODEL COGNEE_LLM_ENDPOINT
-    unset COGNEE_EMBEDDING_PROVIDER COGNEE_EMBEDDING_API_KEY COGNEE_EMBEDDING_MODEL COGNEE_EMBEDDING_DIMENSIONS
+    unset NEO4J_URI NEO4J_USER NEO4J_USERNAME NEO4J_PASSWORD NEO4J_DATABASE
+    unset OPENAI_API_KEY LLM_API_ENDPOINT LLM_API_KEY LLM_API_MODEL LLM_API_PROVIDER
+    unset GRAPHITI_API_KEY GRAPHITI_API_ENDPOINT GRAPHITI_BASE_URL GRAPHITI_API_MODEL GRAPHITI_MODEL GRAPHITI_EMBEDDER_MODEL GRAPHITI_GROUP_ID
+    unset COGNEE_LLM_API_PROVIDER COGNEE_LLM_PROVIDER COGNEE_LLM_API_KEY COGNEE_LLM_API_MODEL COGNEE_LLM_MODEL COGNEE_LLM_API_ENDPOINT COGNEE_LLM_ENDPOINT
+    unset COGNEE_EMBEDDING_API_PROVIDER COGNEE_EMBEDDING_PROVIDER COGNEE_EMBEDDING_API_KEY COGNEE_EMBEDDING_API_ENDPOINT COGNEE_EMBEDDING_ENDPOINT COGNEE_EMBEDDING_API_MODEL COGNEE_EMBEDDING_MODEL COGNEE_EMBEDDING_DIMENSIONS
     if [ -f "$CONFIG_ENV" ]; then
         # shellcheck source=/dev/null
         if ! source "$CONFIG_ENV" >/dev/null; then
@@ -125,25 +127,38 @@ services_compose() (
             return 1
         fi
     fi
-    export MCPKIT_NEO4J_URI MCPKIT_NEO4J_USER MCPKIT_NEO4J_PASSWORD MCPKIT_NEO4J_DATABASE MCPKIT_OPENAI_API_KEY
-    export MCPKIT_GRAPHITI_MODEL MCPKIT_GRAPHITI_EMBEDDER_MODEL MCPKIT_GRAPHITI_GROUP_ID
-    export MCPKIT_COGNEE_LLM_PROVIDER MCPKIT_COGNEE_LLM_API_KEY MCPKIT_COGNEE_LLM_MODEL MCPKIT_COGNEE_LLM_ENDPOINT
-    export MCPKIT_COGNEE_EMBEDDING_PROVIDER MCPKIT_COGNEE_EMBEDDING_API_KEY MCPKIT_COGNEE_EMBEDDING_MODEL MCPKIT_COGNEE_EMBEDDING_DIMENSIONS
+    # OPENAI_API_KEY from older shared-key configs remains ignored. The
+    # generic LLM_API_* values are explicit defaults overridden per consumer.
+    unset OPENAI_API_KEY
+    export MCPKIT_NEO4J_URI MCPKIT_NEO4J_USER MCPKIT_NEO4J_PASSWORD MCPKIT_NEO4J_DATABASE
+    export MCPKIT_GRAPHITI_API_KEY MCPKIT_GRAPHITI_API_ENDPOINT MCPKIT_GRAPHITI_API_MODEL MCPKIT_GRAPHITI_EMBEDDER_MODEL MCPKIT_GRAPHITI_GROUP_ID
+    export MCPKIT_COGNEE_LLM_API_PROVIDER MCPKIT_COGNEE_LLM_API_KEY MCPKIT_COGNEE_LLM_API_MODEL MCPKIT_COGNEE_LLM_API_ENDPOINT
+    export MCPKIT_COGNEE_EMBEDDING_API_PROVIDER MCPKIT_COGNEE_EMBEDDING_API_KEY MCPKIT_COGNEE_EMBEDDING_API_ENDPOINT MCPKIT_COGNEE_EMBEDDING_API_MODEL MCPKIT_COGNEE_EMBEDDING_DIMENSIONS
     MCPKIT_NEO4J_URI="$(container_uri "${NEO4J_URI:-bolt://localhost:7687}")"
     MCPKIT_NEO4J_USER="${NEO4J_USERNAME:-${NEO4J_USER:-neo4j}}"
     MCPKIT_NEO4J_PASSWORD="${NEO4J_PASSWORD:-mcp-neo4j-pass}"
     MCPKIT_NEO4J_DATABASE="${NEO4J_DATABASE:-neo4j}"
-    MCPKIT_OPENAI_API_KEY="$(credential_value "${OPENAI_API_KEY:-}")"
-    MCPKIT_GRAPHITI_MODEL="${GRAPHITI_MODEL:-gpt-4o-mini}"
+    local graphiti_api_key cognee_llm_api_key cognee_embedding_api_key
+    graphiti_api_key="$(credential_value "${GRAPHITI_API_KEY:-}")"
+    [ -n "$graphiti_api_key" ] || graphiti_api_key="$(credential_value "${LLM_API_KEY:-}")"
+    cognee_llm_api_key="$(credential_value "${COGNEE_LLM_API_KEY:-}")"
+    [ -n "$cognee_llm_api_key" ] || cognee_llm_api_key="$(credential_value "${LLM_API_KEY:-}")"
+    cognee_embedding_api_key="$(credential_value "${COGNEE_EMBEDDING_API_KEY:-}")"
+    [ -n "$cognee_embedding_api_key" ] || cognee_embedding_api_key="$(credential_value "${LLM_API_KEY:-}")"
+
+    MCPKIT_GRAPHITI_API_KEY="$graphiti_api_key"
+    MCPKIT_GRAPHITI_API_ENDPOINT="${GRAPHITI_API_ENDPOINT:-${GRAPHITI_BASE_URL:-${LLM_API_ENDPOINT:-https://api.openai.com/v1}}}"
+    MCPKIT_GRAPHITI_API_MODEL="${GRAPHITI_API_MODEL:-${GRAPHITI_MODEL:-${LLM_API_MODEL:-gpt-4o-mini}}}"
     MCPKIT_GRAPHITI_EMBEDDER_MODEL="${GRAPHITI_EMBEDDER_MODEL:-text-embedding-3-small}"
     MCPKIT_GRAPHITI_GROUP_ID="${GRAPHITI_GROUP_ID:-multfinite-mcp-kit-global}"
-    MCPKIT_COGNEE_LLM_PROVIDER="${COGNEE_LLM_PROVIDER:-openai}"
-    MCPKIT_COGNEE_LLM_API_KEY="$(credential_value "${COGNEE_LLM_API_KEY:-$MCPKIT_OPENAI_API_KEY}")"
-    MCPKIT_COGNEE_LLM_MODEL="${COGNEE_LLM_MODEL:-gpt-4o-mini}"
-    MCPKIT_COGNEE_LLM_ENDPOINT="${COGNEE_LLM_ENDPOINT:-}"
-    MCPKIT_COGNEE_EMBEDDING_PROVIDER="${COGNEE_EMBEDDING_PROVIDER:-openai}"
-    MCPKIT_COGNEE_EMBEDDING_API_KEY="$(credential_value "${COGNEE_EMBEDDING_API_KEY:-$MCPKIT_OPENAI_API_KEY}")"
-    MCPKIT_COGNEE_EMBEDDING_MODEL="${COGNEE_EMBEDDING_MODEL:-text-embedding-3-small}"
+    MCPKIT_COGNEE_LLM_API_PROVIDER="${COGNEE_LLM_API_PROVIDER:-${COGNEE_LLM_PROVIDER:-${LLM_API_PROVIDER:-openai}}}"
+    MCPKIT_COGNEE_LLM_API_KEY="$cognee_llm_api_key"
+    MCPKIT_COGNEE_LLM_API_MODEL="${COGNEE_LLM_API_MODEL:-${COGNEE_LLM_MODEL:-${LLM_API_MODEL:-gpt-4o-mini}}}"
+    MCPKIT_COGNEE_LLM_API_ENDPOINT="${COGNEE_LLM_API_ENDPOINT:-${COGNEE_LLM_ENDPOINT:-${LLM_API_ENDPOINT:-https://api.openai.com/v1}}}"
+    MCPKIT_COGNEE_EMBEDDING_API_PROVIDER="${COGNEE_EMBEDDING_API_PROVIDER:-${COGNEE_EMBEDDING_PROVIDER:-${LLM_API_PROVIDER:-openai}}}"
+    MCPKIT_COGNEE_EMBEDDING_API_KEY="$cognee_embedding_api_key"
+    MCPKIT_COGNEE_EMBEDDING_API_ENDPOINT="${COGNEE_EMBEDDING_API_ENDPOINT:-${COGNEE_EMBEDDING_ENDPOINT:-${LLM_API_ENDPOINT:-https://api.openai.com/v1}}}"
+    MCPKIT_COGNEE_EMBEDDING_API_MODEL="${COGNEE_EMBEDDING_API_MODEL:-${COGNEE_EMBEDDING_MODEL:-text-embedding-3-small}}"
     MCPKIT_COGNEE_EMBEDDING_DIMENSIONS="${COGNEE_EMBEDDING_DIMENSIONS:-1536}"
     docker compose -p "$SERVICES_PROJECT" -f "$SERVICES_COMPOSE" "$@"
 )
@@ -210,6 +225,33 @@ start_services() {
     info "Graphiti, Cognee, GitHub и Google Drive могут требовать ключи/авторизацию; подробности в README."
 }
 
+# The upstream MetaMCP image can persist ERROR after a transient startup issue
+# (for example, uv cache permissions or kit sidecar DNS before networks attach)
+# and older images then refuse to retry. Once dependencies and networks are
+# ready, clear only the kit's shared default servers so the next request retries.
+reset_kit_server_errors() {
+    local recovered
+    if ! recovered=$(compose exec -T app sh -c \
+        'exec psql --dbname="$DATABASE_URL" -X -v ON_ERROR_STOP=1 -qAt' <<'SQL'
+UPDATE mcp_servers
+SET error_status = 'NONE'
+WHERE user_id IS NULL
+  AND error_status = 'ERROR'
+  AND name IN (
+      'neo4j-global', 'qdrant-global', 'fetch', 'duckduckgo',
+      'graphiti', 'cognee', 'memory-bank-mcp', 'gdrive'
+  )
+RETURNING name;
+SQL
+    ); then
+        error "Не удалось сбросить устаревший Error Status у kit-серверов."
+        return 1
+    fi
+    if [ -n "$recovered" ]; then
+        info "Сброшен устаревший Error Status: ${recovered//$'\n'/, }. Повторное подключение произойдёт при следующем запросе."
+    fi
+}
+
 start_storage() {
     header "Вспомогательные БД"
     local name running
@@ -245,6 +287,127 @@ wait_for_metamcp() {
         elapsed=$((elapsed + 2))
     done
     success "MetaMCP запущен, миграции завершены"
+}
+
+load_public_urls() {
+    local encoded
+    if [ ! -f "$CONFIG_ENV" ]; then
+        error "Не найден $CONFIG_ENV. Сначала выполните install-global.sh."
+        return 1
+    fi
+    if ! encoded=$(
+        (
+            unset APP_URL NEXT_PUBLIC_APP_URL
+            # shellcheck source=/dev/null
+            source "$CONFIG_ENV" >/dev/null || exit 1
+            printf '%s\n' "$(printf '%s' "${APP_URL:-}" | base64 | tr -d '\n')"
+            printf '%s\n' "$(printf '%s' "${NEXT_PUBLIC_APP_URL:-}" | base64 | tr -d '\n')"
+        )
+    ); then
+        error "Не удалось прочитать URL MetaMCP из $CONFIG_ENV"
+        return 1
+    fi
+    local -a urls
+    mapfile -t urls <<< "$encoded"
+    CONFIG_APP_URL="$(printf '%s' "${urls[0]:-}" | base64 -d)"
+    CONFIG_NEXT_PUBLIC_APP_URL="$(printf '%s' "${urls[1]:-}" | base64 -d)"
+    # Upstream Compose feeds APP_URL to both the server and NEXT_PUBLIC_APP_URL;
+    # keep one canonical origin even if a stale, different frontend value exists.
+    if [ -n "$CONFIG_APP_URL" ]; then
+        CONFIG_NEXT_PUBLIC_APP_URL="$CONFIG_APP_URL"
+    elif [ -n "$CONFIG_NEXT_PUBLIC_APP_URL" ]; then
+        CONFIG_APP_URL="$CONFIG_NEXT_PUBLIC_APP_URL"
+    fi
+}
+
+set_metamcp_url() {
+    local key="$1" value="$2" escaped
+    if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+        error "$key не должен содержать переносы строк"
+        return 1
+    fi
+    if grep -Fxq -- "$key=$value" "$METAMCP_DIR/.env"; then
+        return 0
+    fi
+    escaped="$(printf '%s' "$value" | sed 's/[&|]/\\&/g')"
+    if grep -q "^${key}=" "$METAMCP_DIR/.env"; then
+        sed -i "s|^${key}=.*|${key}=${escaped}|" "$METAMCP_DIR/.env"
+    else
+        printf '%s=%s\n' "$key" "$value" >> "$METAMCP_DIR/.env"
+    fi
+    chmod 600 "$METAMCP_DIR/.env"
+    META_URL_CHANGED=true
+}
+
+sync_metamcp_public_urls() {
+    META_URL_CHANGED=false
+    load_public_urls || return 1
+    if [ -z "$CONFIG_APP_URL" ] && [ -z "$CONFIG_NEXT_PUBLIC_APP_URL" ]; then
+        info "APP_URL/NEXT_PUBLIC_APP_URL не заданы в kit .env; MetaMCP .env оставлен без изменений."
+        return 0
+    fi
+    [ -z "$CONFIG_APP_URL" ] || set_metamcp_url APP_URL "$CONFIG_APP_URL" || return 1
+    [ -z "$CONFIG_NEXT_PUBLIC_APP_URL" ] || set_metamcp_url NEXT_PUBLIC_APP_URL "$CONFIG_NEXT_PUBLIC_APP_URL" || return 1
+}
+
+# Compose reads the MetaMCP project .env on the host and injects these values
+# into the container environment. Check the running container too: its env may
+# be stale even when the host .env already contains the desired URL.
+metamcp_app_public_urls_stale() {
+    local app_id="$1" app_env
+    if [ -z "$CONFIG_APP_URL" ] && [ -z "$CONFIG_NEXT_PUBLIC_APP_URL" ]; then
+        return 1
+    fi
+    app_env="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$app_id" 2>/dev/null)" || return 0
+    if [ -n "$CONFIG_APP_URL" ] && ! grep -Fqx -- "APP_URL=$CONFIG_APP_URL" <<< "$app_env"; then
+        return 0
+    fi
+    if [ -n "$CONFIG_NEXT_PUBLIC_APP_URL" ] && ! grep -Fqx -- "NEXT_PUBLIC_APP_URL=$CONFIG_NEXT_PUBLIC_APP_URL" <<< "$app_env"; then
+        return 0
+    fi
+    return 1
+}
+
+ensure_uv_cache_permissions() {
+    local writable_test='test -w /home/nextjs/.cache/uv && { [ ! -e /home/nextjs/.cache/uv/CACHEDIR.TAG ] || test -w /home/nextjs/.cache/uv/CACHEDIR.TAG; }'
+    # Older MetaMCP images/containers may have initialized the named uv cache
+    # volume as root. Probe as the image's runtime user; only repair ownership
+    # when needed, then keep the app running unprivileged as usual.
+    if compose run --rm -T --no-deps --user 1001:1001 --entrypoint sh app -c "$writable_test" >/dev/null 2>&1; then
+        return 0
+    fi
+    info "Исправление владельца uv cache для пользователя MetaMCP..."
+    compose run --rm -T --no-deps --user 0:0 --entrypoint sh app -c \
+        'chown -R 1001:1001 /home/nextjs/.cache/uv' || return 1
+}
+
+cmd_apply_metamcp_config() {
+    check_docker
+    [ -f "$METAMCP_DIR/.env" ] || { error "Не найден $METAMCP_DIR/.env. Сначала выполните install-global.sh."; return 1; }
+    sync_metamcp_public_urls || return 1
+
+    local app_id
+    app_id="$(compose ps -a -q app)" || return 1
+    if [ -z "$app_id" ]; then
+        if [ "$META_URL_CHANGED" = true ]; then
+            success "URL сохранены в MetaMCP .env; контейнер приложения пока не запущен, примените их следующей командой start."
+        else
+            success "Публичные URL MetaMCP уже соответствуют kit .env; приложение ещё не запущено."
+        fi
+        return 0
+    fi
+    if [ "$META_URL_CHANGED" != true ] && ! metamcp_app_public_urls_stale "$app_id"; then
+        success "Публичные URL MetaMCP уже применены к контейнеру."
+        return 0
+    fi
+
+    ensure_uv_cache_permissions || return 1
+    warn "Для применения URL пересоздаётся только контейнер MetaMCP app; файлы в его writable layer могут быть потеряны. Named volumes не удаляются."
+    compose up -d --no-deps --force-recreate app || return 1
+    wait_for_metamcp || return 1
+    start_services || return 1
+    reset_kit_server_errors || return 1
+    success "APP_URL и NEXT_PUBLIC_APP_URL применены к MetaMCP."
 }
 
 auto_seed_mcp_config() {
@@ -306,18 +469,29 @@ auto_seed_mcp_config() {
 cmd_start() {
     check_docker
     load_seed_config
+    sync_metamcp_public_urls || return 1
     start_storage
 
     header "MetaMCP Fullstack"
     # Starting/reinstalling must not recreate a running, manually configured
-    # MetaMCP container just because the Compose file or image changed.
+    # MetaMCP container just because the Compose file or image changed. A
+    # changed public URL is the exception: Compose only passes updated env to
+    # a newly created app container, so recreate app alone after ensuring deps.
+    ensure_uv_cache_permissions || return 1
+    local app_id
+    app_id="$(compose ps -a -q app)" || return 1
     compose up -d --no-recreate
+    if [ -n "$app_id" ] && metamcp_app_public_urls_stale "$app_id"; then
+        warn "APP_URL в окружении контейнера отличается от kit .env: пересоздаётся только MetaMCP app; сохраните ручные файлы из writable layer."
+        compose up -d --no-deps --force-recreate app || return 1
+    fi
     wait_for_metamcp
     auto_seed_mcp_config false
     if ! start_services; then
         error "Дополнительные MCP-сервисы не запущены; записи MetaMCP сохранены. Исправьте ошибку и повторите start."
         return 1
     fi
+    reset_kit_server_errors || return 1
     cmd_status
 }
 
@@ -363,11 +537,12 @@ cmd_status() {
 case "${1:-start}" in
     start)          cmd_start ;;
     seed)           cmd_seed ;;
-    apply-services) cmd_apply_services ;;
-    stop)           cmd_stop ;;
+    apply-services)       cmd_apply_services ;;
+    apply-metamcp-config) cmd_apply_metamcp_config ;;
+    stop)                 cmd_stop ;;
     restart)        cmd_stop; sleep 2; cmd_start ;;
     status)         cmd_status ;;
     logs)           compose logs -f app ;;
     services-logs)  services_compose logs -f ;;
-    *) error "Использование: $0 {start|seed|apply-services|stop|restart|status|logs|services-logs}"; exit 2 ;;
+    *) error "Использование: $0 {start|seed|apply-services|apply-metamcp-config|stop|restart|status|logs|services-logs}"; exit 2 ;;
 esac

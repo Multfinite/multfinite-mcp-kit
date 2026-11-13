@@ -1,4 +1,8 @@
 
+## Конфигурация
+
+Подробный справочник по всем `.env`, `mcp-local.json`, переменным Compose и их применению: [docs/configuration.md](docs/configuration.md).
+
 ## The idea
 
 ### Structure
@@ -37,11 +41,7 @@
 
 ### MetaMCP
 
-**MetaMCP** *.env*  
-```
-APP_URL=${YOUR_PUBLIC_DOMAIN}
-NEXT_PUBLIC_APP_URL=http://localhost:12008
-```
+For a public URL, set `APP_URL=https://mcp.example.com` in `~/mcp-global/config/.env`. Every `bash linux/run-global.sh start` syncs it (and `NEXT_PUBLIC_APP_URL`) to MetaMCP's Compose `.env`, which injects them into the container environment; the script checks the running app's environment and recreates only the app if it is stale. To apply immediately without waiting for the next start, run `bash linux/run-global.sh apply-metamcp-config`. Save any manual files in the app container's writable layer before a recreation. A public URL also requires DNS, TLS/reverse proxy or reachable port, and suitable firewall rules. See [the complete configuration reference](docs/configuration.md).
 
 ## Installation and run
 
@@ -53,7 +53,7 @@ Requirements: Debian/Ubuntu (or WSL), Docker accessible without `sudo`, the Dock
 bash linux/install-global.sh
 ```
 
-The installer starts Neo4j, Qdrant and MetaMCP, waits for its migrations, then registers **all 11 servers in the Global list** as shared servers. New namespaces and endpoints are organized as follows:
+On first install, if Docker is newly adding your user to the `docker` group, the script exits with instructions to restart the WSL session and rerun it; group changes do not apply to the current shell. It does not invoke an interactive `newgrp` shell. The installer then starts Neo4j, Qdrant and MetaMCP, waits for its migrations, and registers **all 11 servers in the Global list** as shared servers. New namespaces and endpoints are organized as follows:
 
 | Namespace | Servers | Protected endpoint name |
 | --- | --- | --- |
@@ -78,13 +78,13 @@ Automatic seeding runs once per version per MetaMCP database; subsequent starts 
 bash linux/run-global.sh seed
 ```
 
-`start`, `stop`, `restart`, `status`, `logs`, `services-logs`, and `apply-services` are also available as `bash linux/run-global.sh <command>`. Normal starts never recreate an existing MetaMCP container or sidecar; stop/restart stops rather than removes containers, preserving their writable layers. Consequently, changed Compose settings are **not** automatically applied: back up any manual files before deliberately recreating a container yourself. `METAMCP_START_TIMEOUT` controls the readiness wait in seconds (default 180).
+`start`, `stop`, `restart`, `status`, `logs`, `services-logs`, `apply-services`, and `apply-metamcp-config` are available as `bash linux/run-global.sh <command>`. Normal starts do not recreate an existing MetaMCP container or sidecar unless a public URL changed; then only the app is recreated to apply its new environment. Starts also check the MetaMCP `uv` cache volume and repair its ownership if an older container left it unwritable, without running the app as root. Once the kit sidecars and their Docker networks are ready, `start` clears stale `Error Status` flags only for the kit's shared default servers, allowing older MetaMCP images to retry connections after a transient startup failure. `stop`/`restart` stop rather than remove containers. `apply-services` deliberately recreates only Graphiti/Cognee. Back up any manual files in the app's writable layer before applying a changed public URL. `METAMCP_START_TIMEOUT` controls the readiness wait in seconds (default 180).
 
 #### Server prerequisites and credentials
 
 The installer creates `~/mcp-global/config/.env` only if it does not exist; edit it using shell-compatible quoting and keep it private. To set a different initial Neo4j password or provider keys before the first install, create this file with the desired variables beforehand; omitted variables use the defaults. Changes to an already registered server must be made in the MetaMCP UI; rerunning `seed` does not overwrite it.
 
-- **Graphiti and Cognee:** the default setup uses OpenAI for the LLM and embeddings. Set `OPENAI_API_KEY` in `~/mcp-global/config/.env`, then run `bash linux/run-global.sh apply-services`. Without provider keys these two sidecars wait instead of serving tools. Graphiti uses the configured `NEO4J_URI`, `NEO4J_USER`/`NEO4J_USERNAME`, `NEO4J_PASSWORD`, and optionally `NEO4J_DATABASE` (default `neo4j`); `GRAPHITI_MODEL`, `GRAPHITI_EMBEDDER_MODEL`, and `GRAPHITI_GROUP_ID` (default `multfinite-mcp-kit-global`) are optional. Graphiti creates its indexes in the configured Neo4j database, and its tools can modify or delete graph data: use a separate existing database/instance if existing graphs must be isolated. For Cognee, optional `COGNEE_LLM_PROVIDER`, `COGNEE_LLM_API_KEY`, `COGNEE_LLM_MODEL`, `COGNEE_LLM_ENDPOINT`, `COGNEE_EMBEDDING_PROVIDER`, `COGNEE_EMBEDDING_API_KEY`, `COGNEE_EMBEDDING_MODEL`, and `COGNEE_EMBEDDING_DIMENSIONS` override the defaults. Use matching model/dimensions and a provider supported by Cognee. `apply-services` explicitly recreates **only** the two kit-owned Graphiti/Cognee containers, keeping Neo4j and Cognee volumes; back up any manual files in those containers' writable layers first. It does not edit MetaMCP's records.
+- **Graphiti and Cognee:** configure APIs with a consistent `SERVICE_API_*` naming pattern. Global LLM defaults are `LLM_API_ENDPOINT`, `LLM_API_KEY`, `LLM_API_MODEL`, and `LLM_API_PROVIDER`; per-consumer settings override them when non-empty: `GRAPHITI_API_ENDPOINT` / `GRAPHITI_API_KEY` / `GRAPHITI_API_MODEL`, and `COGNEE_LLM_API_ENDPOINT` / `COGNEE_LLM_API_KEY` / `COGNEE_LLM_API_MODEL` / `COGNEE_LLM_API_PROVIDER`. Cognee embeddings have their own `COGNEE_EMBEDDING_API_ENDPOINT`, `COGNEE_EMBEDDING_API_KEY`, `COGNEE_EMBEDDING_API_MODEL`, and `COGNEE_EMBEDDING_API_PROVIDER`; the model is specific to embeddings. For example, set `LLM_API_ENDPOINT=https://llm-gateway.example/v1` and `LLM_API_KEY='shared-provider-key'`, then override just `GRAPHITI_API_KEY='graphiti-specific-key'` if Graphiti uses a separate credential. Old service-specific names remain accepted as aliases; the old shared `OPENAI_API_KEY` is ignored. Then run `bash linux/run-global.sh apply-services`. If a required key is absent, the sidecar waits instead of serving tools. Graphiti's `GRAPHITI_EMBEDDER_MODEL` and `GRAPHITI_GROUP_ID` (default `multfinite-mcp-kit-global`) remain additional service parameters; `NEO4J_URI`, `NEO4J_USER`/`NEO4J_USERNAME`, `NEO4J_PASSWORD`, and optionally `NEO4J_DATABASE` (default `neo4j`) configure its database. Graphiti's tools can modify or delete graph data: use a separate existing database/instance to isolate it. Cognee supports its own provider settings and embedding dimensions; use provider-supported models and matching dimensions. `apply-services` recreates **only** the two kit-owned Graphiti/Cognee containers, keeping data volumes; back up manual files in their writable layers first. It does not edit MetaMCP records.
 - **GitHub:** the official remote GitHub MCP server at `https://api.githubcopilot.com/mcp/` needs a suitable GitHub token and service access. If `GITHUB_PERSONAL_ACCESS_TOKEN` is set before the first seed it is stored as the server's bearer token; otherwise add it to `github-mcp-server` in the MetaMCP UI after installation. Grant only the permissions needed.
 - **Context7:** works without a key subject to its limits. `CONTEXT7_API_KEY` is optional; set it before first seed or add it to the server's environment in the UI later.
 - **Google Drive:** requires a Google OAuth client and a separate browser authorization, not `GOOGLE_APPLICATION_CREDENTIALS`. Follow the [upstream setup](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive) to enable the Drive API and create a Desktop OAuth client. On a machine with Node.js/npm and a browser, obtain the server's token file (choose your actual OAuth-client JSON path):

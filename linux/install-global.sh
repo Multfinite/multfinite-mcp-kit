@@ -77,14 +77,17 @@ EOF
 sudo apt update
 sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
-sudo groupadd docker
-sudo usermod -aG docker $USER
-newgrp docker
+getent group docker >/dev/null || error "После установки Docker не найдена группа docker. Проверьте установку docker-ce."
+sudo usermod -aG docker "$USER"
 
-#
+# `newgrp docker` starts an interactive shell when called from an installer,
+# making the script appear to hang here. Group changes apply to new sessions.
+if ! id -nG | tr ' ' '\n' | grep -qx docker; then
+    error "Пользователь $USER добавлен в группу docker. Полностью перезапустите сессию WSL командой wsl.exe --shutdown, откройте Debian снова и повторите запуск linux/install-global.sh."
+fi
 
 if ! command -v docker &>/dev/null || ! docker info &>/dev/null; then
-    error "Docker недоступен текущему пользователю. Запустите Docker и настройте доступ без sudo."
+    error "Docker daemon недоступен. Проверьте, что Docker запущен и доступен из WSL, затем повторите установку."
 fi
 success "Docker работает ($(docker --version))"
 
@@ -116,9 +119,32 @@ else
 
     AUTH_SECRET="$(openssl rand -hex 32)"
     PG_PASS="m3t4mcp_pass_$(openssl rand -hex 16)"
-    sed -i \
-        -e 's|^APP_URL=.*|APP_URL=http://localhost:12008|' \
-        -e 's|^NEXT_PUBLIC_APP_URL=.*|NEXT_PUBLIC_APP_URL=http://localhost:12008|' \
+    META_APP_URL='http://localhost:12008'
+    META_NEXT_PUBLIC_APP_URL="$META_APP_URL"
+    if [ -f "$CONFIG_DIR/.env" ]; then
+        if ! URL_VALUES=$( (
+            unset APP_URL NEXT_PUBLIC_APP_URL
+            # shellcheck source=/dev/null
+            source "$CONFIG_DIR/.env" >/dev/null || exit 1
+            printf '%s\n' "$(printf '%s' "${APP_URL:-}" | base64 | tr -d '\n')"
+            printf '%s\n' "$(printf '%s' "${NEXT_PUBLIC_APP_URL:-}" | base64 | tr -d '\n')"
+        ) ); then
+            error "Не удалось прочитать $CONFIG_DIR/.env"
+        fi
+        mapfile -t URL_VALUES <<< "$URL_VALUES"
+        if [ -n "${URL_VALUES[0]:-}" ]; then
+            META_APP_URL="$(printf '%s' "${URL_VALUES[0]}" | base64 -d)"
+        elif [ -n "${URL_VALUES[1]:-}" ]; then
+            META_APP_URL="$(printf '%s' "${URL_VALUES[1]}" | base64 -d)"
+        fi
+        META_NEXT_PUBLIC_APP_URL="$META_APP_URL"
+    fi
+    sed_escape() { printf '%s' "$1" | sed 's/[&|]/\\&/g'; }
+    META_APP_URL_ESCAPED="$(sed_escape "$META_APP_URL")"
+    META_NEXT_PUBLIC_APP_URL_ESCAPED="$(sed_escape "$META_NEXT_PUBLIC_APP_URL")"
+    sed -i \\
+        -e "s|^APP_URL=.*|APP_URL=${META_APP_URL_ESCAPED}|" \\
+        -e "s|^NEXT_PUBLIC_APP_URL=.*|NEXT_PUBLIC_APP_URL=${META_NEXT_PUBLIC_APP_URL_ESCAPED}|" \\
         -e "s|^BETTER_AUTH_SECRET=.*|BETTER_AUTH_SECRET=${AUTH_SECRET}|" \
         -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${PG_PASS}|" \
         -e 's|^BOOTSTRAP_USER_EMAIL=.*|BOOTSTRAP_USER_EMAIL=|' \
@@ -144,17 +170,34 @@ header "Конфигурация ключей API (.env)"
 GLOBAL_ENV="${CONFIG_DIR}/.env"
 
 if [ ! -f "$GLOBAL_ENV" ]; then
-    cat > "$GLOBAL_ENV" << EOF
-# ── OpenAI: Graphiti and Cognee (LLM + embeddings) ─────
-# Add your own key; empty credentials are not usable.
-OPENAI_API_KEY=
-# GRAPHITI_MODEL=gpt-4o-mini
+    # Keep this heredoc quoted: examples/comments contain backticks and must not execute.
+    cat > "$GLOBAL_ENV" <<'EOF'
+# Global defaults for LLM APIs. Per-service values below override these.
+LLM_API_ENDPOINT=https://api.openai.com/v1
+LLM_API_KEY=
+LLM_API_MODEL=gpt-4o-mini
+LLM_API_PROVIDER=openai
+
+# Graphiti: its LLM and embeddings share this API endpoint/key/model.
+# GRAPHITI_API_ENDPOINT=
+# GRAPHITI_API_KEY=
+# GRAPHITI_API_MODEL=gpt-4o-mini
 # GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small
 # GRAPHITI_GROUP_ID=multfinite-mcp-kit-global
 
-# Cognee can use different providers/keys; see README for all options.
+# Cognee LLM can override every global API default independently.
+# COGNEE_LLM_API_ENDPOINT=
 # COGNEE_LLM_API_KEY=
-# COGNEE_EMBEDDING_API_KEY=
+# COGNEE_LLM_API_MODEL=gpt-4o-mini
+# COGNEE_LLM_API_PROVIDER=openai
+
+# Cognee embeddings are independently configurable; API endpoint/key/provider
+# inherit global values when blank, while the embedding model remains specific.
+COGNEE_EMBEDDING_API_ENDPOINT=
+COGNEE_EMBEDDING_API_KEY=
+COGNEE_EMBEDDING_API_MODEL=text-embedding-3-small
+COGNEE_EMBEDDING_API_PROVIDER=openai
+COGNEE_EMBEDDING_DIMENSIONS=1536
 
 # ── Neo4j & Qdrant ──────────────────────────────────────
 NEO4J_URI=bolt://localhost:7687
@@ -162,6 +205,13 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=mcp-neo4j-pass
 # NEO4J_DATABASE=neo4j  # Graphiti's database; must already exist.
 QDRANT_URL=http://localhost:6333
+
+# ── Public MetaMCP address ───────────────────────────────
+# Set the public origin (normally HTTPS) and apply it to MetaMCP with
+# `bash linux/run-global.sh apply-metamcp-config`.
+APP_URL=
+# If omitted, NEXT_PUBLIC_APP_URL inherits APP_URL.
+NEXT_PUBLIC_APP_URL=
 
 # ── Integrations ────────────────────────────────────────
 GITHUB_PERSONAL_ACCESS_TOKEN=
