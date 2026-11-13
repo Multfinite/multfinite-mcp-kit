@@ -405,12 +405,21 @@ auto_seed_mcp_config() {
 cmd_start() {
     check_docker
     load_seed_config
+    sync_metamcp_public_urls || return 1
     start_storage
 
     header "MetaMCP Fullstack"
     # Starting/reinstalling must not recreate a running, manually configured
-    # MetaMCP container just because the Compose file or image changed.
+    # MetaMCP container just because the Compose file or image changed. A
+    # changed public URL is the exception: Compose only passes updated env to
+    # a newly created app container, so recreate app alone after ensuring deps.
+    local app_id
+    app_id="$(compose ps -a -q app)" || return 1
     compose up -d --no-recreate
+    if [ "$META_URL_CHANGED" = true ] && [ -n "$app_id" ]; then
+        warn "APP_URL изменился: пересоздаётся только MetaMCP app; сохраните ручные файлы из writable layer."
+        compose up -d --no-deps --force-recreate app || return 1
+    fi
     wait_for_metamcp
     auto_seed_mcp_config false
     if ! start_services; then

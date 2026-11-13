@@ -268,6 +268,7 @@ assert_contains "$HOME/mcp-global/config/.env" '# COGNEE_LLM_API_ENDPOINT=' 'Cog
 assert_contains "$HOME/mcp-global/config/.env" 'COGNEE_EMBEDDING_API_ENDPOINT=' 'Cognee embedding endpoint can be overridden'
 assert_contains "$HOME/mcp-global/config/.env" 'APP_URL=' 'public MetaMCP URL is configurable from the kit environment'
 assert_not_contains "$HOME/mcp-global/config/.env" 'your-openai-key-here' 'new installs must not send fake keys'
+assert_not_contains "$HOME/mcp-global/config/.env" "$(printf '\033')" 'config template contains no executed ANSI output'
 assert_contains "$MOCK_LOG" 'compose up -d --no-recreate' 'MetaMCP is not recreated on start'
 assert_contains "$MOCK_LOG" 'compose -p multfinite-mcp-kit-global -f ' 'separate Compose project used'
 assert_contains "$MOCK_LOG" ' up -d --no-recreate ' 'sidecars are not recreated on start'
@@ -593,7 +594,14 @@ assert_contains "$HOME/mcp-global/metamcp/.env" 'APP_URL=https://mcp.example.tes
 assert_contains "$HOME/mcp-global/metamcp/.env" 'NEXT_PUBLIC_APP_URL=https://mcp.example.test' 'frontend URL follows APP_URL when omitted'
 assert_contains "$MOCK_LOG" 'compose up -d --no-deps --force-recreate app' 'URL update explicitly recreates only app'
 assert_contains "$TMP/url-apply.out" 'APP_URL и NEXT_PUBLIC_APP_URL применены' 'URL update reports success'
-printf 'ok - public URL sync and explicit MetaMCP app recreation\n'
+# A normal start must also sync a later URL edit and recreate only app.
+printf '\nAPP_URL=https://mcp-auto.example.test\n' >> "$HOME/mcp-global/config/.env"
+: > "$MOCK_LOG"
+bash "$ROOT/linux/run-global.sh" start > "$TMP/url-start-auto.out" 2>&1 || { cat "$TMP/url-start-auto.out" >&2; fail 'automatic URL sync on start failed'; }
+assert_contains "$HOME/mcp-global/metamcp/.env" 'APP_URL=https://mcp-auto.example.test' 'normal start syncs kit APP_URL automatically'
+assert_contains "$HOME/mcp-global/metamcp/.env" 'NEXT_PUBLIC_APP_URL=https://mcp-auto.example.test' 'normal start syncs frontend URL automatically'
+assert_contains "$MOCK_LOG" 'up -d --no-deps --force-recreate app' 'normal start recreates app only when URL changes'
+printf 'ok - public URL sync and automatic app recreation on start\n'
 
 # A pre-created kit .env also supplies the public address when the installer
 # creates MetaMCP's .env for the first time.
@@ -605,7 +613,9 @@ EOF
 bash "$ROOT/linux/install-global.sh" > "$TMP/initial-url-install.out" 2>&1 || { cat "$TMP/initial-url-install.out" >&2; fail 'install with preconfigured APP_URL failed'; }
 assert_contains "$HOME/mcp-global/metamcp/.env" 'APP_URL=https://initial.example.test' 'installer seeds APP_URL from pre-existing kit config'
 assert_contains "$HOME/mcp-global/metamcp/.env" 'NEXT_PUBLIC_APP_URL=https://initial.example.test' 'installer aligns frontend URL with APP_URL'
-printf 'ok - initial installer carries the configured public origin\n'
+assert_not_contains "$HOME/mcp-global/config/.env" "$(printf '\033')" 'installer template does not expand comments as shell commands'
+assert_not_contains "$MOCK_LOG" 'force-recreate app' 'installer template generation does not execute documented commands'
+printf 'ok - initial installer carries the configured public origin without executing template comments\n'
 
 reset_db
 prepare_existing
