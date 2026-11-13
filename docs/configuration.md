@@ -285,4 +285,3 @@ Compose объявляет изолированные Docker-сети `multfinit
 - Публичный URL MetaMCP: задайте `APP_URL` / `NEXT_PUBLIC_APP_URL` в `~/mcp-global/config/.env` и выполните `bash linux/run-global.sh apply-metamcp-config`. Секрет auth и параметры PostgreSQL настраиваются в `~/mcp-global/metamcp/.env` согласно правилам upstream; заранее сохраните ручные файлы из writable layer перед пересозданием app.
 - Windows: использовать `run-local.ps1 configure` для сети/регистрации либо редактировать `config\local-settings.json`; ключ Obsidian и DSN DBHub — в `config\private\secrets.json`. После изменений выполнить `restart`. Старые `.env` и `mcp-local.json` автоматически не обновляют действующие настройки.
 - Установщик Linux задаёт права `600` созданным `.env`; на Windows проверьте ACL профиля пользователя. Не помещайте пароли/API-ключи в Git, публичный JSON, скриншоты, логи или команды, сохраняемые в shell history.
-
