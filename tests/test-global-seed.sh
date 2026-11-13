@@ -123,11 +123,16 @@ case "${1:-}" in
                     printf '%s' "${MCPKIT_NEO4J_DATABASE:-}" > "$MOCK_STATE/graphiti-database"
                     printf '%s' "${MCPKIT_GRAPHITI_GROUP_ID:-}" > "$MOCK_STATE/graphiti-group"
                     printf '%s' "${MCPKIT_GRAPHITI_API_KEY:-}" > "$MOCK_STATE/graphiti-openai"
-                    printf '%s' "${MCPKIT_GRAPHITI_BASE_URL:-}" > "$MOCK_STATE/graphiti-base-url"
+                    printf '%s' "${MCPKIT_GRAPHITI_API_ENDPOINT:-}" > "$MOCK_STATE/graphiti-base-url"
+                    printf '%s' "${MCPKIT_GRAPHITI_API_MODEL:-}" > "$MOCK_STATE/graphiti-model"
                     printf '%s' "${MCPKIT_COGNEE_LLM_API_KEY:-}" > "$MOCK_STATE/cognee-llm"
-                    printf '%s' "${MCPKIT_COGNEE_LLM_ENDPOINT:-}" > "$MOCK_STATE/cognee-llm-endpoint"
+                    printf '%s' "${MCPKIT_COGNEE_LLM_API_ENDPOINT:-}" > "$MOCK_STATE/cognee-llm-endpoint"
+                    printf '%s' "${MCPKIT_COGNEE_LLM_API_MODEL:-}" > "$MOCK_STATE/cognee-llm-model"
+                    printf '%s' "${MCPKIT_COGNEE_LLM_API_PROVIDER:-}" > "$MOCK_STATE/cognee-llm-provider"
                     printf '%s' "${MCPKIT_COGNEE_EMBEDDING_API_KEY:-}" > "$MOCK_STATE/cognee-embedding"
-                    printf '%s' "${MCPKIT_COGNEE_EMBEDDING_ENDPOINT:-}" > "$MOCK_STATE/cognee-embedding-endpoint"
+                    printf '%s' "${MCPKIT_COGNEE_EMBEDDING_API_ENDPOINT:-}" > "$MOCK_STATE/cognee-embedding-endpoint"
+                    printf '%s' "${MCPKIT_COGNEE_EMBEDDING_API_MODEL:-}" > "$MOCK_STATE/cognee-embedding-model"
+                    printf '%s' "${MCPKIT_COGNEE_EMBEDDING_API_PROVIDER:-}" > "$MOCK_STATE/cognee-embedding-provider"
                     ;;
                 stop|logs) exit 0 ;;
                 *) echo "Unexpected service Compose command: $*" >&2; exit 1 ;;
@@ -255,10 +260,12 @@ assert_contains "$HOME/mcp-global/metamcp/.env" 'BOOTSTRAP_USER_PASSWORD=' 'exam
 assert_not_contains "$HOME/mcp-global/metamcp/.env" 'BOOTSTRAP_USER_PASSWORD=changeme' 'example password not retained'
 assert_contains "$HOME/mcp-global/metamcp/.env" 'BOOTSTRAP_RECREATE_USER=false' 'bootstrap will not recreate users'
 assert_contains "$HOME/mcp-global/metamcp/.env" '"update":false' 'bootstrap will not overwrite edits'
-assert_contains "$HOME/mcp-global/config/.env" 'GRAPHITI_API_KEY=' 'Graphiti has its own key setting'
-assert_contains "$HOME/mcp-global/config/.env" 'GRAPHITI_BASE_URL=https://api.openai.com/v1' 'Graphiti endpoint has an explicit OpenAI-compatible base URL'
-assert_contains "$HOME/mcp-global/config/.env" 'COGNEE_LLM_ENDPOINT=https://api.openai.com/v1' 'Cognee LLM endpoint has its own base URL'
-assert_contains "$HOME/mcp-global/config/.env" 'COGNEE_EMBEDDING_ENDPOINT=https://api.openai.com/v1' 'Cognee embedding endpoint has its own base URL'
+assert_contains "$HOME/mcp-global/config/.env" 'LLM_API_ENDPOINT=https://api.openai.com/v1' 'global LLM endpoint default is configured'
+assert_contains "$HOME/mcp-global/config/.env" 'LLM_API_KEY=' 'global LLM key setting is available'
+assert_contains "$HOME/mcp-global/config/.env" 'LLM_API_MODEL=gpt-4o-mini' 'global LLM model default is configured'
+assert_contains "$HOME/mcp-global/config/.env" '# GRAPHITI_API_ENDPOINT=' 'Graphiti can override the global endpoint'
+assert_contains "$HOME/mcp-global/config/.env" '# COGNEE_LLM_API_ENDPOINT=' 'Cognee LLM can override the global endpoint'
+assert_contains "$HOME/mcp-global/config/.env" 'COGNEE_EMBEDDING_API_ENDPOINT=' 'Cognee embedding endpoint can be overridden'
 assert_contains "$HOME/mcp-global/config/.env" 'APP_URL=' 'public MetaMCP URL is configurable from the kit environment'
 assert_not_contains "$HOME/mcp-global/config/.env" 'your-openai-key-here' 'new installs must not send fake keys'
 assert_contains "$MOCK_LOG" 'compose up -d --no-recreate' 'MetaMCP is not recreated on start'
@@ -302,11 +309,11 @@ NEO4J_PASSWORD='pa$$word'"'"' with spaces; SELECT pg_sleep(99); --'
 QDRANT_URL='https://qdrant.example.test:443'
 QDRANT_API_KEY='key-with-"quotes"'
 GRAPHITI_API_KEY='graphiti-specific-secret'
-GRAPHITI_BASE_URL='https://graphiti.example.test/v1'
+GRAPHITI_API_ENDPOINT='https://graphiti.example.test/v1'
 COGNEE_LLM_API_KEY='cognee-llm-secret'
-COGNEE_LLM_ENDPOINT='https://llm.example.test/v1'
+COGNEE_LLM_API_ENDPOINT='https://llm.example.test/v1'
 COGNEE_EMBEDDING_API_KEY='cognee-embedding-secret'
-COGNEE_EMBEDDING_ENDPOINT='https://embeddings.example.test/v1'
+COGNEE_EMBEDDING_API_ENDPOINT='https://embeddings.example.test/v1'
 GITHUB_PERSONAL_ACCESS_TOKEN='github-secret-$quoted'
 CONTEXT7_API_KEY='context-secret-$quoted'
 export POSTGRES_PASSWORD=must-not-override-compose
@@ -539,8 +546,16 @@ printf 'ok - foreign Docker volumes are not adopted\n'
 # kit-owned provider containers. It must not recreate app or delete volumes.
 reset_db
 prepare_existing
+printf '\nLLM_API_KEY=global-provider-key\nLLM_API_ENDPOINT=https://global-gateway.example/v1\nLLM_API_MODEL=global-chat-model\nLLM_API_PROVIDER=global-provider\n' >> "$HOME/mcp-global/config/.env"
 bash "$ROOT/linux/run-global.sh" start > "$TMP/provider-start.out" 2>&1 || { cat "$TMP/provider-start.out" >&2; fail 'provider start failed'; }
-printf '\nGRAPHITI_API_KEY=graphiti-updated-key\nCOGNEE_LLM_API_KEY=llm-updated-key\nCOGNEE_EMBEDDING_API_KEY=embedding-updated-key\nNEO4J_DATABASE=separate-graph\nGRAPHITI_GROUP_ID=custom-group\nGRAPHITI_BASE_URL=https://graphiti-gateway.example/v1\nCOGNEE_LLM_ENDPOINT=https://llm-gateway.example/v1\nCOGNEE_EMBEDDING_ENDPOINT=https://embedding-gateway.example/v1\n' >> "$HOME/mcp-global/config/.env"
+assert_eq global-provider-key "$(cat "$MOCK_STATE/graphiti-openai")" 'global LLM key is Graphiti default'
+assert_eq https://global-gateway.example/v1 "$(cat "$MOCK_STATE/graphiti-base-url")" 'global LLM endpoint is Graphiti default'
+assert_eq global-provider-key "$(cat "$MOCK_STATE/cognee-llm")" 'global LLM key is Cognee LLM default'
+assert_eq global-provider-key "$(cat "$MOCK_STATE/cognee-embedding")" 'global API key is Cognee embedding default'
+assert_eq global-chat-model "$(cat "$MOCK_STATE/cognee-llm-model")" 'global model is Cognee LLM default'
+assert_eq global-provider "$(cat "$MOCK_STATE/cognee-llm-provider")" 'global provider is Cognee LLM default'
+assert_eq https://global-gateway.example/v1 "$(cat "$MOCK_STATE/cognee-embedding-endpoint")" 'global endpoint is Cognee embedding default'
+printf '\nGRAPHITI_API_KEY=graphiti-updated-key\nGRAPHITI_API_ENDPOINT=https://graphiti-gateway.example/v1\nGRAPHITI_API_MODEL=graphiti-chat-model\nCOGNEE_LLM_API_KEY=llm-updated-key\nCOGNEE_LLM_API_ENDPOINT=https://llm-gateway.example/v1\nCOGNEE_LLM_API_MODEL=cognee-chat-model\nCOGNEE_LLM_API_PROVIDER=cognee-provider\nCOGNEE_EMBEDDING_API_KEY=embedding-updated-key\nCOGNEE_EMBEDDING_API_ENDPOINT=https://embedding-gateway.example/v1\nCOGNEE_EMBEDDING_API_MODEL=embedding-specific-model\nCOGNEE_EMBEDDING_API_PROVIDER=embedding-provider\nNEO4J_DATABASE=separate-graph\nGRAPHITI_GROUP_ID=custom-group\n' >> "$HOME/mcp-global/config/.env"
 : > "$MOCK_LOG"
 bash "$ROOT/linux/run-global.sh" apply-services > "$TMP/provider-apply.out" 2>&1 || { cat "$TMP/provider-apply.out" >&2; fail 'provider apply failed'; }
 assert_contains "$MOCK_LOG" 'up -d --no-deps --force-recreate mcpkit-graphiti mcpkit-cognee' 'only provider services are explicitly recreated'
@@ -550,6 +565,11 @@ assert_eq graphiti-updated-key "$(cat "$MOCK_STATE/graphiti-openai")" 'Graphiti 
 assert_eq https://graphiti-gateway.example/v1 "$(cat "$MOCK_STATE/graphiti-base-url")" 'Graphiti base URL can be changed independently'
 assert_eq https://llm-gateway.example/v1 "$(cat "$MOCK_STATE/cognee-llm-endpoint")" 'Cognee LLM endpoint reaches its own client'
 assert_eq https://embedding-gateway.example/v1 "$(cat "$MOCK_STATE/cognee-embedding-endpoint")" 'Cognee embedding endpoint reaches its own client'
+assert_eq graphiti-chat-model "$(cat "$MOCK_STATE/graphiti-model")" 'Graphiti model can override the global model'
+assert_eq cognee-chat-model "$(cat "$MOCK_STATE/cognee-llm-model")" 'Cognee LLM model can override the global model'
+assert_eq cognee-provider "$(cat "$MOCK_STATE/cognee-llm-provider")" 'Cognee LLM provider can override the global provider'
+assert_eq embedding-specific-model "$(cat "$MOCK_STATE/cognee-embedding-model")" 'Cognee embedding model remains specific'
+assert_eq embedding-provider "$(cat "$MOCK_STATE/cognee-embedding-provider")" 'Cognee embedding provider can be set independently'
 assert_eq separate-graph "$(cat "$MOCK_STATE/graphiti-database")" 'Graphiti database override is passed to Compose'
 assert_eq custom-group "$(cat "$MOCK_STATE/graphiti-group")" 'Graphiti group override is passed to Compose'
 assert_eq llm-updated-key "$(cat "$MOCK_STATE/cognee-llm")" 'Cognee LLM key is configured independently'

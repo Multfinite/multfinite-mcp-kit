@@ -11,24 +11,31 @@
 Начальный вариант файла:
 
 ```dotenv
-# Graphiti: отдельный OpenAI-compatible API key и endpoint для LLM и embeddings
-GRAPHITI_API_KEY=
-GRAPHITI_BASE_URL=https://api.openai.com/v1
-GRAPHITI_MODEL=gpt-4o-mini
-GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small
-GRAPHITI_GROUP_ID=multfinite-mcp-kit-global
+# Общие значения по умолчанию для LLM API; сервисные значения ниже их переопределяют
+LLM_API_ENDPOINT=https://api.openai.com/v1
+LLM_API_KEY=
+LLM_API_MODEL=gpt-4o-mini
+LLM_API_PROVIDER=openai
 
-# Cognee: отдельная пара provider/key/endpoint/model для LLM
-COGNEE_LLM_PROVIDER=openai
-COGNEE_LLM_API_KEY=
-COGNEE_LLM_ENDPOINT=https://api.openai.com/v1
-COGNEE_LLM_MODEL=gpt-4o-mini
+# Graphiti: собственные значения необязательны; пустые наследуются от LLM_API_*
+# GRAPHITI_API_ENDPOINT=
+# GRAPHITI_API_KEY=
+# GRAPHITI_API_MODEL=gpt-4o-mini
+# GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small
+# GRAPHITI_GROUP_ID=multfinite-mcp-kit-global
 
-# Cognee: отдельная пара provider/key/endpoint/model для embeddings
-COGNEE_EMBEDDING_PROVIDER=openai
+# Cognee LLM: собственные значения необязательны; пустые наследуются от LLM_API_*
+# COGNEE_LLM_API_ENDPOINT=
+# COGNEE_LLM_API_KEY=
+# COGNEE_LLM_API_MODEL=gpt-4o-mini
+# COGNEE_LLM_API_PROVIDER=openai
+
+# Cognee embeddings: endpoint/key/provider наследуются от LLM_API_*;
+# модель и размерность специфичны для embeddings.
+COGNEE_EMBEDDING_API_ENDPOINT=
 COGNEE_EMBEDDING_API_KEY=
-COGNEE_EMBEDDING_ENDPOINT=https://api.openai.com/v1
-COGNEE_EMBEDDING_MODEL=text-embedding-3-small
+COGNEE_EMBEDDING_API_MODEL=text-embedding-3-small
+COGNEE_EMBEDDING_API_PROVIDER=openai
 COGNEE_EMBEDDING_DIMENSIONS=1536
 
 # Публичный адрес MetaMCP (не адрес MCP endpoint)
@@ -50,17 +57,17 @@ GITHUB_PERSONAL_ACCESS_TOKEN=
 CONTEXT7_API_KEY=
 
 # Переопределения Cognee (необязательны; значения по умолчанию описаны ниже)
-# COGNEE_LLM_PROVIDER=openai
+# COGNEE_LLM_API_PROVIDER=openai
 # COGNEE_LLM_API_KEY=
-# COGNEE_LLM_MODEL=gpt-4o-mini
-# COGNEE_LLM_ENDPOINT=
-# COGNEE_EMBEDDING_PROVIDER=openai
+# COGNEE_LLM_API_MODEL=gpt-4o-mini
+# COGNEE_LLM_API_ENDPOINT=
+# COGNEE_EMBEDDING_API_PROVIDER=openai
 # COGNEE_EMBEDDING_API_KEY=
-# COGNEE_EMBEDDING_MODEL=text-embedding-3-small
+# COGNEE_EMBEDDING_API_MODEL=text-embedding-3-small
 # COGNEE_EMBEDDING_DIMENSIONS=1536
 ```
 
-Пустые и закомментированные строки не задают ключ. Чтобы включить переменную, уберите `#` и укажите значение. Если в старом `~/mcp-global/config/.env` остался `OPENAI_API_KEY`, kit его игнорирует: он не является поддерживаемым параметром и не подставляется вместо сервисных ключей. Внутри контейнера Graphiti переменная с таким именем заполняется только из `GRAPHITI_API_KEY`.
+Пустые и закомментированные строки не задают ключ. Чтобы включить переменную, уберите `#` и укажите значение. Если в старом `~/mcp-global/config/.env` остался `OPENAI_API_KEY`, kit его игнорирует: это имя не является параметром конфигурации. Для общего ключа по умолчанию используйте `LLM_API_KEY`. Внутри контейнера Graphiti переменная `OPENAI_API_KEY` получает эффективный ключ из `GRAPHITI_API_KEY`, а если он пуст — из `LLM_API_KEY`.
 
 Полный перечень поддерживаемых переменных этого файла:
 
@@ -77,19 +84,23 @@ CONTEXT7_API_KEY=
 | `CONTEXT7_API_KEY` | Необязательный ключ Context7. При первоначальной регистрации добавляется в окружение сервера `context7`; без него сервер работает с лимитами upstream. Пример: `CONTEXT7_API_KEY='…'`. |
 | `APP_URL` | Публичный base URL MetaMCP (origin/base path reverse proxy), например `APP_URL=https://mcp.example.com`. При пустом значении используется имеющаяся настройка MetaMCP; при непустом скрипт `apply-metamcp-config` переносит её в `~/mcp-global/metamcp/.env`. URL сам по себе не открывает порт/firewall и не настраивает TLS/proxy. |
 | `NEXT_PUBLIC_APP_URL` | Дублирует публичный URL для frontend. В upstream Compose `APP_URL` является каноническим: он используется и для `NEXT_PUBLIC_APP_URL`. Команда применяет один origin к обоим значениям; обычно задавайте только `APP_URL=https://mcp.example.com`. |
-| `GRAPHITI_API_KEY` | Обязательный отдельный ключ OpenAI-compatible API для Graphiti (используется его LLM и embeddings). Общего `OPENAI_API_KEY` fallback нет. Пример: `GRAPHITI_API_KEY='provider-key'`. |
-| `GRAPHITI_BASE_URL` | Base URL OpenAI-compatible API для Graphiti; по умолчанию `https://api.openai.com/v1`. Передаётся в контейнер как `OPENAI_BASE_URL`. Пример другого сервиса: `GRAPHITI_BASE_URL=https://llm-gateway.example/v1`. Указывайте base URL с `/v1`, если этого требует совместимый сервис, не полный путь `/chat/completions`. |
-| `GRAPHITI_MODEL` | LLM-модель Graphiti; по умолчанию `gpt-4o-mini`. Передаётся в контейнер как `MODEL_NAME`. Пример: `GRAPHITI_MODEL=gpt-4o-mini`. Модель должна существовать у выбранного endpoint. |
+| `LLM_API_ENDPOINT` | Глобальный endpoint по умолчанию для LLM API; применяется, когда соответствующая переменная сервиса пуста. По умолчанию `https://api.openai.com/v1`. Пример: `LLM_API_ENDPOINT=https://llm.example/v1`. |
+| `LLM_API_KEY` | Глобальный API key по умолчанию для LLM API; применяется только если ключ конкретного сервиса пуст. Пример: `LLM_API_KEY='provider-key'`. Старый `OPENAI_API_KEY` вместо него не используется. |
+| `LLM_API_MODEL` | Глобальная модель по умолчанию для LLM; применяется, если сервисная модель пуста. По умолчанию `gpt-4o-mini`. Пример: `LLM_API_MODEL=claude-3-5-sonnet`. |
+| `LLM_API_PROVIDER` | Глобальный provider по умолчанию для поддерживающих его сервисов; сейчас используется Cognee, по умолчанию `openai`. Graphiti принимает OpenAI-compatible endpoint и отдельный provider-параметр не поддерживает. |
+| `GRAPHITI_API_KEY` | API key Graphiti; если пуст, используется `LLM_API_KEY`. Graphiti использует ключ для LLM и embeddings. Пример: `GRAPHITI_API_KEY='graphiti-key'`. |
+| `GRAPHITI_API_ENDPOINT` | API endpoint Graphiti; если пуст, используется `LLM_API_ENDPOINT`, затем `https://api.openai.com/v1`. Передаётся контейнеру как `OPENAI_BASE_URL`. Пример: `GRAPHITI_API_ENDPOINT=https://graphiti.example/v1`. Старое имя `GRAPHITI_BASE_URL` продолжает приниматься, но новое имя имеет приоритет. |
+| `GRAPHITI_API_MODEL` | LLM-модель Graphiti; если пуст, используется `LLM_API_MODEL`, затем `gpt-4o-mini`. Передаётся как `MODEL_NAME`. Пример: `GRAPHITI_API_MODEL=gpt-4o-mini`. Старое имя `GRAPHITI_MODEL` продолжает приниматься. |
 | `GRAPHITI_EMBEDDER_MODEL` | Модель эмбеддингов Graphiti; по умолчанию `text-embedding-3-small`. Передаётся как `EMBEDDER_MODEL`. Пример: `GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small`. Модель и её размерность должны поддерживаться конфигурацией Graphiti. |
 | `GRAPHITI_GROUP_ID` | Идентификатор группы Graphiti, по умолчанию `multfinite-mcp-kit-global`. Определяет группировку/изоляцию данных внутри Graphiti. Пример: `GRAPHITI_GROUP_ID=team-knowledge`. Используйте одинаковое значение для клиентов, которым нужен общий граф; изменение не переносит уже записанные данные. |
-| `COGNEE_LLM_PROVIDER` | Провайдер языковой модели Cognee; по умолчанию `openai`. Пример зависит от списка поддерживаемых Cognee провайдеров, например `COGNEE_LLM_PROVIDER=openai`. Проверьте поддерживаемое Cognee имя и нужные параметры у используемой версии. |
-| `COGNEE_LLM_API_KEY` | Отдельный ключ только для LLM Cognee. При `COGNEE_LLM_PROVIDER=openai` без ключа sidecar ждёт настройки; общий `OPENAI_API_KEY` не используется. Пример: `COGNEE_LLM_API_KEY='llm-provider-key'`. |
-| `COGNEE_LLM_MODEL` | LLM-модель Cognee; по умолчанию `gpt-4o-mini`. Пример: `COGNEE_LLM_MODEL=gpt-4o-mini`. Имя должно быть доступно выбранному провайдеру. |
-| `COGNEE_LLM_ENDPOINT` | Base URL/endpoint LLM Cognee, передаётся как `LLM_ENDPOINT`; созданный шаблон устанавливает `https://api.openai.com/v1`. Если оставить пустым, Cognee использует default endpoint выбранного провайдера. Для другого OpenAI-compatible сервиса укажите API base, например `COGNEE_LLM_ENDPOINT=https://llm.example.net/v1`. Согласуйте provider, модель и формат endpoint с Cognee/LiteLLM. |
-| `COGNEE_EMBEDDING_PROVIDER` | Провайдер эмбеддингов Cognee; по умолчанию `openai`. Пример: `COGNEE_EMBEDDING_PROVIDER=openai`. Выберите поддерживаемое Cognee значение. |
-| `COGNEE_EMBEDDING_API_KEY` | Независимый ключ только для embeddings Cognee. При OpenAI provider без ключа Cognee ждёт настройки; общий `OPENAI_API_KEY` не используется. Пример: `COGNEE_EMBEDDING_API_KEY='embedding-provider-key'`. |
-| `COGNEE_EMBEDDING_ENDPOINT` | Endpoint/base URL API embeddings Cognee, передаётся как `EMBEDDING_ENDPOINT`; созданный шаблон устанавливает `https://api.openai.com/v1`. Пустое значение оставляет default endpoint провайдера. Пример для другого сервиса: `COGNEE_EMBEDDING_ENDPOINT=https://embeddings.example.net/v1`. Можно задать независимо от LLM endpoint и ключа. |
-| `COGNEE_EMBEDDING_MODEL` | Модель эмбеддингов Cognee; по умолчанию `text-embedding-3-small`. Пример: `COGNEE_EMBEDDING_MODEL=text-embedding-3-small`; модель и размерность должны соответствовать endpoint. |
+| `COGNEE_LLM_API_PROVIDER` | Provider языковой модели Cognee; если пуст, используется `LLM_API_PROVIDER`, затем `openai`. Выберите поддерживаемое Cognee значение. Старое имя `COGNEE_LLM_PROVIDER` принимается как алиас. |
+| `COGNEE_LLM_API_KEY` | API key только для LLM Cognee; если пуст, используется `LLM_API_KEY`. Пример: `COGNEE_LLM_API_KEY='cognee-llm-key'`. |
+| `COGNEE_LLM_API_MODEL` | Модель LLM Cognee; если пуст, используется `LLM_API_MODEL`, затем `gpt-4o-mini`. Пример: `COGNEE_LLM_API_MODEL=gpt-4o-mini`. Старое имя `COGNEE_LLM_MODEL` принимается как алиас. |
+| `COGNEE_LLM_API_ENDPOINT` | Endpoint LLM Cognee; если пуст, используется `LLM_API_ENDPOINT`, затем `https://api.openai.com/v1`. Передаётся как `LLM_ENDPOINT`. Пример: `COGNEE_LLM_API_ENDPOINT=https://llm.example/v1`. Старое имя `COGNEE_LLM_ENDPOINT` принимается как алиас. Согласуйте provider, модель и endpoint с Cognee/LiteLLM. |
+| `COGNEE_EMBEDDING_API_PROVIDER` | Provider embeddings Cognee; если пуст, используется глобальный `LLM_API_PROVIDER`, затем `openai`. Должен поддерживаться Cognee. Старое имя `COGNEE_EMBEDDING_PROVIDER` принимается как алиас. |
+| `COGNEE_EMBEDDING_API_KEY` | API key embeddings Cognee; если пуст, используется глобальный `LLM_API_KEY`. Пример: `COGNEE_EMBEDDING_API_KEY='embedding-key'`. |
+| `COGNEE_EMBEDDING_API_ENDPOINT` | Endpoint embeddings Cognee; если пуст, используется `LLM_API_ENDPOINT`, затем `https://api.openai.com/v1`. Передаётся как `EMBEDDING_ENDPOINT`. Пример: `COGNEE_EMBEDDING_API_ENDPOINT=https://embeddings.example/v1`. Старое имя `COGNEE_EMBEDDING_ENDPOINT` принимается как алиас. |
+| `COGNEE_EMBEDDING_API_MODEL` | Модель embeddings Cognee; по умолчанию `text-embedding-3-small`. Пример: `COGNEE_EMBEDDING_API_MODEL=text-embedding-3-small`. Старое имя `COGNEE_EMBEDDING_MODEL` принимается как алиас. Модель и размерность должны соответствовать endpoint. |
 | `COGNEE_EMBEDDING_DIMENSIONS` | Размерность вектора Cognee; по умолчанию `1536`. Пример: `COGNEE_EMBEDDING_DIMENSIONS=1536`. Укажите число, которое соответствует выбранной embedding-модели/провайдеру и уже созданным данным. Несоответствие модели и размерности может ломать индексацию и поиск. |
 
 После изменения переменных Graphiti/Cognee примените изменения командой:
@@ -108,8 +119,8 @@ bash linux/run-global.sh apply-services
 
 | Источник `.env` | Получатель |
 |---|---|
-| `NEO4J_URI`, `NEO4J_USER`/`NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`, `GRAPHITI_API_KEY`, `GRAPHITI_BASE_URL`, `GRAPHITI_*` | Контейнер `mcpkit-graphiti`; API key и URL отображаются в `OPENAI_API_KEY` и `OPENAI_BASE_URL`, модели — в `MODEL_NAME`/`EMBEDDER_MODEL`. `GRAPHITI_API_KEY` обязателен; общего fallback нет. |
-| `COGNEE_*` | Контейнер `mcpkit-cognee`; LLM-настройки отображаются в `LLM_*`, embeddings — в `EMBEDDING_*` включая `EMBEDDING_ENDPOINT`; Graphiti variables в Cognee не передаются. Постоянные файлы Cognee находятся в отдельных volumes. Ключи задаются отдельно для LLM и embeddings. |
+| `LLM_API_*`, `GRAPHITI_API_*`, `GRAPHITI_EMBEDDER_MODEL`, `GRAPHITI_GROUP_ID`, Neo4j settings | Контейнер `mcpkit-graphiti`; выбранные API endpoint/key/model отображаются в `OPENAI_BASE_URL`, `OPENAI_API_KEY`, `MODEL_NAME` и `EMBEDDER_MODEL`. Непустые `GRAPHITI_API_*` имеют приоритет над глобальными `LLM_API_*`. |
+| `COGNEE_LLM_API_*`, `COGNEE_EMBEDDING_API_*`, `COGNEE_EMBEDDING_DIMENSIONS` | Контейнер `mcpkit-cognee`; LLM-настройки отображаются в `LLM_*`, embeddings — в `EMBEDDING_*`, включая `EMBEDDING_ENDPOINT`. Для каждого набора непустые сервисные значения переопределяют глобальные API defaults. Постоянные файлы Cognee находятся в отдельных volumes. |
 | `APP_URL`, `NEXT_PUBLIC_APP_URL` | По команде `apply-metamcp-config` записываются в одноимённые ключи `~/mcp-global/metamcp/.env`; затем приложение пересоздаётся, чтобы Compose передал обновлённое окружение. |
 | `NEO4J_URI`, пользователь, пароль | Запись legacy-сервера `neo4j-global` в MetaMCP как `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`. |
 | `QDRANT_URL`, `QDRANT_API_KEY` | Запись legacy-сервера `qdrant-global` как `QDRANT_URL`, `QDRANT_API_KEY` (пустой ключ опускается). |
@@ -263,12 +274,12 @@ Graphiti, Cognee, Memory Bank и GDrive подключаются к MetaMCP по
 
 ## `linux/services/docker-compose.yml`
 
-Это Compose-описание четырёх sidecar-контейнеров набора. Оно настраивается через `~/mcp-global/config/.env` и `linux/run-global.sh`, а не через `.env` MetaMCP. `MCPKIT_*` — промежуточные переменные окружения, которые формирует `run-global.sh`; вручную задавать их обычно не нужно. Для полноты это `MCPKIT_NEO4J_URI`, `MCPKIT_NEO4J_USER`, `MCPKIT_NEO4J_PASSWORD`, `MCPKIT_NEO4J_DATABASE`, `MCPKIT_GRAPHITI_API_KEY`, `MCPKIT_GRAPHITI_BASE_URL`, `MCPKIT_GRAPHITI_MODEL`, `MCPKIT_GRAPHITI_EMBEDDER_MODEL`, `MCPKIT_GRAPHITI_GROUP_ID`, `MCPKIT_COGNEE_LLM_PROVIDER`, `MCPKIT_COGNEE_LLM_API_KEY`, `MCPKIT_COGNEE_LLM_MODEL`, `MCPKIT_COGNEE_LLM_ENDPOINT`, `MCPKIT_COGNEE_EMBEDDING_PROVIDER`, `MCPKIT_COGNEE_EMBEDDING_API_KEY`, `MCPKIT_COGNEE_EMBEDDING_ENDPOINT`, `MCPKIT_COGNEE_EMBEDDING_MODEL`, `MCPKIT_COGNEE_EMBEDDING_DIMENSIONS`. Их значения и соответствия официальным переменным указаны в таблицах Linux `.env` выше.
+Это Compose-описание четырёх sidecar-контейнеров набора. Оно настраивается через `~/mcp-global/config/.env` и `linux/run-global.sh`, а не через `.env` MetaMCP. `MCPKIT_*` — промежуточные переменные окружения, которые формирует `run-global.sh`; вручную задавать их обычно не нужно. Внутренние переменные `MCPKIT_*` соответствуют глобальным `LLM_API_*`, сервисным `MCPKIT_GRAPHITI_API_*`, `MCPKIT_COGNEE_LLM_API_*`, `MCPKIT_COGNEE_EMBEDDING_API_*` и дополнительным настройкам Neo4j, Graphiti и размерности embeddings. Их значения и соответствия переменным контейнеров указаны в таблицах Linux `.env` выше.
 
 | Сервис | Внутренний адрес, используемый MetaMCP | Настройки контейнера |
 |---|---|---|
-| `mcpkit-graphiti` | `http://mcpkit-graphiti:8000/mcp` | `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`; `OPENAI_API_KEY`, `OPENAI_BASE_URL`; `MODEL_NAME`, `EMBEDDER_MODEL`, `GRAPHITI_GROUP_ID`. Ключ и base URL идут только из Graphiti-specific переменных. Без `GRAPHITI_API_KEY` сервер ждёт настройки. |
-| `mcpkit-cognee` | `http://mcpkit-cognee:8000/mcp` | `TRANSPORT_MODE=http`; `MCP_ALLOWED_HOSTS=mcpkit-cognee:*`; `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_ENDPOINT`; `EMBEDDING_PROVIDER`, `EMBEDDING_API_KEY`, `EMBEDDING_ENDPOINT`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`; каталоги данных фиксированы как `/cognee-storage/system` и `/cognee-storage/data`. Без ключа для OpenAI сервер ждёт настройки. |
+| `mcpkit-graphiti` | `http://mcpkit-graphiti:8000/mcp` | `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`; `OPENAI_API_KEY`, `OPENAI_BASE_URL`; `MODEL_NAME`, `EMBEDDER_MODEL`, `GRAPHITI_GROUP_ID`. API settings берутся из непустых `GRAPHITI_API_*`, иначе из `LLM_API_*`. Без итогового API key сервер ждёт настройки. |
+| `mcpkit-cognee` | `http://mcpkit-cognee:8000/mcp` | `TRANSPORT_MODE=http`; `MCP_ALLOWED_HOSTS=mcpkit-cognee:*`; `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_ENDPOINT`; `EMBEDDING_PROVIDER`, `EMBEDDING_API_KEY`, `EMBEDDING_ENDPOINT`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`; каталоги данных фиксированы как `/cognee-storage/system` и `/cognee-storage/data`. Непустые `COGNEE_*_API_*` переопределяют глобальные API defaults. |
 | `mcpkit-memory-bank` | `http://mcpkit-memory-bank:8000/mcp` | `MEMORY_BANK_ROOT=/mcpkit/memory`; данные хранятся в volume `multfinite-mcp-kit-global-memory-data`. `mcp-proxy` принимает Streamable HTTP на порту 8000 внутри Docker-сети. |
 | `mcpkit-gdrive` | `http://mcpkit-gdrive:8000/mcp` | `GDRIVE_CREDENTIALS_PATH=/mcpkit/gdrive/credentials.json`; контейнер ждёт OAuth-файл в volume `multfinite-mcp-kit-global-gdrive-data`. Получение credentials описано в README. |
 
