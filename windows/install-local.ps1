@@ -1,473 +1,371 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Установка локальных MCP-зависимостей на Windows.
-    Запускать в PowerShell от имени пользователя (не обязательно админ).
-
+    Install and start the native Windows LOCAL MCP stack.
 .DESCRIPTION
-    Ставит: Node.js, Python, uv, Git, Playwright, Everything, LSP-серверы.
-    Кэширует все локальные MCP-серверы (npx/uvx).
-    Создаёт шаблон конфига и .env.
-
-.EXAMPLE
-    Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
-    .\install-local.ps1
+    Uses isolated, pinned runtimes under %USERPROFILE%\mcp-local. Existing
+    .env, mcp-local.json, user data, and global npm/Python packages are kept.
+    Run from an interactive Windows user session, not as a Windows service.
 #>
+[CmdletBinding()]
+param(
+    [switch]$NonInteractive,
+    [switch]$InstallBuildTools,
+    [switch]$SkipEverything,
+    [switch]$SkipBrowserDownload
+)
 
-$ErrorActionPreference = "Stop"
+$ErrorActionPreference = 'Stop'
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$BaseDir = if ($env:MCP_LOCAL_DIR) { [IO.Path]::GetFullPath($env:MCP_LOCAL_DIR) } else { Join-Path $env:USERPROFILE 'mcp-local' }
+$Runtime = Join-Path $BaseDir 'runtime'
+$PrivateDir = Join-Path $BaseDir 'config\private'
+$Manifest = Get-Content -LiteralPath (Join-Path $ScriptDir 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+$Failures = New-Object 'System.Collections.Generic.List[string]'
+. (Join-Path $ScriptDir 'local-common.ps1')
 
-# ── Утилиты ──────────────────────────────────────────────────────────────────
-function Write-Step  { param($msg) Write-Host "`n▸ $msg" -ForegroundColor Cyan }
-function Write-Ok    { param($msg) Write-Host "  ✓ $msg" -ForegroundColor Green }
-function Write-Skip  { param($msg) Write-Host "  · $msg (уже есть)" -ForegroundColor DarkGray }
-function Write-Warn  { param($msg) Write-Host "  ⚠ $msg" -ForegroundColor Yellow }
-function Write-Fail  { param($msg) Write-Host "  ✗ $msg" -ForegroundColor Red }
-
+function Step([string]$Message) { Write-Host "`n== $Message ==" -ForegroundColor Cyan }
+function Ok([string]$Message) { Write-Host "[OK] $Message" -ForegroundColor Green }
+function Note([string]$Message) { Write-Host "[WARN] $Message" -ForegroundColor Yellow }
+function Fail([string]$Message) { Write-Host "[ERROR] $Message" -ForegroundColor Red; $Failures.Add($Message) }
 function Refresh-Path {
-    $machinePath = [Environment]::GetEnvironmentVariable("Path", "Machine")
-    $userPath    = [Environment]::GetEnvironmentVariable("Path", "User")
-    $env:Path    = "$machinePath;$userPath"
+    $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
+    $user = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $env:Path = "$env:Path;$machine;$user;$(Join-Path $env:USERPROFILE '.local\bin')"
 }
-
-function Test-Command {
-    param([string]$cmd)
-    $null -ne (Get-Command $cmd -ErrorAction SilentlyContinue)
+function Find-Application([string]$Name) {
+    $cmd = Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($cmd) { return $cmd.Source }
+    return $null
 }
-
-function Winget-Install {
-    param([string]$Id, [string]$Name)
-    if (Test-Command $Name) {
-        Write-Skip "$Name"
-        return
-    }
-    Write-Host "  → Установка $Name ($Id)..." -ForegroundColor DarkCyan
-    winget install --id $Id `
-        --accept-source-agreements `
-        --accept-package-agreements `
-        --silent 2>&1 | Out-Null
+function Invoke-Native([string]$Executable, [string[]]$Arguments) {
+    & $Executable @Arguments
+    if ($LASTEXITCODE -ne 0) { throw "$(Split-Path -Leaf $Executable) failed with exit code $LASTEXITCODE" }
+}
+function Invoke-Runner([string]$Command) {
+    & (Join-Path $ScriptDir 'run-local.ps1') $Command
+    if ($LASTEXITCODE -ne 0) { throw "run-local.ps1 $Command failed with exit code $LASTEXITCODE" }
+}
+function Install-Winget([string]$Id, [string[]]$Extra = @()) {
+    $winget = Find-Application 'winget.exe'
+    if (-not $winget) { throw 'winget is required for missing prerequisites. Install Microsoft App Installer or install the dependency manually.' }
+    $args = @('install', '--id', $Id, '--exact', '--silent', '--accept-source-agreements', '--accept-package-agreements') + $Extra
+    Invoke-Native $winget $args
     Refresh-Path
-    if (Test-Command $Name) {
-        Write-Ok "$Name установлен"
-    } else {
-        Write-Warn "$Name установлен, но не в PATH. Перезапустите терминал."
+}
+function Get-UvVersion([string]$Executable) {
+    if (-not $Executable) { return $null }
+    $previous = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = 'Continue'
+        $output = @(& $Executable --version 2>$null)
+        if ($LASTEXITCODE -eq 0 -and $output.Count -gt 0 -and $output[0] -match '^uv (\d+\.\d+\.\d+)') { return [version]$Matches[1] }
+    } catch { return $null }
+    finally { $ErrorActionPreference = $previous }
+    return $null
+}
+function Install-KitUv {
+    # A pre-existing, older uv is not upgraded or replaced. Use a verified,
+    # versioned PyPI wheel in the kit runtime instead, without Python or WinGet.
+    $pin = $Manifest.uvBootstrap
+    $dest = Join-Path $Runtime "uv\$($pin.version)"
+    $exe = Join-Path $dest 'uv.exe'
+    if (Test-Path -LiteralPath $exe) {
+        if ((Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash -ne $pin.exeSha256) { throw "Unexpected existing kit uv binary; back it up and remove it manually: $exe" }
+        return $exe
     }
+    $scratch = Join-Path $env:TEMP ("mcpkit-uv-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        $zip = Join-Path $scratch 'uv-wheel.zip'
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri $pin.wheelUrl -OutFile $zip -UseBasicParsing
+        if ((Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash -ne $pin.wheelSha256) { throw 'The downloaded uv wheel did not match its pinned SHA-256.' }
+        $expanded = Join-Path $scratch 'expanded'
+        Expand-Archive -LiteralPath $zip -DestinationPath $expanded
+        $source = Join-Path $expanded "uv-$($pin.version).data\scripts\uv.exe"
+        if (-not (Test-Path -LiteralPath $source) -or (Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne $pin.exeSha256) { throw 'The downloaded uv wheel did not contain the expected executable.' }
+        New-Item -ItemType Directory -Path $dest -Force | Out-Null
+        [IO.File]::Copy($source, $exe, $false)
+    } finally { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue }
+    return $exe
+}
+function Find-VisualCpp {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+    if (-not (Test-Path -LiteralPath $vswhere)) { return $false }
+    $location = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+    return ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace(($location | Out-String)))
+}
+function Ensure-VisualCpp {
+    if (Find-VisualCpp) { Ok 'Visual C++ build tools found'; return }
+    $install = $InstallBuildTools.IsPresent
+    if (-not $NonInteractive -and -not $install) {
+        Write-Host 'simple-files-vectorstore needs Visual C++ Build Tools (multi-GB download and possibly UAC).' -ForegroundColor Yellow
+        $answer = Read-Host 'Install the Visual Studio 2022 C++ workload now? (Y/n)'
+        $install = $answer -notmatch '^[Nn]'
+    }
+    if (-not $install) { throw 'C++ build tools were not installed. Rerun with -InstallBuildTools or install the Desktop C++ workload.' }
+    Install-Winget 'Microsoft.VisualStudio.2022.BuildTools' @('--override', '--quiet --wait --norestart --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended')
+    if (-not (Find-VisualCpp)) { throw 'Visual C++ workload not detected. If Build Tools were already installed, add the Desktop C++ workload in Visual Studio Installer, then retry.' }
+}
+function Find-Everything {
+    $exe = Find-Application 'Everything.exe'
+    if ($exe) { return $exe }
+    $candidates = @(
+        (Join-Path $env:ProgramFiles 'Everything\Everything.exe'),
+        (Join-Path ${env:ProgramFiles(x86)} 'Everything\Everything.exe'),
+        (Join-Path $env:LOCALAPPDATA 'Programs\Everything\Everything.exe')
+    )
+    foreach ($candidate in $candidates) { if (Test-Path -LiteralPath $candidate) { return $candidate } }
+    return $null
+}
+function Install-EverythingSdk {
+    $destDir = Join-Path $Runtime 'everything-sdk'
+    $dll = Join-Path $destDir 'Everything64.dll'
+    $settingsFile = Join-Path $BaseDir 'config\local-settings.json'
+    $configuredDll = (Get-Content -LiteralPath $settingsFile -Raw -Encoding UTF8 | ConvertFrom-Json).everythingSdkPath
+    if ($configuredDll -and (Test-Path -LiteralPath $configuredDll -PathType Leaf)) { Ok 'Configured Everything SDK already present'; return }
+    if ($configuredDll -and $configuredDll -ne $dll) { throw "The configured Everything SDK DLL is missing: $configuredDll. Restore it or update everythingSdkPath before retrying." }
+    if (Test-Path -LiteralPath $dll) { Ok 'Everything SDK already present'; return }
+    $scratch = Join-Path $env:TEMP ("mcpkit-sdk-" + [Guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $scratch -Force | Out-Null
+    try {
+        $zip = Join-Path $scratch 'Everything-SDK.zip'
+        [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+        Invoke-WebRequest -Uri 'https://www.voidtools.com/Everything-SDK.zip' -OutFile $zip -UseBasicParsing
+        Expand-Archive -LiteralPath $zip -DestinationPath (Join-Path $scratch 'expanded')
+        $files = @(Get-ChildItem -LiteralPath (Join-Path $scratch 'expanded') -Filter 'Everything64.dll' -Recurse -File)
+        if ($files.Count -ne 1) { throw 'The official SDK archive did not contain exactly one Everything64.dll.' }
+        New-Item -ItemType Directory -Path $destDir -Force | Out-Null
+        Copy-Item -LiteralPath $files[0].FullName -Destination $dll
+        Ok 'Everything SDK installed'
+    } finally { Remove-Item -LiteralPath $scratch -Recurse -Force -ErrorAction SilentlyContinue }
 }
 
-# ── Базовый путь ─────────────────────────────────────────────────────────────
-$BaseDir   = "$env:USERPROFILE\mcp-local"
-$ConfigDir = "$BaseDir\config"
-$DataDir   = "$BaseDir\data"
+if ($env:OS -ne 'Windows_NT' -or [IntPtr]::Size -ne 8) { throw 'Use 64-bit PowerShell on Windows 10 or 11.' }
+if ($env:PROCESSOR_ARCHITECTURE -ne 'AMD64') { throw 'This installer currently targets Windows x64; ARM64 native dependencies have not been verified.' }
 
-Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   Локальные MCP — установка зависимостей        ║" -ForegroundColor Cyan
-Write-Host "║   Windows · Host / VM                           ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host ""
+$originalPath = [Environment]::GetEnvironmentVariable('Path', 'Process')
+$originalNpmPython = [Environment]::GetEnvironmentVariable('npm_config_python', 'Process')
+$originalNodeGypPython = [Environment]::GetEnvironmentVariable('NODE_GYP_FORCE_PYTHON', 'Process')
+$originalSecurityProtocol = [Net.ServicePointManager]::SecurityProtocol
+try {
+Step 'Private kit directories'
+Protect-PrivateDirectory $PrivateDir
+Protect-PrivateDirectory (Join-Path $BaseDir 'logs')
+Protect-PrivateDirectory $Runtime
+Refresh-Path
 
-# ── 0. Проверка winget ───────────────────────────────────────────────────────
-Write-Step "Проверка winget..."
+Step 'Preparing the kit for updates'
+# Windows may lock running executables and packages. Stop only this kit's
+# authenticated gateway before touching its runtimes; never kill a port owner.
+Invoke-Runner 'stop'
 
-if (-not (Test-Command "winget")) {
-    Write-Fail "winget не найден."
-    Write-Host "  Установите App Installer из Microsoft Store:" -ForegroundColor Yellow
-    Write-Host "  https://apps.microsoft.com/detail/9NBLGGH4NNS1" -ForegroundColor Yellow
+Step 'Git'
+$git = Find-Application 'git.exe'
+if (-not $git) { Install-Winget 'Git.Git'; $git = Find-Application 'git.exe' }
+if (-not $git) { throw 'Git was installed but is not in PATH. Reopen PowerShell and retry.' }
+Ok "Git: $git"
+
+Step 'Node.js bootstrap'
+$nodeDir = Join-Path $Runtime 'node'
+$node = Join-Path $nodeDir 'node_modules\node\bin\node.exe'
+$npmCli = Join-Path $nodeDir 'node_modules\npm\bin\npm-cli.js'
+if (-not ((Test-Path -LiteralPath $node) -and (Test-Path -LiteralPath $npmCli))) {
+    $systemNode = Find-Application 'node.exe'
+    $systemNpm = Find-Application 'npm.cmd'
+    if (-not $systemNode -or -not $systemNpm) {
+        Install-Winget 'OpenJS.NodeJS.LTS'
+        $systemNode = Find-Application 'node.exe'
+        $systemNpm = Find-Application 'npm.cmd'
+    }
+    if (-not $systemNode -or -not $systemNpm) { throw 'Node.js/npm could not be found. Reopen PowerShell and retry.' }
+    $npmDir = Split-Path -Parent $systemNpm
+    $bootstrapNpmCli = Join-Path $npmDir 'node_modules\npm\bin\npm-cli.js'
+    $siblingNode = Join-Path $npmDir 'node.exe'
+    $bootstrapNode = if ((Test-Path -LiteralPath $bootstrapNpmCli -PathType Leaf) -and (Test-Path -LiteralPath $siblingNode -PathType Leaf)) { $siblingNode } else { $systemNode }
+    $bootstrapArch = (& $bootstrapNode -p 'process.arch')
+    if ($LASTEXITCODE -ne 0 -or $bootstrapArch -ne 'x64') { throw 'Install a 64-bit Node.js/npm bootstrap and retry; the existing global installation was not changed.' }
+    New-Item -ItemType Directory -Path $nodeDir -Force | Out-Null
+    $bootstrapArgs = @('install', '--prefix', $nodeDir, '--no-audit', '--no-fund', "node@$($Manifest.nodeVersion)", "npm@$($Manifest.npmVersion)")
+    if (Test-Path -LiteralPath $bootstrapNpmCli -PathType Leaf) {
+        # The standard Node installer exposes this JS next to npm.cmd. Calling
+        # it directly avoids cmd.exe reinterpreting characters in profile paths.
+        Invoke-Native $bootstrapNode (@($bootstrapNpmCli) + $bootstrapArgs)
+    } else {
+        # Retain compatibility with nonstandard Node managers that only expose
+        # an npm.cmd shim; the user's installation is never upgraded in place.
+        Invoke-Native $systemNpm $bootstrapArgs
+    }
+}
+if (-not ((Test-Path -LiteralPath $node) -and (Test-Path -LiteralPath $npmCli))) { throw 'The isolated Node.js/npm runtime was not created.' }
+$env:Path = "$(Split-Path -Parent $node);$env:Path"
+$nodeVersion = (& $node --version)
+if ($LASTEXITCODE -ne 0 -or $nodeVersion -notmatch '^v24\.') { throw "Expected the kit Node.js 24 runtime, got $nodeVersion." }
+$nodeArch = (& $node -p 'process.arch')
+if ($LASTEXITCODE -ne 0 -or $nodeArch -ne 'x64') { throw 'The isolated Node runtime is not x64. Install a 64-bit Node.js bootstrap, back up and remove only runtime\node, then retry.' }
+Ok "Isolated Node.js $nodeVersion ($nodeArch)"
+
+Step 'Configuration'
+Invoke-Runner 'init'
+
+Step 'uv and Python interpreters'
+$uv = Find-Application 'uv.exe'
+$uvVersion = Get-UvVersion $uv
+if (-not $uvVersion -or $uvVersion -lt [version]'0.9.0') {
+    if ($uv) { Note "Existing uv is missing required Python 3.14 support; it will be left unchanged: $uv" }
+    $uv = Install-KitUv
+    $uvVersion = Get-UvVersion $uv
+}
+if (-not $uvVersion -or $uvVersion -lt [version]'0.9.0') { throw 'Could not start a compatible uv executable.' }
+Ok "uv $uvVersion`: $uv"
+function Find-Python([string]$Version) {
+    # A system/uv-managed interpreter is preferred over a transient activated
+    # venv. uv writes UTF-8, but Windows PowerShell 5.1 otherwise decodes native
+    # output using the console code page, corrupting non-ASCII profile paths.
+    # Decode only this subprocess explicitly, without changing the user's console.
+    $start = New-Object Diagnostics.ProcessStartInfo
+    $start.FileName = $uv
+    $start.Arguments = "python find --system --no-project --no-python-downloads cpython-$Version-windows-x86_64"
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    $start.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $start.StandardErrorEncoding = [Text.Encoding]::UTF8
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) { throw 'Could not start uv to find Python.' }
+        # Drain stderr concurrently so a verbose failure cannot block the child.
+        $stderr = $process.StandardError.ReadToEndAsync()
+        $found = $process.StandardOutput.ReadToEnd() -split '\r?\n'
+        $process.WaitForExit()
+        $null = $stderr.GetAwaiter().GetResult()
+        if ($process.ExitCode -eq 0 -and $found.Count -gt 0 -and (Test-Path -LiteralPath $found[0])) { return $found[0] }
+        return $null
+    } finally { $process.Dispose() }
+}
+$pythons = @{}
+foreach ($version in @($Manifest.pythonVersion, $Manifest.windowsMcpPythonVersion) | Select-Object -Unique) {
+    $python = Find-Python $version
+    if (-not $python) {
+        # Do not register or put the additional interpreter on the user's PATH.
+        Invoke-Native $uv @('python', 'install', '--no-bin', '--no-registry', "cpython-$version-windows-x86_64")
+        $python = Find-Python $version
+    }
+    if (-not $python) { throw "uv could not locate Python $version." }
+    $pythons[$version] = $python
+    Ok "Python $version`: $python"
+}
+$env:npm_config_python = $pythons[$Manifest.pythonVersion]
+# NODE_GYP_FORCE_PYTHON has higher priority than npm_config_python. Override it
+# only during installation so an inherited incompatible Python cannot break a
+# native addon build; the original value is restored below.
+$env:NODE_GYP_FORCE_PYTHON = $pythons[$Manifest.pythonVersion]
+
+Step 'Native Windows applications'
+if (-not $SkipEverything) {
+    try {
+        $everything = Find-Everything
+        if (-not $everything) { Install-Winget 'voidtools.Everything'; $everything = Find-Everything }
+        if (-not $everything) { throw 'Everything executable not found after installation.' }
+        if (-not (Get-Process -Name 'Everything' -ErrorAction SilentlyContinue)) { Start-Process -FilePath $everything -ArgumentList '-startup' | Out-Null }
+        Install-EverythingSdk
+        Note 'Everything must be running and its index/service must be ready for file searches.'
+    } catch { Fail "Everything: $($_.Exception.Message)" }
+} else { Note 'Everything was explicitly skipped; its server may be unavailable.' }
+
+Step 'Node MCP packages'
+foreach ($group in @('core', 'codebase', 'vectorstore')) {
+    $folder = Join-Path $Runtime "npm\$group"
+    try {
+        if ($group -eq 'vectorstore') { Ensure-VisualCpp }
+        New-Item -ItemType Directory -Path $folder -Force | Out-Null
+        $packageFile = Join-Path $folder 'package.json'
+        if (-not (Test-Path -LiteralPath $packageFile)) {
+            # The upstream transformers package pins an obsolete sharp that
+            # downloads binaries from GitHub. The compatible 0.33 release uses
+            # npm platform packages and works with the isolated Node 24 runtime.
+            $initial = if ($group -eq 'vectorstore') { '{"private":true,"overrides":{"@xenova/transformers":{"sharp":"0.33.5"}}}' } else { '{"private":true}' }
+            [IO.File]::WriteAllText($packageFile, $initial, (New-Object Text.UTF8Encoding($false)))
+        }
+        $packages = @($Manifest.npmGroups.$group)
+        Invoke-Native $node (@($npmCli, 'install', '--prefix', $folder, '--no-audit', '--no-fund', '--save-exact') + $packages)
+        Ok "npm group: $group"
+    } catch { Fail "npm group $group`: $($_.Exception.Message)" }
+}
+
+Step 'Python MCP packages (isolated environments)'
+foreach ($package in $Manifest.pythonPackages) {
+    $venv = Join-Path $Runtime "python\$($package.name)"
+    $venvPython = Join-Path $venv 'Scripts\python.exe'
+    try {
+        $requiredVersion = if ($package.name -eq 'windows-mcp') { $Manifest.windowsMcpPythonVersion } else { $Manifest.pythonVersion }
+        if (-not (Test-Path -LiteralPath $venvPython)) {
+            # uv can clear an existing incomplete venv non-interactively. Never
+            # let a retry erase a directory whose contents may be user data.
+            if (Test-Path -LiteralPath $venv) { throw "Existing environment has no Scripts\python.exe. Back it up and remove it manually before retrying: $venv" }
+            Invoke-Native $uv @('venv', '--python', $pythons[$requiredVersion], $venv)
+        }
+        # Windows PowerShell 5.1 strips embedded double quotes when passing
+        # native arguments. Keep the Python probe free of double quotes so the
+        # version and architecture check also works in the built-in shell.
+        $actualVersion = (& $venvPython -c "import sys,struct;print('%s.%s-%s'%(*sys.version_info[:2],struct.calcsize('P')*8))")
+        if ($LASTEXITCODE -ne 0 -or $actualVersion -ne "$requiredVersion-64") {
+            throw "Existing kit environment uses Python $actualVersion instead of $requiredVersion-64. Back it up and remove this environment before retrying: $venv"
+        }
+        Invoke-Native $uv @('pip', 'install', '--python', $venvPython, $package.spec)
+        $exe = Join-Path $venv "Scripts\$($package.executable).exe"
+        if (-not (Test-Path -LiteralPath $exe)) { throw "Expected entry point $exe was not installed." }
+        Ok $package.name
+    } catch { Fail "Python package $($package.name)`: $($_.Exception.Message)" }
+}
+
+Step 'Playwright Chromium'
+if (-not $SkipBrowserDownload) {
+    try {
+        $playwright = Join-Path $Runtime 'npm\core\node_modules\@playwright\mcp\cli.js'
+        if (-not (Test-Path -LiteralPath $playwright)) { throw 'Playwright MCP package is missing.' }
+        Invoke-Native $node @($playwright, 'install-browser', 'chromium')
+        Ok 'Playwright Chromium installed'
+    } catch { Fail "Playwright browser: $($_.Exception.Message)" }
+} else { Note 'Browser download was explicitly skipped; Playwright may need a browser.' }
+
+# The long-lived gateway should inherit the user's original environment, not
+# this installer's temporary node-gyp selection.
+[Environment]::SetEnvironmentVariable('npm_config_python', $originalNpmPython, 'Process')
+[Environment]::SetEnvironmentVariable('NODE_GYP_FORCE_PYTHON', $originalNodeGypPython, 'Process')
+Step 'Starting LOCAL servers'
+# The kit gateway was stopped before package updates; start it with the repaired
+# dependencies and leave all user data and unrelated processes untouched.
+try { Invoke-Runner 'start' }
+catch { Fail "Gateway: $($_.Exception.Message)" }
+
+Write-Host "`nSettings: $BaseDir\config\local-settings.json"
+Write-Host "Secrets:  $PrivateDir\secrets.json (keep private)"
+Write-Host "Commands: .\windows\run-local.ps1 status | logs | restart | stop"
+Note 'Obsidian requires its Local REST API plugin and key; the server waits until configured.'
+Note 'Registration on the existing Linux MetaMCP needs a reachable gateway URL and SSH; run configure then register.'
+if (-not $NonInteractive) {
+    $answer = Read-Host 'Configure and register this Windows machine with MetaMCP now? (y/N)'
+    if ($answer -match '^[Yy]') {
+        try {
+            Invoke-Runner 'configure'
+            Invoke-Runner 'restart'
+            Invoke-Runner 'register'
+        } catch { Fail "MetaMCP registration: $($_.Exception.Message)" }
+    }
+}
+if ($Failures.Count -gt 0) {
+    Write-Host "`nInstallation is incomplete. Fix the errors above and rerun this script; existing configuration and data are preserved." -ForegroundColor Red
     exit 1
 }
-Write-Ok "winget $(winget --version)"
-
-# ── 1. Git ───────────────────────────────────────────────────────────────────
-Write-Step "Git..."
-Winget-Install -Id "Git.Git" -Name "git"
-
-# ── 2. Node.js 20+ ──────────────────────────────────────────────────────────
-Write-Step "Node.js..."
-
-if (Test-Command "node") {
-    $nodeVer = (node -v).TrimStart("v")
-    $nodeMajor = [int]($nodeVer.Split(".")[0])
-    if ($nodeMajor -ge 20) {
-        Write-Skip "Node.js v$nodeVer"
-    } else {
-        Write-Warn "Node.js v$nodeVer < 20, обновление..."
-        Winget-Install -Id "OpenJS.NodeJS.LTS" -Name "node"
-    }
-} else {
-    Winget-Install -Id "OpenJS.NodeJS.LTS" -Name "node"
+Ok 'Installation completed. Check status and configure any credentials/MetaMCP connection as described above.'
+} finally {
+    # Restore the caller's PATH, node-gyp Python and TLS protocol settings.
+    [Environment]::SetEnvironmentVariable('Path', $originalPath, 'Process')
+    [Environment]::SetEnvironmentVariable('npm_config_python', $originalNpmPython, 'Process')
+    [Environment]::SetEnvironmentVariable('NODE_GYP_FORCE_PYTHON', $originalNodeGypPython, 'Process')
+    [Net.ServicePointManager]::SecurityProtocol = $originalSecurityProtocol
 }
-
-# ── 3. Python 3.11+ ─────────────────────────────────────────────────────────
-Write-Step "Python..."
-
-if (Test-Command "python") {
-    $pyVer = (python --version 2>&1) -replace "Python ", ""
-    $pyParts = $pyVer.Split(".")
-    if ([int]$pyParts[0] -ge 3 -and [int]$pyParts[1] -ge 11) {
-        Write-Skip "Python $pyVer"
-    } else {
-        Write-Warn "Python $pyVer < 3.11, обновление..."
-        Winget-Install -Id "Python.Python.3.12" -Name "python"
-    }
-} else {
-    Winget-Install -Id "Python.Python.3.12" -Name "python"
-}
-
-# ── 4. uv ────────────────────────────────────────────────────────────────────
-Write-Step "uv..."
-
-Refresh-Path
-if (Test-Command "uv") {
-    Write-Skip "uv $(uv --version)"
-} else {
-    Write-Host "  → Установка uv..." -ForegroundColor DarkCyan
-    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex" 2>&1 | Out-Null
-    Refresh-Path
-    # uv ставится в %USERPROFILE%\.local\bin или %USERPROFILE%\.cargo\bin
-    $uvPaths = @(
-        "$env:USERPROFILE\.local\bin",
-        "$env:USERPROFILE\.cargo\bin"
-    )
-    foreach ($p in $uvPaths) {
-        if (Test-Path "$p\uv.exe") {
-            $env:Path = "$p;$env:Path"
-            break
-        }
-    }
-    if (Test-Command "uv") {
-        Write-Ok "uv $(uv --version)"
-    } else {
-        Write-Warn "uv установлен, но не найден в PATH. Добавьте ~/.local/bin в PATH."
-    }
-}
-
-# ── 5. Playwright (браузеры) ────────────────────────────────────────────────
-Write-Step "Playwright Chromium..."
-
-$pwMarker = "$env:LOCALAPPDATA\ms-playwright"
-if (Test-Path "$pwMarker\chromium-*") {
-    Write-Skip "Playwright Chromium"
-} else {
-    Write-Host "  → Загрузка Chromium (~150MB)..." -ForegroundColor DarkCyan
-    npx -y playwright install chromium 2>&1 | Out-Null
-    Write-Ok "Playwright Chromium установлен"
-}
-
-# ── 6. Everything (поиск файлов) ────────────────────────────────────────────
-Write-Step "Everything (voidtools)..."
-
-$askEverything = Read-Host "  Установить Everything для поиска файлов? (Y/n)"
-if ($askEverything -notmatch "^[Nn]") {
-    if (Test-Path "C:\Program Files\Everything\Everything.exe" -ErrorAction SilentlyContinue) {
-        Write-Skip "Everything"
-    } else {
-        Winget-Install -Id "voidtools.Everything" -Name "Everything"
-        Write-Warn "Запустите Everything после установки (нужен для индексации)"
-    }
-} else {
-    Write-Skip "Everything пропущен"
-}
-
-# ── 7. LSP-серверы (для Serena) ─────────────────────────────────────────────
-Write-Step "LSP-серверы (для Serena)..."
-
-$lspPackages = @(
-    @{ Name = "pyright";                      Cmd = "pyright" },
-    @{ Name = "typescript-language-server";    Cmd = "typescript-language-server" }
-)
-
-foreach ($lsp in $lspPackages) {
-    if (Test-Command $lsp.Cmd) {
-        Write-Skip $lsp.Name
-    } else {
-        Write-Host "  → npm i -g $($lsp.Name)..." -ForegroundColor DarkCyan
-        npm install -g $lsp.Name 2>&1 | Out-Null
-        Refresh-Path
-        Write-Ok "$($lsp.Name)"
-    }
-}
-
-Write-Host "  ℹ Дополнительные LSP по мере необходимости:" -ForegroundColor DarkGray
-Write-Host "    npm i -g vscode-langservers-extracted  (HTML/CSS/JSON/ESLint)" -ForegroundColor DarkGray
-Write-Host "    npm i -g @astrojs/language-server      (Astro)" -ForegroundColor DarkGray
-Write-Host "    npm i -g svelte-language-server        (Svelte)" -ForegroundColor DarkGray
-
-# ── 8. Кэширование npx-пакетов ──────────────────────────────────────────────
-Write-Step "Кэширование npx MCP-серверов..."
-Write-Host "  (первый запуск может занять 1-3 мин)" -ForegroundColor DarkGray
-
-$npxPackages = @(
-    "@anthropic/mcp-desktop-commander",
-    "@modelcontextprotocol/server-filesystem",
-    "@modelcontextprotocol/server-git",
-    "windows-mcp",
-    "codegraph-mcp",
-    "codebase-memory-mcp",
-    "@anthropic/mcp-playwright",
-    "@bytebase/dbhub",
-    "simple-files-vectorstore",
-    "mcp-obsidian",
-    "mcp-everything-search"
-)
-
-foreach ($pkg in $npxPackages) {
-    Write-Host "  → $pkg ... " -NoNewline -ForegroundColor DarkGray
-    try {
-        $proc = Start-Process -FilePath "npx" `
-            -ArgumentList "-y", $pkg, "--help" `
-            -NoNewWindow -PassThru -RedirectStandardOutput "NUL" -RedirectStandardError "NUL"
-        $proc.WaitForExit(90000) | Out-Null
-        if (-not $proc.HasExited) { $proc.Kill() }
-        Write-Host "cached" -ForegroundColor Green
-    } catch {
-        Write-Host "skip" -ForegroundColor Yellow
-    }
-}
-
-# ── 9. Кэширование uvx-пакетов ──────────────────────────────────────────────
-Write-Step "Кэширование uvx MCP-серверов..."
-
-$uvxPackages = @(
-    "mcp-server-git",
-    "markitdown-mcp",
-    "serena-mcp"
-)
-
-foreach ($pkg in $uvxPackages) {
-    Write-Host "  → $pkg ... " -NoNewline -ForegroundColor DarkGray
-    try {
-        $proc = Start-Process -FilePath "uvx" `
-            -ArgumentList $pkg, "--help" `
-            -NoNewWindow -PassThru -RedirectStandardOutput "NUL" -RedirectStandardError "NUL"
-        $proc.WaitForExit(90000) | Out-Null
-        if (-not $proc.HasExited) { $proc.Kill() }
-        Write-Host "cached" -ForegroundColor Green
-    } catch {
-        Write-Host "skip" -ForegroundColor Yellow
-    }
-}
-
-# ── 10. Директории ──────────────────────────────────────────────────────────
-Write-Step "Создание директорий..."
-
-$dirs = @(
-    $BaseDir,
-    $ConfigDir,
-    "$DataDir\projects",
-    "$DataDir\writing",
-    "$DataDir\obsidian-vault",
-    "$DataDir\vectorstore"
-)
-
-foreach ($d in $dirs) {
-    if (-not (Test-Path $d)) {
-        New-Item -ItemType Directory -Path $d -Force | Out-Null
-    }
-}
-Write-Ok "Директории в $BaseDir"
-
-# ── 11. .env шаблон ─────────────────────────────────────────────────────────
-Write-Step "Создание .env..."
-
-$envFile = "$ConfigDir\.env"
-if (Test-Path $envFile) {
-    Write-Skip ".env уже существует"
-} else {
-    $projectsPath = "$DataDir\projects" -replace "\\", "/"
-    $writingPath  = "$DataDir\writing" -replace "\\", "/"
-    $vaultPath    = "$DataDir\obsidian-vault" -replace "\\", "/"
-    $vectorPath   = "$DataDir\vectorstore" -replace "\\", "/"
-
-    @"
-# ============================================================================
-# Локальные MCP — переменные окружения
-# ============================================================================
-
-# Пути (замените на реальные)
-PROJECTS_DIR=$projectsPath
-WRITING_DIR=$writingPath
-OBSIDIAN_VAULT=$vaultPath
-VECTORSTORE_DIR=$vectorPath
-
-# Git — путь к основному репозиторию
-GIT_REPO=$projectsPath/main
-
-# БД (если dbhub подключается к локальной БД)
-DBHUB_DSN=postgres://user:pass@localhost:5432/devdb
-
-# MetaMCP (адрес, куда эта машина регистрируется)
-METAMCP_HOST=http://<metamcp-ip>:3000
-"@ | Out-File -FilePath $envFile -Encoding utf8
-
-    Write-Ok ".env создан: $envFile"
-    Write-Warn "Отредактируйте пути на реальные!"
-}
-
-# ── 12. Конфиг локальных MCP ────────────────────────────────────────────────
-Write-Step "Создание mcp-local.json..."
-
-$configFile = "$ConfigDir\mcp-local.json"
-if (Test-Path $configFile) {
-    Write-Skip "mcp-local.json уже существует"
-} else {
-    # Используем forward-slash пути для совместимости
-    $pDir = $DataDir -replace "\\", "/"
-
-    @"
-{
-  "mcpServers": {
-
-    "desktop-commander": {
-      "command": "npx",
-      "args": ["-y", "@anthropic/mcp-desktop-commander"],
-      "env": {
-        "ALLOWED_DIRS": "$pDir/projects;$pDir/writing"
-      }
-    },
-
-    "filesystem": {
-      "command": "npx",
-      "args": [
-        "-y", "@modelcontextprotocol/server-filesystem",
-        "$pDir/projects",
-        "$pDir/writing"
-      ]
-    },
-
-    "windows-mcp": {
-      "command": "npx",
-      "args": ["-y", "windows-mcp"]
-    },
-
-    "everything-search": {
-      "command": "npx",
-      "args": ["-y", "mcp-everything-search"]
-    },
-
-    "git": {
-      "command": "uvx",
-      "args": ["mcp-server-git", "--repository", "$pDir/projects/main"]
-    },
-
-    "codegraph": {
-      "command": "npx",
-      "args": ["-y", "codegraph-mcp"],
-      "env": {
-        "PROJECT_ROOT": "$pDir/projects/main"
-      }
-    },
-
-    "codebase-memory": {
-      "command": "npx",
-      "args": ["-y", "codebase-memory-mcp"]
-    },
-
-    "serena": {
-      "command": "uvx",
-      "args": ["serena-mcp"],
-      "env": {
-        "PROJECT_ROOT": "$pDir/projects/main"
-      }
-    },
-
-    "playwright": {
-      "command": "npx",
-      "args": ["-y", "@anthropic/mcp-playwright", "--caps", "core,tabs,pdf"]
-    },
-
-    "dbhub": {
-      "command": "npx",
-      "args": ["-y", "@bytebase/dbhub"],
-      "env": {
-        "DBHUB_DSN": "postgres://user:pass@localhost:5432/devdb"
-      }
-    },
-
-    "vectorstore": {
-      "command": "npx",
-      "args": ["-y", "simple-files-vectorstore"],
-      "env": {
-        "DOCS_DIR": "$pDir/writing"
-      }
-    },
-
-    "markitdown": {
-      "command": "uvx",
-      "args": ["markitdown-mcp"]
-    },
-
-    "obsidian": {
-      "command": "npx",
-      "args": ["-y", "mcp-obsidian"],
-      "env": {
-        "OBSIDIAN_VAULT_PATH": "$pDir/obsidian-vault"
-      }
-    }
-  }
-}
-"@ | Out-File -FilePath $configFile -Encoding utf8
-
-    Write-Ok "mcp-local.json создан: $configFile"
-}
-
-# ── 13. Финальная проверка ──────────────────────────────────────────────────
-Write-Step "Проверка..."
-Write-Host ""
-
-$checks = @(
-    @{ Name = "Node.js";    Cmd = "node" },
-    @{ Name = "npm";        Cmd = "npm" },
-    @{ Name = "Python";     Cmd = "python" },
-    @{ Name = "uv";         Cmd = "uv" },
-    @{ Name = "Git";        Cmd = "git" },
-    @{ Name = "Playwright"; Cmd = "npx" },
-    @{ Name = "pyright";    Cmd = "pyright" }
-)
-
-foreach ($c in $checks) {
-    if (Test-Command $c.Cmd) {
-        Write-Ok $c.Name
-    } else {
-        Write-Fail $c.Name
-    }
-}
-
-# Everything — проверяем по пути
-if (Test-Path "C:\Program Files\Everything\Everything.exe" -ErrorAction SilentlyContinue) {
-    Write-Ok "Everything"
-} else {
-    Write-Fail "Everything"
-}
-
-# Playwright browsers
-if (Test-Path "$env:LOCALAPPDATA\ms-playwright\chromium-*") {
-    Write-Ok "Playwright Chromium"
-} else {
-    Write-Fail "Playwright Chromium"
-}
-
-# ── Итого ────────────────────────────────────────────────────────────────────
-Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════╗" -ForegroundColor Green
-Write-Host "║   УСТАНОВКА ЗАВЕРШЕНА                          ║" -ForegroundColor Green
-Write-Host "╚══════════════════════════════════════════════════╝" -ForegroundColor Green
-Write-Host ""
-Write-Host "  Файлы:" -ForegroundColor White
-Write-Host "    Конфиг:  $configFile"
-Write-Host "    .env:    $envFile"
-Write-Host "    Данные:  $DataDir\"
-Write-Host ""
-Write-Host "  Следующие шаги:" -ForegroundColor White
-Write-Host "    1. Отредактируйте .env и mcp-local.json" -ForegroundColor DarkGray
-Write-Host "       (пути к проектам, vault, БД)" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "    2. Зарегистрируйте эту машину в MetaMCP:" -ForegroundColor DarkGray
-Write-Host "       На MetaMCP-хосте добавьте endpoint:" -ForegroundColor DarkGray
-Write-Host "       host-local → http://<this-ip>:3001" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "    3. Запустите локальный MCP-прокси:" -ForegroundColor DarkGray
-Write-Host "       metamcp --config $configFile --port 3001" -ForegroundColor DarkGray
-Write-Host ""
-Write-Host "    4. Для VM — запустите тот же скрипт," -ForegroundColor DarkGray
-Write-Host "       уберите windows-mcp и everything-search" -ForegroundColor DarkGray
-Write-Host "       если VM = Linux." -ForegroundColor DarkGray
-Write-Host ""

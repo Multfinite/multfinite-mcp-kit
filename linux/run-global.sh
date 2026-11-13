@@ -6,6 +6,7 @@ BASE_DIR="$HOME/mcp-global"
 CONFIG_DIR="$BASE_DIR/config"
 METAMCP_DIR="$BASE_DIR/metamcp"
 CONFIG_ENV="$CONFIG_DIR/.env"
+META_URL_PENDING="$CONFIG_DIR/.metamcp-url-apply-pending"
 SEED_SQL="$SCRIPT_DIR/seed-global.sql"
 SERVICES_COMPOSE="$SCRIPT_DIR/services/docker-compose.yml"
 SERVICES_PROJECT="multfinite-mcp-kit-global"
@@ -293,13 +294,17 @@ set_metamcp_url() {
     if grep -Fxq -- "$key=$value" "$METAMCP_DIR/.env"; then
         return 0
     fi
-    escaped="$(printf '%s' "$value" | sed 's/[&|]/\\&/g')"
+    escaped="$(printf '%s' "$value" | sed 's/[\\&|]/\\&/g')"
+    # Remember an in-progress update before changing .env. If Compose, health
+    # or network attachment fails, a later apply must retry the recreation
+    # even though the desired URL is already present in the file.
+    (umask 077; : > "$META_URL_PENDING") || return 1
     if grep -q "^${key}=" "$METAMCP_DIR/.env"; then
-        sed -i "s|^${key}=.*|${key}=${escaped}|" "$METAMCP_DIR/.env"
+        sed -i "s|^${key}=.*|${key}=${escaped}|" "$METAMCP_DIR/.env" || return 1
     else
-        printf '%s=%s\n' "$key" "$value" >> "$METAMCP_DIR/.env"
+        printf '%s=%s\n' "$key" "$value" >> "$METAMCP_DIR/.env" || return 1
     fi
-    chmod 600 "$METAMCP_DIR/.env"
+    chmod 600 "$METAMCP_DIR/.env" || return 1
     META_URL_CHANGED=true
 }
 
@@ -318,7 +323,7 @@ cmd_apply_metamcp_config() {
     check_docker
     [ -f "$METAMCP_DIR/.env" ] || { error "Не найден $METAMCP_DIR/.env. Сначала выполните install-global.sh."; return 1; }
     sync_metamcp_public_urls || return 1
-    if [ "$META_URL_CHANGED" != true ]; then
+    if [ "$META_URL_CHANGED" != true ] && [ ! -f "$META_URL_PENDING" ]; then
         success "Публичные URL MetaMCP уже соответствуют kit .env."
         return 0
     fi
@@ -326,14 +331,19 @@ cmd_apply_metamcp_config() {
     local app_id
     app_id="$(compose ps -a -q app)" || return 1
     if [ -z "$app_id" ]; then
-        success "URL сохранены в MetaMCP .env; контейнер приложения пока не запущен, примените их следующей командой start."
+        rm -f "$META_URL_PENDING" || return 1
+        success "URL сохранены в MetaMCP .env; контейнер приложения пока не создан, примените их следующей командой start."
         return 0
     fi
 
     warn "Для применения URL пересоздаётся только контейнер MetaMCP app; файлы в его writable layer могут быть потеряны. Named volumes не удаляются."
-    compose up -d --no-deps --force-recreate app || return 1
+    # Compose gives inherited shell variables precedence over its .env file.
+    # This explicit operation must apply the URL we just synchronized, even if
+    # the caller's shell happens to export a stale APP_URL.
+    (unset APP_URL NEXT_PUBLIC_APP_URL; compose up -d --no-deps --force-recreate app) || return 1
     wait_for_metamcp || return 1
     start_services || return 1
+    rm -f "$META_URL_PENDING" || return 1
     success "APP_URL и NEXT_PUBLIC_APP_URL применены к MetaMCP."
 }
 

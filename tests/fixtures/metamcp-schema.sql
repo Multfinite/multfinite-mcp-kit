@@ -4,7 +4,7 @@ CREATE TYPE mcp_server_type AS ENUM ('STDIO', 'SSE', 'STREAMABLE_HTTP');
 CREATE TYPE mcp_server_status AS ENUM ('ACTIVE', 'INACTIVE');
 CREATE TYPE mcp_server_error_status AS ENUM ('NONE', 'ERROR');
 
-CREATE TABLE users (id text PRIMARY KEY);
+CREATE TABLE users (id text PRIMARY KEY, email text UNIQUE);
 CREATE TABLE config (
     id text PRIMARY KEY,
     value text NOT NULL,

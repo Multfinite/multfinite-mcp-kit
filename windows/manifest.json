@@ -1,0 +1,39 @@
+{
+  "nodeVersion": "24.22.3",
+  "npmVersion": "11.11.1",
+  "pythonVersion": "3.12",
+  "windowsMcpPythonVersion": "3.14",
+  "uvBootstrap": {
+    "version": "0.13.8",
+    "wheelUrl": "https://files.pythonhosted.org/packages/6a/1d/d813afac1a7cbe3eeeca8709b47bdcd5e5189d08364b8d7a9f693082f0f1/uv-0.13.8-py3-none-win_amd64.whl",
+    "wheelSha256": "cfbc13020a64cdf2f116d2936824c38edbf41e5c07f1ea291baf02e31ebf3ed0",
+    "exeSha256": "03fa174894b9d0cbe08762d40d1c2c64d10e875bd56f1a1e334ee1e00d60cdbe"
+  },
+  "npmGroups": {
+    "core": [
+      "mcp-proxy@6.10.0",
+      "@wonderwhy-er/desktop-commander@0.3.3",
+      "@j0hanz/filesystem-mcp@2.20.0",
+      "@colbymchenry/codegraph@1.6.2",
+      "@playwright/mcp@0.0.85",
+      "@bytebase/dbhub@1.6.1",
+      "pyright@1.1.414",
+      "typescript-language-server@6.1.0",
+      "typescript@5.9.3"
+    ],
+    "codebase": ["codebase-memory-mcp@0.12.1"],
+    "vectorstore": ["@lishenxydlgzs/simple-files-vectorstore@0.1.7"]
+  },
+  "pythonPackages": [
+    { "name": "windows-mcp", "spec": "windows-mcp==0.8.9", "executable": "windows-mcp" },
+    { "name": "everything-search", "spec": "mcp-server-everything-search==0.3.3", "executable": "mcp-server-everything-search" },
+    { "name": "git", "spec": "mcp-server-git==2026.11.11", "executable": "mcp-server-git" },
+    { "name": "serena", "spec": "serena-agent==2.1.0", "executable": "serena" },
+    { "name": "markitdown", "spec": "markitdown-mcp==0.0.1a8", "executable": "markitdown-mcp" },
+    { "name": "obsidian", "spec": "mcp-obsidian==0.2.3", "executable": "mcp-obsidian" }
+  ],
+  "servers": [
+    "desktop-commander", "everything-search", "filesystem", "windows-mcp", "git", "codegraph",
+    "codebase-memory-mcp", "serena", "playwright", "dbhub", "simple-files-vectorstore", "markitdown", "obsidian"
+  ]
+}

@@ -57,34 +57,71 @@ success "Базовые пакеты установлены"
 # ── 2. Docker ────────────────────────────────────────────────────────────────
 header "Docker & Docker Compose"
 
-# Add Docker's official GPG key:
-sudo apt update
-sudo apt install ca-certificates curl
-sudo install -m 0755 -d /etc/apt/keyrings
-sudo curl -fsSL https://download.docker.com/linux/debian/gpg -o /etc/apt/keyrings/docker.asc
-sudo chmod a+r /etc/apt/keyrings/docker.asc
-
-# Add the repository to Apt sources:
-sudo tee /etc/apt/sources.list.d/docker.sources <<EOF
+# Install only when the Docker executable is absent. A daemon that is stopped,
+# inaccessible, rootless, or missing Compose must never trigger reinstallation.
+# Use separate kit-owned APT filenames and do not replace the user's keyrings or
+# sources. Reuse an already-configured Docker repository as-is.
+install_missing_docker() {
+    local distro codename arch repo_pattern
+    distro="$(. /etc/os-release; printf '%s' "${ID:-}")"
+    codename="$(. /etc/os-release; printf '%s' "${VERSION_CODENAME:-}")"
+    case "$distro" in debian|ubuntu) ;; *) error "Автоматическая установка Docker поддерживает только Debian/Ubuntu; установите Docker вручную." ;; esac
+    [[ "$codename" =~ ^[a-zA-Z0-9._-]+$ ]] || error "Не удалось определить VERSION_CODENAME для репозитория Docker."
+    arch="$(dpkg --print-architecture)"
+    repo_pattern='^[[:space:]]*[^#[:space:]].*https?://download[.]docker[.]com/linux/(debian|ubuntu)([/[:space:]]|$)'
+    if grep -RqsE --include='*.list' --include='*.sources' "$repo_pattern" /etc/apt/sources.list /etc/apt/sources.list.d 2>/dev/null; then
+        info "Существующий APT-репозиторий Docker сохранён без изменений."
+    else
+        # A subshell ensures temporary downloads are removed even if any step
+        # fails. Existing, different files are never overwritten.
+        (
+            scratch="$(mktemp -d)"
+            trap 'rm -rf "$scratch"' EXIT
+            curl -fsSL "https://download.docker.com/linux/$distro/gpg" -o "$scratch/docker.asc"
+            [ -s "$scratch/docker.asc" ] || { echo 'Empty Docker signing key' >&2; exit 1; }
+            cat > "$scratch/docker.sources" <<EOF
 Types: deb
-URIs: https://download.docker.com/linux/debian
-Suites: $(. /etc/os-release && echo "$VERSION_CODENAME")
+URIs: https://download.docker.com/linux/$distro
+Suites: $codename
 Components: stable
-Architectures: $(dpkg --print-architecture)
-Signed-By: /etc/apt/keyrings/docker.asc
+Architectures: $arch
+Signed-By: /etc/apt/keyrings/mcpkit-docker.asc
 EOF
+            sudo install -m 0755 -d /etc/apt/keyrings
+            for spec in "docker.asc:/etc/apt/keyrings/mcpkit-docker.asc" "docker.sources:/etc/apt/sources.list.d/mcpkit-docker.sources"; do
+                file="${spec%%:*}"
+                destination="${spec#*:}"
+                if [ -e "$destination" ] || [ -L "$destination" ]; then
+                    cmp -s "$scratch/$file" "$destination" || { echo "Existing $destination differs; it was not overwritten." >&2; exit 1; }
+                else
+                    sudo install -m 0644 "$scratch/$file" "$destination"
+                fi
+            done
+        )
+    fi
+    sudo apt-get update -qq
+    # Abort on conflicts instead of removing the user's existing packages.
+    sudo apt-get install -y -qq --no-remove docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+    if [ "$(id -u)" -ne 0 ]; then
+        if ! getent group docker >/dev/null; then
+            sudo groupadd docker || getent group docker >/dev/null || error "Не удалось создать группу docker."
+        fi
+        case " $(id -nG) " in
+            *' docker '*) ;;
+            *)
+                sudo usermod -aG docker "$(id -un)"
+                warn "Пользователь добавлен в группу docker (она даёт права администратора). Чтобы членство вступило в силу, выйдите из сеанса и войдите снова."
+                ;;
+        esac
+    fi
+}
 
-sudo apt update
-sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
-
-sudo groupadd docker
-sudo usermod -aG docker $USER
-newgrp docker
-
-#
-
+if ! command -v docker &>/dev/null; then
+    info "Docker не найден; установка официальных Docker Engine и Compose plugin..."
+    install_missing_docker
+fi
 if ! command -v docker &>/dev/null || ! docker info &>/dev/null; then
-    error "Docker недоступен текущему пользователю. Запустите Docker и настройте доступ без sudo."
+    error "Docker недоступен текущему пользователю. Запустите Docker, при необходимости заново войдите после добавления в группу docker, и настройте доступ без sudo."
 fi
 success "Docker работает ($(docker --version))"
 
@@ -111,11 +148,6 @@ if [ -f "$METAMCP_ENV" ]; then
     success "MetaMCP .env уже существует и не изменяется"
 else
     info "Создание ${METAMCP_ENV} из example.env..."
-    cp "${METAMCP_DIR}/example.env" "$METAMCP_ENV"
-    chmod 600 "$METAMCP_ENV"
-
-    AUTH_SECRET="$(openssl rand -hex 32)"
-    PG_PASS="m3t4mcp_pass_$(openssl rand -hex 16)"
     META_APP_URL='http://localhost:12008'
     META_NEXT_PUBLIC_APP_URL="$META_APP_URL"
     if [ -f "$CONFIG_DIR/.env" ]; then
@@ -136,12 +168,19 @@ else
         fi
         META_NEXT_PUBLIC_APP_URL="$META_APP_URL"
     fi
-    sed_escape() { printf '%s' "$1" | sed 's/[&|]/\\&/g'; }
+    if [[ "$META_APP_URL" == *$'\n'* || "$META_APP_URL" == *$'\r'* ]]; then
+        error "APP_URL/NEXT_PUBLIC_APP_URL не должны содержать переносы строк"
+    fi
+    sed_escape() { printf '%s' "$1" | sed 's/[\\&|]/\\&/g'; }
     META_APP_URL_ESCAPED="$(sed_escape "$META_APP_URL")"
     META_NEXT_PUBLIC_APP_URL_ESCAPED="$(sed_escape "$META_NEXT_PUBLIC_APP_URL")"
-    sed -i \\
-        -e "s|^APP_URL=.*|APP_URL=${META_APP_URL_ESCAPED}|" \\
-        -e "s|^NEXT_PUBLIC_APP_URL=.*|NEXT_PUBLIC_APP_URL=${META_NEXT_PUBLIC_APP_URL_ESCAPED}|" \\
+    AUTH_SECRET="$(openssl rand -hex 32)"
+    PG_PASS="m3t4mcp_pass_$(openssl rand -hex 16)"
+    cp "${METAMCP_DIR}/example.env" "$METAMCP_ENV"
+    chmod 600 "$METAMCP_ENV"
+    sed -i \
+        -e "s|^APP_URL=.*|APP_URL=${META_APP_URL_ESCAPED}|" \
+        -e "s|^NEXT_PUBLIC_APP_URL=.*|NEXT_PUBLIC_APP_URL=${META_NEXT_PUBLIC_APP_URL_ESCAPED}|" \
         -e "s|^BETTER_AUTH_SECRET=.*|BETTER_AUTH_SECRET=${AUTH_SECRET}|" \
         -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${PG_PASS}|" \
         -e 's|^BOOTSTRAP_USER_EMAIL=.*|BOOTSTRAP_USER_EMAIL=|' \
