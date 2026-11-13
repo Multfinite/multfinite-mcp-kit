@@ -1,4 +1,8 @@
 
+## Конфигурация
+
+Подробный справочник по всем `.env`, `mcp-local.json`, переменным Compose и их применению: [docs/configuration.md](docs/configuration.md).
+
 ## The idea
 
 ### Structure
