@@ -323,19 +323,41 @@ sync_metamcp_public_urls() {
     [ -z "$CONFIG_NEXT_PUBLIC_APP_URL" ] || set_metamcp_url NEXT_PUBLIC_APP_URL "$CONFIG_NEXT_PUBLIC_APP_URL" || return 1
 }
 
+# Compose reads the MetaMCP project .env on the host and injects these values
+# into the container environment. Check the running container too: its env may
+# be stale even when the host .env already contains the desired URL.
+metamcp_app_public_urls_stale() {
+    local app_id="$1" app_env
+    if [ -z "$CONFIG_APP_URL" ] && [ -z "$CONFIG_NEXT_PUBLIC_APP_URL" ]; then
+        return 1
+    fi
+    app_env="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' "$app_id" 2>/dev/null)" || return 0
+    if [ -n "$CONFIG_APP_URL" ] && ! grep -Fqx -- "APP_URL=$CONFIG_APP_URL" <<< "$app_env"; then
+        return 0
+    fi
+    if [ -n "$CONFIG_NEXT_PUBLIC_APP_URL" ] && ! grep -Fqx -- "NEXT_PUBLIC_APP_URL=$CONFIG_NEXT_PUBLIC_APP_URL" <<< "$app_env"; then
+        return 0
+    fi
+    return 1
+}
+
 cmd_apply_metamcp_config() {
     check_docker
     [ -f "$METAMCP_DIR/.env" ] || { error "Не найден $METAMCP_DIR/.env. Сначала выполните install-global.sh."; return 1; }
     sync_metamcp_public_urls || return 1
-    if [ "$META_URL_CHANGED" != true ]; then
-        success "Публичные URL MetaMCP уже соответствуют kit .env."
-        return 0
-    fi
 
     local app_id
     app_id="$(compose ps -a -q app)" || return 1
     if [ -z "$app_id" ]; then
-        success "URL сохранены в MetaMCP .env; контейнер приложения пока не запущен, примените их следующей командой start."
+        if [ "$META_URL_CHANGED" = true ]; then
+            success "URL сохранены в MetaMCP .env; контейнер приложения пока не запущен, примените их следующей командой start."
+        else
+            success "Публичные URL MetaMCP уже соответствуют kit .env; приложение ещё не запущено."
+        fi
+        return 0
+    fi
+    if [ "$META_URL_CHANGED" != true ] && ! metamcp_app_public_urls_stale "$app_id"; then
+        success "Публичные URL MetaMCP уже применены к контейнеру."
         return 0
     fi
 
@@ -416,8 +438,8 @@ cmd_start() {
     local app_id
     app_id="$(compose ps -a -q app)" || return 1
     compose up -d --no-recreate
-    if [ "$META_URL_CHANGED" = true ] && [ -n "$app_id" ]; then
-        warn "APP_URL изменился: пересоздаётся только MetaMCP app; сохраните ручные файлы из writable layer."
+    if [ -n "$app_id" ] && metamcp_app_public_urls_stale "$app_id"; then
+        warn "APP_URL в окружении контейнера отличается от kit .env: пересоздаётся только MetaMCP app; сохраните ручные файлы из writable layer."
         compose up -d --no-deps --force-recreate app || return 1
     fi
     wait_for_metamcp

@@ -41,7 +41,7 @@
 
 ### MetaMCP
 
-For a public URL, set `APP_URL=https://mcp.example.com` in `~/mcp-global/config/.env`. Every `bash linux/run-global.sh start` now syncs it (and `NEXT_PUBLIC_APP_URL`) to MetaMCP's own `.env`; if the value changed, only the app container is recreated. To apply immediately without waiting for the next start, run `bash linux/run-global.sh apply-metamcp-config`. Save any manual files in the app container's writable layer before a recreation. A public URL also requires DNS, TLS/reverse proxy or reachable port, and suitable firewall rules. See [the complete configuration reference](docs/configuration.md).
+For a public URL, set `APP_URL=https://mcp.example.com` in `~/mcp-global/config/.env`. Every `bash linux/run-global.sh start` syncs it (and `NEXT_PUBLIC_APP_URL`) to MetaMCP's Compose `.env`, which injects them into the container environment; the script checks the running app's environment and recreates only the app if it is stale. To apply immediately without waiting for the next start, run `bash linux/run-global.sh apply-metamcp-config`. Save any manual files in the app container's writable layer before a recreation. A public URL also requires DNS, TLS/reverse proxy or reachable port, and suitable firewall rules. See [the complete configuration reference](docs/configuration.md).
 
 ## Installation and run
 

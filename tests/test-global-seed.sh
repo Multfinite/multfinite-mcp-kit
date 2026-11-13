@@ -78,15 +78,19 @@ case "${1:-}" in
         ;;
     inspect)
         if [ "${2:-}" = --format ] && [ "${4:-}" = mock-app ]; then
-            printf '{'
-            sep=''
-            for f in "$MOCK_STATE"/attached-*; do
-                [ -f "$f" ] || continue
-                name="${f##*/attached-}"
-                printf '%s"%s":{}' "$sep" "$name"
-                sep=,
-            done
-            echo '}'
+            if [[ "${3:-}" == *'.Config.Env'* ]]; then
+                [ ! -f "$MOCK_STATE/app-env" ] || cat "$MOCK_STATE/app-env"
+            else
+                printf '{'
+                sep=''
+                for f in "$MOCK_STATE"/attached-*; do
+                    [ -f "$f" ] || continue
+                    name="${f##*/attached-}"
+                    printf '%s"%s":{}' "$sep" "$name"
+                    sep=,
+                done
+                echo '}'
+            fi
         elif [ "${2:-}" = --format ]; then
             [ -f "$MOCK_STATE/container-$4" ] || exit 1
             cat "$MOCK_STATE/container-$4"
@@ -145,7 +149,12 @@ case "${1:-}" in
         fi
         case "${1:-}" in
             version) echo '2.30.0' ;;
-            pull|up|stop|down|logs) exit 0 ;;
+            pull|stop|down|logs) exit 0 ;;
+            up)
+                if [[ " $* " == *" --force-recreate app "* ]] || [ ! -f "$MOCK_STATE/app-env" ]; then
+                    grep -E '^(APP_URL|NEXT_PUBLIC_APP_URL)=' "$HOME/mcp-global/metamcp/.env" > "$MOCK_STATE/app-env" || :
+                fi
+                ;;
             ps)
                 if { [ "$2" = -q ] && [ "$3" = app ]; } || { [ "$2" = -a ] && [ "$3" = -q ] && [ "$4" = app ]; }; then echo mock-app; fi
                 ;;
@@ -600,8 +609,16 @@ printf '\nAPP_URL=https://mcp-auto.example.test\n' >> "$HOME/mcp-global/config/.
 bash "$ROOT/linux/run-global.sh" start > "$TMP/url-start-auto.out" 2>&1 || { cat "$TMP/url-start-auto.out" >&2; fail 'automatic URL sync on start failed'; }
 assert_contains "$HOME/mcp-global/metamcp/.env" 'APP_URL=https://mcp-auto.example.test' 'normal start syncs kit APP_URL automatically'
 assert_contains "$HOME/mcp-global/metamcp/.env" 'NEXT_PUBLIC_APP_URL=https://mcp-auto.example.test' 'normal start syncs frontend URL automatically'
-assert_contains "$MOCK_LOG" 'up -d --no-deps --force-recreate app' 'normal start recreates app only when URL changes'
-printf 'ok - public URL sync and automatic app recreation on start\n'
+assert_contains "$MOCK_STATE/app-env" 'APP_URL=https://mcp-auto.example.test' 'recreated app receives APP_URL in its container environment'
+assert_contains "$MOCK_STATE/app-env" 'NEXT_PUBLIC_APP_URL=https://mcp-auto.example.test' 'recreated app receives NEXT_PUBLIC_APP_URL in its container environment'
+assert_contains "$MOCK_LOG" 'up -d --no-deps --force-recreate app' 'normal start recreates app only when runtime URL differs'
+# Even if the host dotenv already matches, repair an app container with stale env.
+printf 'APP_URL=http://localhost:12008\nNEXT_PUBLIC_APP_URL=http://localhost:12008\n' > "$MOCK_STATE/app-env"
+: > "$MOCK_LOG"
+bash "$ROOT/linux/run-global.sh" start > "$TMP/url-start-stale-container.out" 2>&1 || { cat "$TMP/url-start-stale-container.out" >&2; fail 'stale container URL repair failed'; }
+assert_contains "$MOCK_LOG" 'up -d --no-deps --force-recreate app' 'start recreates app if its runtime env is stale even when dotenv matches'
+assert_contains "$MOCK_STATE/app-env" 'APP_URL=https://mcp-auto.example.test' 'stale container receives current APP_URL'
+printf 'ok - public URL sync and automatic runtime environment repair on start\n'
 
 # A pre-created kit .env also supplies the public address when the installer
 # creates MetaMCP's .env for the first time.
