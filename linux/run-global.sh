@@ -341,6 +341,19 @@ metamcp_app_public_urls_stale() {
     return 1
 }
 
+ensure_uv_cache_permissions() {
+    local writable_test='test -w /home/nextjs/.cache/uv && { [ ! -e /home/nextjs/.cache/uv/CACHEDIR.TAG ] || test -w /home/nextjs/.cache/uv/CACHEDIR.TAG; }'
+    # Older MetaMCP images/containers may have initialized the named uv cache
+    # volume as root. Probe as the image's runtime user; only repair ownership
+    # when needed, then keep the app running unprivileged as usual.
+    if compose run --rm -T --no-deps --user 1001:1001 --entrypoint sh app -c "$writable_test" >/dev/null 2>&1; then
+        return 0
+    fi
+    info "Исправление владельца uv cache для пользователя MetaMCP..."
+    compose run --rm -T --no-deps --user 0:0 --entrypoint sh app -c \
+        'chown -R 1001:1001 /home/nextjs/.cache/uv' || return 1
+}
+
 cmd_apply_metamcp_config() {
     check_docker
     [ -f "$METAMCP_DIR/.env" ] || { error "Не найден $METAMCP_DIR/.env. Сначала выполните install-global.sh."; return 1; }
@@ -361,6 +374,7 @@ cmd_apply_metamcp_config() {
         return 0
     fi
 
+    ensure_uv_cache_permissions || return 1
     warn "Для применения URL пересоздаётся только контейнер MetaMCP app; файлы в его writable layer могут быть потеряны. Named volumes не удаляются."
     compose up -d --no-deps --force-recreate app || return 1
     wait_for_metamcp || return 1
@@ -435,6 +449,7 @@ cmd_start() {
     # MetaMCP container just because the Compose file or image changed. A
     # changed public URL is the exception: Compose only passes updated env to
     # a newly created app container, so recreate app alone after ensuring deps.
+    ensure_uv_cache_permissions || return 1
     local app_id
     app_id="$(compose ps -a -q app)" || return 1
     compose up -d --no-recreate

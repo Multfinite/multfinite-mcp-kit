@@ -78,7 +78,7 @@ Automatic seeding runs once per version per MetaMCP database; subsequent starts 
 bash linux/run-global.sh seed
 ```
 
-`start`, `stop`, `restart`, `status`, `logs`, `services-logs`, `apply-services`, and `apply-metamcp-config` are available as `bash linux/run-global.sh <command>`. Normal starts do not recreate an existing MetaMCP container or sidecar unless a public URL changed; then only the app is recreated to apply its new environment. `stop`/`restart` stop rather than remove containers. `apply-services` deliberately recreates only Graphiti/Cognee. Back up any manual files in the app's writable layer before applying a changed public URL. `METAMCP_START_TIMEOUT` controls the readiness wait in seconds (default 180).
+`start`, `stop`, `restart`, `status`, `logs`, `services-logs`, `apply-services`, and `apply-metamcp-config` are available as `bash linux/run-global.sh <command>`. Normal starts do not recreate an existing MetaMCP container or sidecar unless a public URL changed; then only the app is recreated to apply its new environment. Starts also check the MetaMCP `uv` cache volume and repair its ownership if an older container left it unwritable, without running the app as root. `stop`/`restart` stop rather than remove containers. `apply-services` deliberately recreates only Graphiti/Cognee. Back up any manual files in the app's writable layer before applying a changed public URL. `METAMCP_START_TIMEOUT` controls the readiness wait in seconds (default 180).
 
 #### Server prerequisites and credentials
 

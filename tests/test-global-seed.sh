@@ -155,6 +155,15 @@ case "${1:-}" in
                     grep -E '^(APP_URL|NEXT_PUBLIC_APP_URL)=' "$HOME/mcp-global/metamcp/.env" > "$MOCK_STATE/app-env" || :
                 fi
                 ;;
+            run)
+                if [[ " $* " == *" --user 1001:1001 "* ]]; then
+                    if [ "${MOCK_UV_CACHE_BAD:-0}" = 1 ] && [ ! -f "$MOCK_STATE/uv-cache-repaired" ]; then exit 1; fi
+                elif [[ " $* " == *" --user 0:0 "* ]]; then
+                    : > "$MOCK_STATE/uv-cache-repaired"
+                else
+                    echo "Unexpected compose run: $*" >&2; exit 1
+                fi
+                ;;
             ps)
                 if { [ "$2" = -q ] && [ "$3" = app ]; } || { [ "$2" = -a ] && [ "$3" = -q ] && [ "$4" = app ]; }; then echo mock-app; fi
                 ;;
@@ -605,8 +614,11 @@ assert_contains "$MOCK_LOG" 'compose up -d --no-deps --force-recreate app' 'URL 
 assert_contains "$TMP/url-apply.out" 'APP_URL и NEXT_PUBLIC_APP_URL применены' 'URL update reports success'
 # A normal start must also sync a later URL edit and recreate only app.
 printf '\nAPP_URL=https://mcp-auto.example.test\n' >> "$HOME/mcp-global/config/.env"
+export MOCK_UV_CACHE_BAD=1
 : > "$MOCK_LOG"
 bash "$ROOT/linux/run-global.sh" start > "$TMP/url-start-auto.out" 2>&1 || { cat "$TMP/url-start-auto.out" >&2; fail 'automatic URL sync on start failed'; }
+[ -f "$MOCK_STATE/uv-cache-repaired" ] || fail 'root-owned uv cache is repaired before app start'
+unset MOCK_UV_CACHE_BAD
 assert_contains "$HOME/mcp-global/metamcp/.env" 'APP_URL=https://mcp-auto.example.test' 'normal start syncs kit APP_URL automatically'
 assert_contains "$HOME/mcp-global/metamcp/.env" 'NEXT_PUBLIC_APP_URL=https://mcp-auto.example.test' 'normal start syncs frontend URL automatically'
 assert_contains "$MOCK_STATE/app-env" 'APP_URL=https://mcp-auto.example.test' 'recreated app receives APP_URL in its container environment'
