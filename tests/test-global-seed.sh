@@ -297,6 +297,14 @@ assert_eq multfinite-mcp-kit-global "$(cat "$MOCK_STATE/graphiti-group")" 'Graph
 assert_contains "$TMP/install.out" 'ГЛОБАЛЬНЫЙ СТЕК УСТАНОВЛЕН И ЗАПУЩЕН' 'success follows seeding and service startup'
 printf 'ok - fresh installation, all servers, grouping, endpoints, sidecars and persistence\n'
 
+# A transient startup failure must not leave kit-owned public servers stuck in
+# ERROR after cache/network recovery; manual/user-owned rows are not touched.
+query "UPDATE mcp_servers SET error_status='ERROR' WHERE user_id IS NULL AND name IN ('neo4j-global','qdrant-global','fetch','duckduckgo','graphiti','cognee','memory-bank-mcp','gdrive')" >/dev/null
+bash "$ROOT/linux/run-global.sh" start > "$TMP/reset-error-state.out" 2>&1 || { cat "$TMP/reset-error-state.out" >&2; fail 'start did not recover kit server error states'; }
+assert_eq 0 "$(query "SELECT count(*) FROM mcp_servers WHERE user_id IS NULL AND name IN ('neo4j-global','qdrant-global','fetch','duckduckgo','graphiti','cognee','memory-bank-mcp','gdrive') AND error_status='ERROR'")" 'start clears stale error state from kit-owned public servers'
+assert_contains "$TMP/reset-error-state.out" 'Сброшен устаревший Error Status' 'stale error recovery is reported'
+printf 'ok - startup clears stale kit-server ERROR state after dependencies are ready\n'
+
 # A pre-existing public server is reused, private servers stay private, and
 # disabled mappings/manual endpoint ownership and configuration survive.
 reset_db

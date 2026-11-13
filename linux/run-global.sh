@@ -225,6 +225,33 @@ start_services() {
     info "Graphiti, Cognee, GitHub и Google Drive могут требовать ключи/авторизацию; подробности в README."
 }
 
+# The upstream MetaMCP image can persist ERROR after a transient startup issue
+# (for example, uv cache permissions or kit sidecar DNS before networks attach)
+# and older images then refuse to retry. Once dependencies and networks are
+# ready, clear only the kit's shared default servers so the next request retries.
+reset_kit_server_errors() {
+    local recovered
+    if ! recovered=$(compose exec -T app sh -c \
+        'exec psql --dbname="$DATABASE_URL" -X -v ON_ERROR_STOP=1 -qAt' <<'SQL'
+UPDATE mcp_servers
+SET error_status = 'NONE'
+WHERE user_id IS NULL
+  AND error_status = 'ERROR'
+  AND name IN (
+      'neo4j-global', 'qdrant-global', 'fetch', 'duckduckgo',
+      'graphiti', 'cognee', 'memory-bank-mcp', 'gdrive'
+  )
+RETURNING name;
+SQL
+    ); then
+        error "Не удалось сбросить устаревший Error Status у kit-серверов."
+        return 1
+    fi
+    if [ -n "$recovered" ]; then
+        info "Сброшен устаревший Error Status: ${recovered//$'\n'/, }. Повторное подключение произойдёт при следующем запросе."
+    fi
+}
+
 start_storage() {
     header "Вспомогательные БД"
     local name running
@@ -379,6 +406,7 @@ cmd_apply_metamcp_config() {
     compose up -d --no-deps --force-recreate app || return 1
     wait_for_metamcp || return 1
     start_services || return 1
+    reset_kit_server_errors || return 1
     success "APP_URL и NEXT_PUBLIC_APP_URL применены к MetaMCP."
 }
 
@@ -463,6 +491,7 @@ cmd_start() {
         error "Дополнительные MCP-сервисы не запущены; записи MetaMCP сохранены. Исправьте ошибку и повторите start."
         return 1
     fi
+    reset_kit_server_errors || return 1
     cmd_status
 }
 
