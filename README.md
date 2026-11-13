@@ -53,7 +53,7 @@ Requirements: Debian/Ubuntu (or WSL), Docker accessible without `sudo`, the Dock
 bash linux/install-global.sh
 ```
 
-The installer starts Neo4j, Qdrant and MetaMCP, waits for its migrations, then registers **all 11 servers in the Global list** as shared servers. New namespaces and endpoints are organized as follows:
+On first install, if Docker is newly adding your user to the `docker` group, the script exits with instructions to restart the WSL session and rerun it; group changes do not apply to the current shell. It does not invoke an interactive `newgrp` shell. The installer then starts Neo4j, Qdrant and MetaMCP, waits for its migrations, and registers **all 11 servers in the Global list** as shared servers. New namespaces and endpoints are organized as follows:
 
 | Namespace | Servers | Protected endpoint name |
 | --- | --- | --- |

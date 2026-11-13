@@ -77,13 +77,17 @@ EOF
 sudo apt update
 sudo apt install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 
+getent group docker >/dev/null || error "После установки Docker не найдена группа docker. Проверьте установку docker-ce."
 sudo usermod -aG docker "$USER"
-newgrp docker
 
-#
+# `newgrp docker` starts an interactive shell when called from an installer,
+# making the script appear to hang here. Group changes apply to new sessions.
+if ! id -nG | tr ' ' '\n' | grep -qx docker; then
+    error "Пользователь $USER добавлен в группу docker. Полностью перезапустите сессию WSL командой wsl.exe --shutdown, откройте Debian снова и повторите запуск linux/install-global.sh."
+fi
 
 if ! command -v docker &>/dev/null || ! docker info &>/dev/null; then
-    error "Docker недоступен текущему пользователю. Запустите Docker и настройте доступ без sudo."
+    error "Docker daemon недоступен. Проверьте, что Docker запущен и доступен из WSL, затем повторите установку."
 fi
 success "Docker работает ($(docker --version))"
 
