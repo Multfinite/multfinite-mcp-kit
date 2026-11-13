@@ -119,24 +119,28 @@ GLOBAL_ENV="${CONFIG_DIR}/.env"
 
 if [ ! -f "$GLOBAL_ENV" ]; then
     cat > "$GLOBAL_ENV" << EOF
-# ── LLM (OpenRouter / DeepSeek) ─────────────────────────
-LLM_API_BASE=https://openrouter.ai/api/v1
-LLM_API_KEY=sk-or-v1-your-key-here
-LLM_MODEL=deepseek/deepseek-r1
-EMBEDDING_MODEL=text-embedding-3-small
+# ── OpenAI: Graphiti and Cognee (LLM + embeddings) ─────
+# Add your own key; empty credentials are not usable.
+OPENAI_API_KEY=
+# GRAPHITI_MODEL=gpt-4o-mini
+# GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small
+# GRAPHITI_GROUP_ID=multfinite-mcp-kit-global
 
-# ── Embeddings (OpenAI) ─────────────────────────────────
-OPENAI_API_KEY=sk-your-openai-key-here
+# Cognee can use different providers/keys; see README for all options.
+# COGNEE_LLM_API_KEY=
+# COGNEE_EMBEDDING_API_KEY=
 
 # ── Neo4j & Qdrant ──────────────────────────────────────
 NEO4J_URI=bolt://localhost:7687
 NEO4J_USER=neo4j
 NEO4J_PASSWORD=mcp-neo4j-pass
+# NEO4J_DATABASE=neo4j  # Graphiti's database; must already exist.
 QDRANT_URL=http://localhost:6333
 
 # ── Integrations ────────────────────────────────────────
-GITHUB_PERSONAL_ACCESS_TOKEN=ghp_your_token_here
-GOOGLE_APPLICATION_CREDENTIALS=${CONFIG_DIR}/gdrive-credentials.json
+GITHUB_PERSONAL_ACCESS_TOKEN=
+CONTEXT7_API_KEY=
+# Google Drive requires a separate OAuth flow; see README.
 EOF
     chmod 600 "$GLOBAL_ENV"
     success "Файл ключей создан: ${GLOBAL_ENV}"

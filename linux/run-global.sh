@@ -7,6 +7,8 @@ CONFIG_DIR="$BASE_DIR/config"
 METAMCP_DIR="$BASE_DIR/metamcp"
 CONFIG_ENV="$CONFIG_DIR/.env"
 SEED_SQL="$SCRIPT_DIR/seed-global.sql"
+SERVICES_COMPOSE="$SCRIPT_DIR/services/docker-compose.yml"
+SERVICES_PROJECT="multfinite-mcp-kit-global"
 
 header()  { echo -e "\n\033[1;36m═══ $* ═══\033[0m"; }
 success() { echo -e "\033[0;32m[OK]\033[0m $*"; }
@@ -15,6 +17,14 @@ warn()    { echo -e "\033[0;33m[WARN]\033[0m $*"; }
 error()   { echo -e "\033[0;31m[ERROR]\033[0m $*" >&2; }
 
 compose() { (cd "$METAMCP_DIR" && docker compose "$@"); }
+
+# Older installs generated these example values. They are not credentials.
+credential_value() {
+    case "$1" in
+        ''|sk-your-openai-key-here|sk-or-v1-your-key-here|ghp_your_token_here) printf '%s' '' ;;
+        *) printf '%s' "$1" ;;
+    esac
+}
 
 check_docker() {
     header "Docker"
@@ -66,6 +76,7 @@ load_seed_config() {
     if ! encoded=$(
         (
             unset NEO4J_URI NEO4J_USER NEO4J_USERNAME NEO4J_PASSWORD QDRANT_URL QDRANT_API_KEY
+            unset GITHUB_PERSONAL_ACCESS_TOKEN CONTEXT7_API_KEY
             # shellcheck source=/dev/null
             if ! source "$CONFIG_ENV" >/dev/null; then
                 exit 1
@@ -76,6 +87,8 @@ load_seed_config() {
             encode "${NEO4J_PASSWORD:-mcp-neo4j-pass}"
             encode "$(container_uri "${QDRANT_URL:-http://localhost:6333}")"
             encode "${QDRANT_API_KEY:-}"
+            encode "$(credential_value "${GITHUB_PERSONAL_ACCESS_TOKEN:-}")"
+            encode "$(credential_value "${CONTEXT7_API_KEY:-}")"
             printf '%s\n' 'END'
         )
     ); then
@@ -84,7 +97,7 @@ load_seed_config() {
     fi
     local -a values
     mapfile -t values <<< "$encoded"
-    if [ "${#values[@]}" -ne 6 ] || [ "${values[5]}" != END ]; then
+    if [ "${#values[@]}" -ne 8 ] || [ "${values[7]}" != END ]; then
         error "Не удалось прочитать настройки MCP-серверов из $CONFIG_ENV"
         return 1
     fi
@@ -93,6 +106,108 @@ load_seed_config() {
     SEED_NEO4J_PASSWORD="${values[2]}"
     SEED_QDRANT_URL="${values[3]}"
     SEED_QDRANT_API_KEY="${values[4]}"
+    SEED_GITHUB_TOKEN="${values[5]}"
+    SEED_CONTEXT7_KEY="${values[6]}"
+}
+
+# A separate Compose project keeps the user's MetaMCP files and containers
+# untouched. Each sidecar gets a private, un-published network; only the
+# existing MetaMCP app is attached to it. Values are passed through the process
+# environment, never as shell arguments or printed in the log.
+services_compose() (
+    unset NEO4J_URI NEO4J_USER NEO4J_USERNAME NEO4J_PASSWORD NEO4J_DATABASE OPENAI_API_KEY
+    unset GRAPHITI_MODEL GRAPHITI_EMBEDDER_MODEL GRAPHITI_GROUP_ID COGNEE_LLM_PROVIDER COGNEE_LLM_API_KEY COGNEE_LLM_MODEL COGNEE_LLM_ENDPOINT
+    unset COGNEE_EMBEDDING_PROVIDER COGNEE_EMBEDDING_API_KEY COGNEE_EMBEDDING_MODEL COGNEE_EMBEDDING_DIMENSIONS
+    if [ -f "$CONFIG_ENV" ]; then
+        # shellcheck source=/dev/null
+        if ! source "$CONFIG_ENV" >/dev/null; then
+            error "Не удалось прочитать $CONFIG_ENV"
+            return 1
+        fi
+    fi
+    export MCPKIT_NEO4J_URI MCPKIT_NEO4J_USER MCPKIT_NEO4J_PASSWORD MCPKIT_NEO4J_DATABASE MCPKIT_OPENAI_API_KEY
+    export MCPKIT_GRAPHITI_MODEL MCPKIT_GRAPHITI_EMBEDDER_MODEL MCPKIT_GRAPHITI_GROUP_ID
+    export MCPKIT_COGNEE_LLM_PROVIDER MCPKIT_COGNEE_LLM_API_KEY MCPKIT_COGNEE_LLM_MODEL MCPKIT_COGNEE_LLM_ENDPOINT
+    export MCPKIT_COGNEE_EMBEDDING_PROVIDER MCPKIT_COGNEE_EMBEDDING_API_KEY MCPKIT_COGNEE_EMBEDDING_MODEL MCPKIT_COGNEE_EMBEDDING_DIMENSIONS
+    MCPKIT_NEO4J_URI="$(container_uri "${NEO4J_URI:-bolt://localhost:7687}")"
+    MCPKIT_NEO4J_USER="${NEO4J_USERNAME:-${NEO4J_USER:-neo4j}}"
+    MCPKIT_NEO4J_PASSWORD="${NEO4J_PASSWORD:-mcp-neo4j-pass}"
+    MCPKIT_NEO4J_DATABASE="${NEO4J_DATABASE:-neo4j}"
+    MCPKIT_OPENAI_API_KEY="$(credential_value "${OPENAI_API_KEY:-}")"
+    MCPKIT_GRAPHITI_MODEL="${GRAPHITI_MODEL:-gpt-4o-mini}"
+    MCPKIT_GRAPHITI_EMBEDDER_MODEL="${GRAPHITI_EMBEDDER_MODEL:-text-embedding-3-small}"
+    MCPKIT_GRAPHITI_GROUP_ID="${GRAPHITI_GROUP_ID:-multfinite-mcp-kit-global}"
+    MCPKIT_COGNEE_LLM_PROVIDER="${COGNEE_LLM_PROVIDER:-openai}"
+    MCPKIT_COGNEE_LLM_API_KEY="$(credential_value "${COGNEE_LLM_API_KEY:-$MCPKIT_OPENAI_API_KEY}")"
+    MCPKIT_COGNEE_LLM_MODEL="${COGNEE_LLM_MODEL:-gpt-4o-mini}"
+    MCPKIT_COGNEE_LLM_ENDPOINT="${COGNEE_LLM_ENDPOINT:-}"
+    MCPKIT_COGNEE_EMBEDDING_PROVIDER="${COGNEE_EMBEDDING_PROVIDER:-openai}"
+    MCPKIT_COGNEE_EMBEDDING_API_KEY="$(credential_value "${COGNEE_EMBEDDING_API_KEY:-$MCPKIT_OPENAI_API_KEY}")"
+    MCPKIT_COGNEE_EMBEDDING_MODEL="${COGNEE_EMBEDDING_MODEL:-text-embedding-3-small}"
+    MCPKIT_COGNEE_EMBEDDING_DIMENSIONS="${COGNEE_EMBEDDING_DIMENSIONS:-1536}"
+    docker compose -p "$SERVICES_PROJECT" -f "$SERVICES_COMPOSE" "$@"
+)
+
+# Do not adopt someone else's volume or network merely because its name
+# happens to match ours. Compose labels identify resources made by this kit.
+check_service_resources() {
+    local kind spec name resource owner format
+    for kind in network volume; do
+        if [ "$kind" = network ]; then
+            set -- graphiti:graphiti cognee:cognee memory:memory gdrive:gdrive
+        else
+            set -- cognee-system:cognee_system cognee-data:cognee_data memory-data:memory_data gdrive-data:gdrive_data
+        fi
+        format="{{index .Labels \"com.docker.compose.project\"}}|{{index .Labels \"com.docker.compose.$kind\"}}"
+        for spec in "$@"; do
+            name="$SERVICES_PROJECT-${spec%%:*}"
+            resource="${spec#*:}"
+            if owner="$(docker "$kind" inspect --format "$format" "$name" 2>/dev/null)"; then
+                if [ "$owner" != "$SERVICES_PROJECT|$resource" ]; then
+                    error "Существующий Docker $kind $name не принадлежит проекту $SERVICES_PROJECT; он не изменён."
+                    return 1
+                fi
+            fi
+        done
+    done
+}
+
+connect_service_networks() {
+    local app_id network attached
+    command -v jq >/dev/null || { error "Для настройки сетей требуется jq."; return 1; }
+    app_id="$(compose ps -q app)" || return 1
+    if [ -z "$app_id" ]; then
+        error "Не найден контейнер app в Compose MetaMCP."
+        return 1
+    fi
+    for network in graphiti cognee memory gdrive; do
+        network="$SERVICES_PROJECT-$network"
+        attached="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$app_id")" || return 1
+        if ! jq -e --arg network "$network" 'has($network)' <<< "$attached" >/dev/null; then
+            # Another concurrent start may have attached it after the check.
+            if ! docker network connect "$network" "$app_id"; then
+                attached="$(docker inspect --format '{{json .NetworkSettings.Networks}}' "$app_id")" || return 1
+                if ! jq -e --arg network "$network" 'has($network)' <<< "$attached" >/dev/null; then
+                    error "Не удалось подключить MetaMCP к сети $network. Проверьте сетевой режим контейнера."
+                    return 1
+                fi
+            fi
+        fi
+    done
+}
+
+start_services() {
+    header "Дополнительные MCP-сервисы"
+    if [ ! -f "$SERVICES_COMPOSE" ]; then
+        error "Не найден $SERVICES_COMPOSE. Обновите весь комплект файлов."
+        return 1
+    fi
+    command -v jq >/dev/null || { error "Для настройки сетей требуется jq."; return 1; }
+    check_service_resources || return 1
+    # Never recreate an existing service or its persistent volumes on start.
+    services_compose up -d --no-recreate || return 1
+    connect_service_networks || return 1
+    info "Graphiti, Cognee, GitHub и Google Drive могут требовать ключи/авторизацию; подробности в README."
 }
 
 start_storage() {
@@ -133,7 +248,7 @@ wait_for_metamcp() {
 }
 
 auto_seed_mcp_config() {
-    local force="${1:-false}" result
+    local force="${1:-false}" result state blocked conflicts
     header "Регистрация MCP-серверов по умолчанию"
     info "Добавляем только отсутствующие записи; существующие настройки не изменяются."
 
@@ -148,6 +263,8 @@ auto_seed_mcp_config() {
             printf "\\set neo4j_password_b64 '%s'\n" "$SEED_NEO4J_PASSWORD"
             printf "\\set qdrant_url_b64 '%s'\n" "$SEED_QDRANT_URL"
             printf "\\set qdrant_api_key_b64 '%s'\n" "$SEED_QDRANT_API_KEY"
+            printf "\\set github_token_b64 '%s'\n" "$SEED_GITHUB_TOKEN"
+            printf "\\set context7_key_b64 '%s'\n" "$SEED_CONTEXT7_KEY"
             printf "\\set seed_force '%s'\n" "$force"
             cat "$SEED_SQL"
         } | compose exec -T app sh -c '
@@ -162,20 +279,19 @@ auto_seed_mcp_config() {
         return 1
     fi
 
-    case "$result" in
+    IFS='|' read -r state blocked conflicts <<< "$result"
+    case "$state" in
         seeded)
             success "MCP-серверы по умолчанию зарегистрированы."
-            info "Endpoint: /metamcp/global-sse/sse (новый endpoint требует API-ключ)."
-            ;;
-        endpoint-conflict)
-            success "MCP-серверы добавлены в общий namespace global."
-            warn "Endpoint global-sse уже используется в другом namespace или является приватным; он не изменён."
-            warn "Создайте отдельный защищённый endpoint для namespace global в MetaMCP."
-            ;;
-        unprotected-namespace)
-            success "MCP-серверы зарегистрированы в MetaMCP."
-            warn "У namespace global есть endpoint без аутентификации; новые привязки не добавлены, чтобы не раскрыть доступ к инструментам."
-            warn "Защитите endpoint и выполните: bash $SCRIPT_DIR/run-global.sh seed"
+            info "Адреса endpoints по группам перечислены в README; новые endpoints требуют API-ключ."
+            if [ -n "$blocked" ]; then
+                warn "У namespace ($blocked) есть endpoint без аутентификации; новые привязки туда не добавлены."
+                warn "Защитите endpoint и выполните: bash $SCRIPT_DIR/run-global.sh seed"
+            fi
+            if [ -n "$conflicts" ]; then
+                warn "Endpoint ($conflicts) уже используется другим namespace или пользователем и не изменён."
+                warn "Создайте отдельный защищённый endpoint для нужного namespace в MetaMCP."
+            fi
             ;;
         skipped)
             success "Первоначальная регистрация уже выполнена; ручные изменения сохранены."
@@ -198,6 +314,10 @@ cmd_start() {
     compose up -d --no-recreate
     wait_for_metamcp
     auto_seed_mcp_config false
+    if ! start_services; then
+        error "Дополнительные MCP-сервисы не запущены; записи MetaMCP сохранены. Исправьте ошибку и повторите start."
+        return 1
+    fi
     cmd_status
 }
 
@@ -208,24 +328,46 @@ cmd_seed() {
     auto_seed_mcp_config true
 }
 
+# Explicit only: Docker environment is fixed at container creation. Applying
+# changed Graphiti/Cognee keys recreates just these two kit-owned containers;
+# their data stays in Neo4j/the named Cognee volumes, not their writable layer.
+cmd_apply_services() {
+    check_docker
+    load_seed_config
+    command -v jq >/dev/null || { error "Для настройки сетей требуется jq."; return 1; }
+    wait_for_metamcp
+    check_service_resources
+    warn "Пересоздаются только контейнеры Graphiti и Cognee; их постоянные данные и MetaMCP не изменяются."
+    services_compose up -d --no-deps --force-recreate mcpkit-graphiti mcpkit-cognee
+    connect_service_networks
+    success "Настройки Graphiti и Cognee применены."
+}
+
 cmd_stop() {
     header "Остановка"
-    compose down || warn "Не удалось остановить MetaMCP через Docker Compose"
+    if [ -f "$SERVICES_COMPOSE" ]; then
+        services_compose stop || warn "Не удалось остановить дополнительные MCP-сервисы"
+    fi
+    # Stop rather than `down`: removing the app container could discard files
+    # the user created manually in its writable layer.
+    compose stop || warn "Не удалось остановить MetaMCP через Docker Compose"
     docker stop neo4j-mcp qdrant-mcp 2>/dev/null || true
     success "Остановка завершена"
 }
 
 cmd_status() {
     echo -e "\n\033[1;35mMetaMCP Status\033[0m"
-    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "metamcp|neo4j|qdrant" || true
+    docker ps --format "table {{.Names}}\t{{.Status}}\t{{.Ports}}" | grep -E "metamcp|neo4j|qdrant|mcpkit" || true
 }
 
 case "${1:-start}" in
-    start)   cmd_start ;;
-    seed)    cmd_seed ;;
-    stop)    cmd_stop ;;
-    restart) cmd_stop; sleep 2; cmd_start ;;
-    status)  cmd_status ;;
-    logs)    compose logs -f app ;;
-    *) error "Использование: $0 {start|seed|stop|restart|status|logs}"; exit 2 ;;
+    start)          cmd_start ;;
+    seed)           cmd_seed ;;
+    apply-services) cmd_apply_services ;;
+    stop)           cmd_stop ;;
+    restart)        cmd_stop; sleep 2; cmd_start ;;
+    status)         cmd_status ;;
+    logs)           compose logs -f app ;;
+    services-logs)  services_compose logs -f ;;
+    *) error "Использование: $0 {start|seed|apply-services|stop|restart|status|logs|services-logs}"; exit 2 ;;
 esac
