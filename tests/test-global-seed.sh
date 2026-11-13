@@ -255,8 +255,7 @@ assert_contains "$HOME/mcp-global/metamcp/.env" 'BOOTSTRAP_USER_PASSWORD=' 'exam
 assert_not_contains "$HOME/mcp-global/metamcp/.env" 'BOOTSTRAP_USER_PASSWORD=changeme' 'example password not retained'
 assert_contains "$HOME/mcp-global/metamcp/.env" 'BOOTSTRAP_RECREATE_USER=false' 'bootstrap will not recreate users'
 assert_contains "$HOME/mcp-global/metamcp/.env" '"update":false' 'bootstrap will not overwrite edits'
-assert_contains "$HOME/mcp-global/config/.env" 'OPENAI_API_KEY=' 'legacy fallback is documented'
-assert_contains "$HOME/mcp-global/config/.env" 'GRAPHITI_API_KEY=' 'Graphiti gets an independent key setting'
+assert_contains "$HOME/mcp-global/config/.env" 'GRAPHITI_API_KEY=' 'Graphiti has its own key setting'
 assert_contains "$HOME/mcp-global/config/.env" 'GRAPHITI_BASE_URL=https://api.openai.com/v1' 'Graphiti endpoint has an explicit OpenAI-compatible base URL'
 assert_contains "$HOME/mcp-global/config/.env" 'COGNEE_LLM_ENDPOINT=https://api.openai.com/v1' 'Cognee LLM endpoint has its own base URL'
 assert_contains "$HOME/mcp-global/config/.env" 'COGNEE_EMBEDDING_ENDPOINT=https://api.openai.com/v1' 'Cognee embedding endpoint has its own base URL'
@@ -302,7 +301,6 @@ NEO4J_USER=custom-user
 NEO4J_PASSWORD='pa$$word'"'"' with spaces; SELECT pg_sleep(99); --'
 QDRANT_URL='https://qdrant.example.test:443'
 QDRANT_API_KEY='key-with-"quotes"'
-OPENAI_API_KEY='legacy-shared-secret'
 GRAPHITI_API_KEY='graphiti-specific-secret'
 GRAPHITI_BASE_URL='https://graphiti.example.test/v1'
 COGNEE_LLM_API_KEY='cognee-llm-secret'
@@ -463,19 +461,19 @@ assert_eq INACTIVE "$(query "SELECT status FROM namespace_server_mappings WHERE 
 assert_eq 1 "$(query "SELECT count(*) FROM endpoints WHERE name='global-memory' AND enable_api_key_auth")" 'protected endpoint created on explicit retry'
 printf 'ok - open endpoints do not expose newly linked tools\n'
 
-# Values written by earlier installer versions are examples, not usable keys.
+# The old shared key is ignored; only explicit service-specific keys count.
 reset_db
 prepare_existing
 cat >> "$HOME/mcp-global/config/.env" <<'EOF'
-OPENAI_API_KEY=sk-your-openai-key-here
+OPENAI_API_KEY=legacy-shared-secret
 GITHUB_PERSONAL_ACCESS_TOKEN=ghp_your_token_here
-COGNEE_LLM_API_KEY=sk-or-v1-your-key-here
 EOF
-bash "$ROOT/linux/run-global.sh" start > "$TMP/placeholders.out" 2>&1 || { cat "$TMP/placeholders.out" >&2; fail 'legacy placeholders caused startup failure'; }
-assert_eq '' "$(cat "$MOCK_STATE/graphiti-openai")" 'example OpenAI key is not passed as a real credential'
-assert_eq '' "$(cat "$MOCK_STATE/cognee-llm")" 'example Cognee key is not passed as a real credential'
+bash "$ROOT/linux/run-global.sh" start > "$TMP/placeholders.out" 2>&1 || { cat "$TMP/placeholders.out" >&2; fail 'legacy shared key caused startup failure'; }
+assert_eq '' "$(cat "$MOCK_STATE/graphiti-openai")" 'legacy shared OpenAI key is not passed to Graphiti'
+assert_eq '' "$(cat "$MOCK_STATE/cognee-llm")" 'legacy shared key is not passed to Cognee LLM'
+assert_eq '' "$(cat "$MOCK_STATE/cognee-embedding")" 'legacy shared key is not passed to Cognee embeddings'
 assert_eq t "$(query "SELECT bearer_token IS NULL FROM mcp_servers WHERE name='github-mcp-server'")" 'example GitHub token is not stored as a real credential'
-printf 'ok - old placeholder credentials are ignored\n'
+printf 'ok - legacy shared key and placeholder credentials are ignored\n'
 
 # Failure rolls back every database change and does not start sidecars.
 reset_db
@@ -542,20 +540,20 @@ printf 'ok - foreign Docker volumes are not adopted\n'
 reset_db
 prepare_existing
 bash "$ROOT/linux/run-global.sh" start > "$TMP/provider-start.out" 2>&1 || { cat "$TMP/provider-start.out" >&2; fail 'provider start failed'; }
-printf '\nOPENAI_API_KEY=updated-key\nNEO4J_DATABASE=separate-graph\nGRAPHITI_GROUP_ID=custom-group\nGRAPHITI_BASE_URL=https://graphiti-gateway.example/v1\nCOGNEE_LLM_ENDPOINT=https://llm-gateway.example/v1\nCOGNEE_EMBEDDING_ENDPOINT=https://embedding-gateway.example/v1\n' >> "$HOME/mcp-global/config/.env"
+printf '\nGRAPHITI_API_KEY=graphiti-updated-key\nCOGNEE_LLM_API_KEY=llm-updated-key\nCOGNEE_EMBEDDING_API_KEY=embedding-updated-key\nNEO4J_DATABASE=separate-graph\nGRAPHITI_GROUP_ID=custom-group\nGRAPHITI_BASE_URL=https://graphiti-gateway.example/v1\nCOGNEE_LLM_ENDPOINT=https://llm-gateway.example/v1\nCOGNEE_EMBEDDING_ENDPOINT=https://embedding-gateway.example/v1\n' >> "$HOME/mcp-global/config/.env"
 : > "$MOCK_LOG"
 bash "$ROOT/linux/run-global.sh" apply-services > "$TMP/provider-apply.out" 2>&1 || { cat "$TMP/provider-apply.out" >&2; fail 'provider apply failed'; }
 assert_contains "$MOCK_LOG" 'up -d --no-deps --force-recreate mcpkit-graphiti mcpkit-cognee' 'only provider services are explicitly recreated'
 assert_not_contains "$MOCK_LOG" 'compose up ' 'MetaMCP is not recreated by provider apply'
 assert_not_contains "$MOCK_LOG" 'volume rm' 'provider apply never removes persistent volumes'
-assert_eq updated-key "$(cat "$MOCK_STATE/graphiti-openai")" 'legacy shared key remains a Graphiti fallback'
+assert_eq graphiti-updated-key "$(cat "$MOCK_STATE/graphiti-openai")" 'Graphiti API key is configured independently'
 assert_eq https://graphiti-gateway.example/v1 "$(cat "$MOCK_STATE/graphiti-base-url")" 'Graphiti base URL can be changed independently'
 assert_eq https://llm-gateway.example/v1 "$(cat "$MOCK_STATE/cognee-llm-endpoint")" 'Cognee LLM endpoint reaches its own client'
 assert_eq https://embedding-gateway.example/v1 "$(cat "$MOCK_STATE/cognee-embedding-endpoint")" 'Cognee embedding endpoint reaches its own client'
 assert_eq separate-graph "$(cat "$MOCK_STATE/graphiti-database")" 'Graphiti database override is passed to Compose'
 assert_eq custom-group "$(cat "$MOCK_STATE/graphiti-group")" 'Graphiti group override is passed to Compose'
-assert_eq updated-key "$(cat "$MOCK_STATE/cognee-llm")" 'OpenAI key is Cognee fallback'
-assert_eq updated-key "$(cat "$MOCK_STATE/cognee-embedding")" 'OpenAI key is embedding fallback'
+assert_eq llm-updated-key "$(cat "$MOCK_STATE/cognee-llm")" 'Cognee LLM key is configured independently'
+assert_eq embedding-updated-key "$(cat "$MOCK_STATE/cognee-embedding")" 'Cognee embedding key is configured independently'
 : > "$MOCK_LOG"
 bash "$ROOT/linux/run-global.sh" stop > "$TMP/provider-stop.out" 2>&1 || { cat "$TMP/provider-stop.out" >&2; fail 'stop failed'; }
 assert_contains "$MOCK_LOG" 'compose stop' 'stop preserves MetaMCP container writable layer'

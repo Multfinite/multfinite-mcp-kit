@@ -168,9 +168,7 @@ GLOBAL_ENV="${CONFIG_DIR}/.env"
 
 if [ ! -f "$GLOBAL_ENV" ]; then
     cat > "$GLOBAL_ENV" << EOF
-# ── OpenAI-compatible APIs: each service can use its own key and base URL ──
-# Legacy shared key fallback; prefer the per-service keys below.
-OPENAI_API_KEY=
+# ── OpenAI-compatible APIs: each service uses its own key and base URL ──
 GRAPHITI_API_KEY=
 GRAPHITI_BASE_URL=https://api.openai.com/v1
 # Graphiti uses this API key/base URL for its LLM and embeddings.
