@@ -1,0 +1,112 @@
+#!/usr/bin/env node
+// Synthetic Docker Desktop boundary for POSIX PowerShell tests. This does NOT
+// test real Docker networking or build an image. Secrets on stdin are never
+// written to the argument trace.
+const fs = require('node:fs');
+const http = require('node:http');
+const path = require('node:path');
+const { spawnSync } = require('node:child_process');
+const args = process.argv.slice(2);
+const stateFile = process.env.MCP_TEST_DOCKER_STATE;
+const traceFile = process.env.MCP_TEST_DOCKER_TRACE;
+if (!stateFile || !traceFile) process.exit(90);
+const state = fs.existsSync(stateFile) ? JSON.parse(fs.readFileSync(stateFile, 'utf8')) : { container: {}, volume: {}, network: {}, image: {}, seeds: 0 };
+const save = () => fs.writeFileSync(stateFile, JSON.stringify(state, null, 2));
+fs.appendFileSync(traceFile, `${JSON.stringify(args)}\n`);
+const polluted = Object.keys(process.env).filter((name) => /^(COMPOSE_|POSTGRES_|BOOTSTRAP_|METAMCP_)/i.test(name) || /^(DOCKER_HOST|DOCKER_CONTEXT|DATABASE_URL|APP_URL|BETTER_AUTH_SECRET)$/i.test(name));
+if (polluted.length) { console.error(`unrelated environment leaked: ${polluted.join(',')}`); process.exit(91); }
+function fail(message, code = 1) { console.error(message); process.exit(code); }
+function input() { return new Promise((resolve) => { let data = ''; process.stdin.setEncoding('utf8'); process.stdin.on('data', (part) => data += part); process.stdin.on('end', () => resolve(data)); }); }
+function envFile(file) {
+  return Object.fromEntries(fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((line) => /^[A-Z][A-Z0-9_]*=/.test(line)).map((line) => { const i = line.indexOf('='); return [line.slice(0, i), line.slice(i + 1)]; }));
+}
+function writeJson(value) { console.log(JSON.stringify(value)); }
+function composeConfig(e, clone) {
+  const labels = { 'com.multfinite.mcpkit.instance': e.MCPKIT_INSTANCE };
+  const appEnv = { ...e,
+    POSTGRES_HOST: 'postgres', POSTGRES_PORT: '5432', POSTGRES_USER: 'metamcp_user', POSTGRES_DB: 'metamcp_db',
+    DATABASE_URL: `postgresql://metamcp_user:${e.POSTGRES_PASSWORD}@postgres:5432/metamcp_db`, NEXT_PUBLIC_APP_URL: e.APP_URL };
+  return { services: {
+    app: { image: e.MCPKIT_IMAGE, container_name: `${e.MCPKIT_PROJECT}-app`, build: { context: clone, dockerfile: 'Dockerfile' },
+      ports: [{ host_ip: process.env.MCP_TEST_UNSAFE_PORT ? '0.0.0.0' : '127.0.0.1', published: e.MCPKIT_METAMCP_PORT, target: 12008, protocol: 'tcp' }], labels,
+      volumes: [{ type: 'volume', source: 'uv_cache', target: '/home/nextjs/.cache/uv' }], environment: appEnv },
+    postgres: { image: 'postgres:16-alpine', container_name: `${e.MCPKIT_PROJECT}-postgres`, labels,
+      volumes: [{ type: 'volume', source: 'postgres_data', target: '/var/lib/postgresql/data' }],
+      environment: { POSTGRES_USER: 'metamcp_user', POSTGRES_PASSWORD: e.POSTGRES_PASSWORD, POSTGRES_DB: 'metamcp_db' } },
+  } };
+}
+async function main() {
+  if (args[0] === 'context' && args[1] === 'inspect') {
+    console.log(process.env.MCP_TEST_REMOTE_CONTEXT ? 'tcp://remote.example:2376' : 'npipe:////./pipe/dockerDesktopLinuxEngine'); return;
+  }
+  if (args[0] !== '--context' || args[1] !== 'desktop-linux') fail('The expected local Desktop context was not selected');
+  const command = args.slice(2);
+  if (command[0] === 'info') { console.log('Docker Desktop|linux'); return; }
+  if (command[0] === 'compose' && command[1] === 'version') { console.log('v2.32.1'); return; }
+  if (command[0] === 'compose') {
+    const project = command[command.indexOf('--project-name') + 1];
+    const clone = command[command.indexOf('--project-directory') + 1];
+    const envPath = command[command.indexOf('--env-file') + 1];
+    if (process.env.MCPKIT_ENV_FILE !== envPath) fail('wrong private env file');
+    const e = envFile(envPath);
+    if (project !== e.MCPKIT_PROJECT) fail('wrong project');
+    const operation = command.find((x) => ['config', 'build', 'up', 'ps'].includes(x));
+    if (operation === 'config') {
+      if (process.env.MCP_TEST_REAL_COMPOSE) {
+        const result = spawnSync(process.env.MCP_TEST_REAL_COMPOSE, command.slice(1), { env: process.env, encoding: 'utf8' });
+        if (result.status !== 0) fail(result.stderr || 'real Compose config failed');
+        if (process.env.MCP_TEST_UNSAFE_PORT) { const config = JSON.parse(result.stdout); config.services.app.ports[0].host_ip = '0.0.0.0'; writeJson(config); }
+        else process.stdout.write(result.stdout);
+      } else writeJson(composeConfig(e, clone));
+      return;
+    }
+    const labels = { 'com.multfinite.mcpkit.instance': e.MCPKIT_INSTANCE, 'com.docker.compose.project': project };
+    if (operation === 'build') { state.image[e.MCPKIT_IMAGE] = labels; save(); return; }
+    if (operation === 'up') {
+      if (!command.includes('--no-recreate') || !command.includes('--no-build')) fail('missing preservation flags');
+      for (const suffix of ['app', 'postgres']) state.container[`${project}-${suffix}`] ||= labels;
+      for (const suffix of ['postgres_data', 'uv_cache']) state.volume[`${project}_${suffix}`] ||= labels;
+      state.network[`${project}_metamcp-network`] ||= labels;
+      state.running = true; state.upCalls = (state.upCalls || 0) + 1; save(); return;
+    }
+    if (operation === 'ps') { console.log(`${project}-app running\n${project}-postgres running`); return; }
+    fail('Unexpected compose operation');
+  }
+  if (['container', 'volume', 'network', 'image'].includes(command[0]) && command[1] === 'inspect') {
+    const kind = command[0]; const name = command.at(-1); const labels = state[kind][name];
+    if (!labels) fail(`Error: No such ${kind}: ${name}`);
+    writeJson(labels); return;
+  }
+  if (command[0] === 'container' && command[1] === 'ls') {
+    const filter = command[command.indexOf('--filter') + 1]; const project = filter.slice('label=com.docker.compose.project='.length);
+    for (const [name, labels] of Object.entries(state.container)) if (labels['com.docker.compose.project'] === project) console.log(name);
+    return;
+  }
+  if (command[0] === 'stop') { state.running = false; state.stopCalls = (state.stopCalls || 0) + 1; save(); return; }
+  if (command[0] === 'logs') { console.log('synthetic MetaMCP log'); return; }
+  if (command[0] === 'exec' && command.includes('sh') && command.includes('-c')) {
+    const script = command.at(-1);
+    if (script.includes('psql')) {
+      const text = await input();
+      const match = text.match(/\\set local_bundle_b64 '([A-Za-z0-9+/=]+)'/);
+      if (!match || !text.includes('host.docker.internal:')) fail('invalid SQL input');
+      const bundle = JSON.parse(Buffer.from(match[1], 'base64').toString('utf8'));
+      if (process.env.MCP_TEST_CAPTURE) fs.writeFileSync(process.env.MCP_TEST_CAPTURE, JSON.stringify(bundle));
+      const force = text.includes("\\set local_force 'true'");
+      const first = !state.seeds; state.seeds++; save();
+      console.log(first || force ? 'seeded|' : 'skipped|'); return;
+    }
+    if (script.includes('curl')) { if (state.running) return; fail('not running'); }
+  }
+  if (command[0] === 'exec' && command.includes('node') && command.includes('-e')) {
+    const config = JSON.parse(await input());
+    if (process.env.MCP_TEST_BRIDGE_FAIL) fail('simulated Docker Desktop route failure');
+    const req = http.get({ hostname: '127.0.0.1', port: config.port, path: '/_mcpkit/status', headers: { 'X-Mcpkit-Control': config.key }, timeout: 5000 }, (res) => {
+      let body = ''; res.setEncoding('utf8'); res.on('data', (part) => body += part);
+      res.on('end', () => { try { if (res.statusCode === 200 && JSON.parse(body).instanceId === config.instanceId) { console.log('bridge-ok'); return; } } catch {} process.exitCode = 1; });
+    });
+    req.on('error', () => { process.exitCode = 1; }); req.on('timeout', () => req.destroy()); return;
+  }
+  fail(`Unexpected synthetic Docker command: ${command.join(' ')}`);
+}
+main().catch((error) => { console.error(error.stack); process.exit(1); });

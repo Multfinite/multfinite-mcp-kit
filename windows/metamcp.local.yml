@@ -1,0 +1,40 @@
+# Applied in addition to the cloned upstream docker-compose.yml. This file
+# never modifies upstream files or a pre-existing Docker project. Compose
+# 2.24.4+ is needed to replace (rather than append to) published ports.
+services:
+  app:
+    image: "${MCPKIT_IMAGE}"
+    build:
+      context: .
+      dockerfile: Dockerfile
+      labels:
+        com.multfinite.mcpkit.instance: "${MCPKIT_INSTANCE}"
+    pull_policy: never
+    container_name: "${MCPKIT_PROJECT}-app"
+    env_file: !override
+      - "${MCPKIT_ENV_FILE}"
+    ports: !override
+      - "127.0.0.1:${MCPKIT_METAMCP_PORT}:12008"
+    # Docker Desktop supplies its own host.docker.internal DNS entry. Do not
+    # shadow it with the upstream host-gateway /etc/hosts entry.
+    extra_hosts: !reset []
+    labels:
+      com.multfinite.mcpkit.instance: "${MCPKIT_INSTANCE}"
+  postgres:
+    container_name: "${MCPKIT_PROJECT}-postgres"
+    env_file: !override
+      - "${MCPKIT_ENV_FILE}"
+    ports: !reset []
+    labels:
+      com.multfinite.mcpkit.instance: "${MCPKIT_INSTANCE}"
+volumes:
+  postgres_data:
+    labels:
+      com.multfinite.mcpkit.instance: "${MCPKIT_INSTANCE}"
+  uv_cache:
+    labels:
+      com.multfinite.mcpkit.instance: "${MCPKIT_INSTANCE}"
+networks:
+  metamcp-network:
+    labels:
+      com.multfinite.mcpkit.instance: "${MCPKIT_INSTANCE}"

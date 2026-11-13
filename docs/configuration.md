@@ -209,50 +209,24 @@ Graphiti, Cognee, Memory Bank и GDrive подключаются к MetaMCP по
 
 ### Windows LOCAL: настройки и секреты
 
-Установка и управление выполняются `windows/install-local.ps1` и `windows/run-local.ps1`. По умолчанию каталог комплекта — `$env:USERPROFILE\mcp-local`; его можно изменить переменной `$env:MCP_LOCAL_DIR` **до установки**. Задавайте то же значение во всех последующих сессиях PowerShell. Docker на Windows не нужен.
+Стандартный путь — `%USERPROFILE%\mcp-local`; `$env:MCP_LOCAL_DIR` задаёт альтернативный путь. Для установки MetaMCP поверх уже настроенных серверов используется `.\windows\install-local.ps1 -MetaMcpOnly`: эта команда не переустанавливает серверные пакеты. Полная установка — `.\windows\install-local.ps1`. Оба варианта запускают MetaMCP в Docker Desktop **на этом Windows-компьютере**, а не подключаются по SSH к Linux.
 
-Текущий комплект создаёт два JSON-файла, только если их ещё нет:
-
-- `config\local-settings.json` — общие настройки путей, шлюза и регистрации;
-- `config\private\secrets.json` — секреты шлюза и локальных сервисов. Сохраняйте их приватность: доступ к шлюзу даёт доступ к инструментам Windows. Установщик ограничивает ACL каталога `private`, журналов и `runtime` текущим пользователем, SYSTEM и администраторами; проверьте права в конкретной системе.
-
-Прежние `config\.env` и `config\mcp-local.json` **не перезаписываются**, но старый `mcp-local.json` больше не служит запускаемой конфигурацией. При первом создании новых настроек из старого `.env` буквально читаются только `PROJECTS_DIR` и `WRITING_DIR` (существующие абсолютные каталоги), `OBSIDIAN_API_KEY` и `DBHUB_DSN` (кроме демонстрационного DSN). `.env` при этом не выполняется и дальнейшие изменения в нём автоматически не применяются. Настройки и секреты, уже созданные ранее, повторная установка не заменяет.
-
-#### `config\local-settings.json`
-
-JSON не поддерживает комментарии. Записывайте обратный слеш Windows как `\\`, например `"C:\\Users\\Alice\\Projects"`. Папки можно менять вручную; сеть и регистрацию удобнее настроить интерактивно через `.\windows\run-local.ps1 configure`.
-
-| Поле | Назначение и значение по умолчанию |
+| Файл / значение | Назначение |
 |---|---|
-| `version` | Версия формата, сейчас `1`. Не меняйте вручную. |
-| `hostId` | Уникальный идентификатор Windows-машины; автоматически генерируется из имени машины и случайного суффикса. Используется в именах записей и endpoint `local-<hostId>` в MetaMCP. После регистрации не меняйте без плана миграции. |
-| `listenHost`, `port` | Адрес и порт Windows-шлюза; по умолчанию `127.0.0.1`, `13001`. Для VPN можно указать IP Windows в VPN; для локального туннеля или reverse proxy оставить loopback. |
-| `tlsCertFile`, `tlsKeyFile` | Абсолютные пути к PEM-сертификату и закрытому ключу; задаются вместе либо оба пустые. При прямом HTTPS контейнер MetaMCP должен доверять сертификату. Приватный ключ защищайте правами файловой системы. |
-| `allowInsecureLan` | По умолчанию `false`. Разрешает HTTP вне loopback только после явного согласия: используйте **исключительно** внутри доверенного зашифрованного VPN/туннеля, не для открытой сети. |
-| `projectsDir`, `writingDir` | Абсолютные каталоги проектов и документов, по умолчанию `data\projects` и `data\writing` внутри комплекта. `filesystem` получает оба корня; CodeGraph — каталог проектов, vectorstore следит за каталогом документов. Это не песочница для Desktop Commander и остальных серверов. |
-| `everythingSdkPath` | Абсолютный путь к `Everything64.dll`, по умолчанию `runtime\everything-sdk\Everything64.dll`. Установщик загружает официальный SDK, если по указанному стандартному пути DLL нет. Everything должен быть запущен и проиндексирован. |
-| `obsidianHost`, `obsidianPort` | Адрес Local REST API Obsidian, по умолчанию `127.0.0.1:27124`. Допускаются только `127.0.0.1` или `localhost`, поскольку upstream-клиент не проверяет TLS-сертификат; для удалённого Obsidian используйте локальный защищённый туннель. |
-| `advertiseBaseUrl` | URL шлюза, достижимый **из контейнера MetaMCP**, например `https://windows.example:13001` или HTTP-адрес внутри защищённого VPN. Это не URL самого MetaMCP; `localhost` внутри контейнера относится к контейнеру. |
-| `metamcpOwnerEmail` | Email существующей учётной записи MetaMCP, которой будут принадлежать приватные серверы и endpoint. |
-| `linuxSshTarget`, `linuxKitDir` | SSH-адрес вида `user@linux-host` и абсолютный путь к этому репозиторию **на Linux**. Используются `register` и `seed`; SSH переносит конфигурацию, но не создаёт туннель для MCP-трафика. |
+| `config\local-settings.json` | `hostId`, `listenHost`, `port`, `projectsDir`, `writingDir`, `everythingSdkPath`, `obsidianHost`, `obsidianPort` и необязательные TLS-параметры шлюза. Настройки уже существующей установки сохраняются. Для автоматического локального Docker-маршрута нужен IPv4 loopback без TLS: `127.0.0.1`. |
+| `config\private\secrets.json` | `gatewayApiKey`, `obsidianApiKey`, `dbhubDsn`. Не отправляйте файл и его содержимое в чат. При изменении Obsidian/DBHub выполните `restart`. |
+| `config\private\metamcp.env` | Сгенерированные отдельные параметры PostgreSQL, секрет auth и первоначальный логин/пароль MetaMCP. Не удаляйте и не перезаписывайте: потеря файла не приводит к автоматической смене существующих паролей. Команда `credentials` показывает первоначальный логин. |
+| `config\private\metamcp-state.json` | Идентификатор отдельного Compose-проекта, путь клона и выбранный порт. Храните вместе с секретами и PostgreSQL volume. |
+| `$env:MCPKIT_METAMCP_PORT` | Порт интерфейса только при **первой** настройке; по умолчанию `12008`. Например, `$env:MCPKIT_METAMCP_PORT = '12080'`. На уже созданную установку переменная не влияет. |
+| `$env:MCPKIT_DOCKER_START_TIMEOUT`, `$env:MCPKIT_METAMCP_START_TIMEOUT` | Необязательные таймауты запуска Docker Desktop и MetaMCP в секундах. |
 
-Для доступа с Linux обеспечьте TLS или зашифрованный VPN/туннель и ограничьте доступ Windows Firewall. `configure` проверяет параметры и сохраняет их, но не настраивает VPN, сертификаты, туннель или firewall. Маршрут должен работать именно из контейнера MetaMCP. Инструкции и пример приведены в [README](../README.md#подключение-windows-к-linux-metamcp).
+Старые `config\.env` и `config\mcp-local.json` не изменяются. При первом создании `local-settings.json` существующие валидные `PROJECTS_DIR`, `WRITING_DIR`, `DBHUB_DSN` и `OBSIDIAN_API_KEY` читаются из старого `.env` буквально; дальнейшие изменения старых файлов не обновляют действующие настройки. JSON-пути Windows должны содержать удвоенные обратные слеши.
 
-#### `config\private\secrets.json`
+Установщик клонирует закреплённую версию upstream MetaMCP и собирает её в отдельный образ; существующий посторонний каталог `metamcp` не используется и не меняется. Отдельный Compose-проект хранит PostgreSQL и кэш в собственных volumes. `start` применяет `--no-recreate`, `stop` останавливает только принадлежащие комплекту контейнеры, не удаляя их и volumes. Пароли и bootstrap-пользователь создаются случайно; учётные записи не пересоздаются. При запуске upstream сначала разрешает создание первоначального пользователя, после чего локальная регистрация закрывается. UI доступен только через `127.0.0.1`, PostgreSQL не публикуется.
 
-| Поле | Назначение |
-|---|---|
-| `gatewayApiKey` | Случайный ключ создаётся при первой инициализации. Шлюз проверяет `X-API-Key`; ключ передаётся в настройки серверов MetaMCP при регистрации. Это **не** личный ключ API пользователя MetaMCP. Не удаляйте и не меняйте его без обновления существующих записей на Linux. |
-| `obsidianApiKey` | Ключ плагина Obsidian Local REST API. По умолчанию пуст; сервер ожидает настройки, пока ключ не задан. |
-| `dbhubDsn` | Необязательная строка подключения DBHub. Если поле пустое, используется сохраняемый `data\dbhub.sqlite`; для внешней БД укажите реальный DSN с учётом прав и сетевой защиты. |
+13 локальных серверов регистрируются автоматически в приватном endpoint `local-<hostId>`. Личный API-ключ этого владельца доступен в UI MetaMCP → API Keys. Ключ Windows-шлюза не совпадает с клиентским ключом MetaMCP. `seed` добавляет недостающие записи, не перезаписывая изменённые записи и отключённые mappings. Данные и права Docker, ACL Windows и резервные копии БД необходимо защищать: серверы могут выполнять команды, управлять рабочим столом и изменять файлы.
 
-После изменения файлов выполните `.\windows\run-local.ps1 restart`. Повторный `register` намеренно не перезаписывает существующие записи MetaMCP: изменение адреса или ключа уже зарегистрированного шлюза нужно отдельно внести в UI MetaMCP. `seed` добавляет недостающие значения, не перезаписывая конфликтующие или отключённые настройки. `export` создаёт приватный `registration.json` с ключом для ручной передачи на Linux — передавайте его безопасно и удалите переданную копию.
-
-#### Состав и особенности LOCAL
-
-Список и закреплённые версии находятся в `windows/manifest.json`, команды серверов формируются комплектом, а не редактированием старого `mcp-local.json`. Включены все 13 серверов из README: Desktop Commander, Everything Search, filesystem, Windows-MCP, git, CodeGraph, Codebase Memory, Serena, Playwright, DBHub, Simple Files Vectorstore, MarkItDown и Obsidian. Пакеты ставятся в отдельные npm-каталоги и Python-окружения; `install-local.ps1` также ставит SDK Everything и браузер Chromium. Visual C++ Build Tools для vectorstore могут потребовать подтверждения и большой загрузки.
-
-Windows-MCP требует интерактивного рабочего стола; Everything — запущенного приложения и готового индекса; Obsidian — запущенного приложения, плагина Local REST API и ключа. CodeGraph/Codebase Memory/Serena требуют настройки или выбора проекта. При первом индексировании vectorstore скачивает модель; его текущий in-memory индекс перестраивается после перезапуска. `status` показывает результат инициализации MCP, но не гарантирует работу GUI, реального поиска, базы данных или сетевого маршрута.
+Команды: `start`, `stop`, `restart`, `status`, `logs [имя]`, `credentials`, `seed`. Логи MetaMCP: `logs metamcp`; логи отдельного сервера: `logs codebase-memory-mcp`. Docker Desktop должен быть в режиме Linux containers; связь `host.docker.internal` со шлюзом проверяется при запуске, но без изменения firewall или расширения listener на LAN.
 
 ## `linux/services/docker-compose.yml`
 
@@ -283,5 +257,5 @@ Compose объявляет изолированные Docker-сети `multfinit
 - Linux API-ключи и параметры sidecar: `~/mcp-global/config/.env`; для Graphiti/Cognee выполнить `bash linux/run-global.sh apply-services`.
 - Настройки существующих записей GitHub, Context7, Neo4j и Qdrant: менять через UI MetaMCP. `start` не перезаписывает существующие записи; `seed` добавляет отсутствующие по правилам README.
 - Публичный URL MetaMCP: задайте `APP_URL` / `NEXT_PUBLIC_APP_URL` в `~/mcp-global/config/.env` и выполните `bash linux/run-global.sh apply-metamcp-config`. Секрет auth и параметры PostgreSQL настраиваются в `~/mcp-global/metamcp/.env` согласно правилам upstream; заранее сохраните ручные файлы из writable layer перед пересозданием app.
-- Windows: использовать `run-local.ps1 configure` для сети/регистрации либо редактировать `config\local-settings.json`; ключ Obsidian и DSN DBHub — в `config\private\secrets.json`. После изменений выполнить `restart`. Старые `.env` и `mcp-local.json` автоматически не обновляют действующие настройки.
+- Windows: для имеющихся серверов выполнить `install-local.ps1 -MetaMcpOnly`; настройки каталогов — в `config\local-settings.json`, ключ Obsidian и DSN DBHub — в `config\private\secrets.json`. После изменений выполнить `restart`. Старые `.env` и `mcp-local.json` автоматически не обновляют действующие настройки.
 - Установщик Linux задаёт права `600` созданным `.env`; на Windows проверьте ACL профиля пользователя. Не помещайте пароли/API-ключи в Git, публичный JSON, скриншоты, логи или команды, сохраняемые в shell history.

@@ -9,6 +9,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
+import { prepareDockerFixture } from './fixtures/docker-test-helpers.mjs';
 
 const ps = process.env.MCP_POWERSHELL || 'pwsh';
 const available = spawnSync(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' }).status === 0;
@@ -17,8 +18,6 @@ const skip = (process.platform === 'win32' && 'synthetic POSIX tools') || (!avai
 const fixture = fileURLToPath(new URL('./fixtures/fake-stdio-mcp.cjs', import.meta.url));
 const uvFixture = fileURLToPath(new URL('./fixtures/fake-uv.sh', import.meta.url));
 const driver = fileURLToPath(new URL('./fixtures/installer-driver.ps1', import.meta.url));
-const installer = fileURLToPath(new URL('../windows/install-local.ps1', import.meta.url));
-const runner = fileURLToPath(new URL('../windows/run-local.ps1', import.meta.url));
 const windowsDir = fileURLToPath(new URL('../windows/', import.meta.url));
 const hash = (file) => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const readJson = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -92,7 +91,8 @@ test('PowerShell installer preserves settings, reports an incomplete venv, and s
   const home = path.join(root, 'home');
   const projects = path.join(root, 'existing projects');
   fs.mkdirSync(home); fs.mkdirSync(projects); fs.mkdirSync(bin);
-  makeFile(path.join(bin, 'git.exe'), '#!/bin/sh\nexit 0\n', 0o755);
+  const setup = prepareDockerFixture(root, bin);
+  const { runner, installer } = setup;
   fs.copyFileSync(uvFixture, path.join(bin, 'uv.exe')); fs.chmodSync(path.join(bin, 'uv.exe'), 0o755);
   makeFile(path.join(programs, 'Microsoft Visual Studio/Installer/vswhere.exe'), '#!/bin/sh\necho fake-build-tools\n', 0o755);
   makeFile(path.join(root, 'python-3.12'), '#!/bin/sh\nexit 0\n', 0o755);
@@ -101,7 +101,7 @@ test('PowerShell installer preserves settings, reports an incomplete venv, and s
   const oldJson = '{"mcpServers":{"custom":{"command":"keep"}}}\n';
   makeFile(path.join(base, 'config/.env'), oldEnv);
   makeFile(path.join(base, 'config/mcp-local.json'), oldJson);
-  const env = { ...process.env, OS: 'Windows_NT', PROCESSOR_ARCHITECTURE: 'AMD64', MCP_LOCAL_DIR: base,
+  const env = { ...process.env, ...setup.env, OS: 'Windows_NT', PROCESSOR_ARCHITECTURE: 'AMD64', MCP_LOCAL_DIR: base,
     MCP_TEST_ROOT: root, MCP_TEST_NODE: process.execPath, MCP_TEST_FIXTURE: fixture, USERPROFILE: home, HOME: home, LOCALAPPDATA: root,
     ProgramFiles: root, 'ProgramFiles(x86)': programs, TEMP: root, npm_config_python: 'preserve-my-python', NODE_GYP_FORCE_PYTHON: 'preserve-forced-python',
     PATH: `${bin}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}` };
@@ -160,7 +160,7 @@ test('PowerShell bootstraps a hash-verified uv without replacing an older uv', {
   const home = path.join(root, 'home');
   const programs = path.join(root, 'program files x86');
   fs.mkdirSync(home); fs.mkdirSync(bin);
-  fs.cpSync(windowsDir, repoWindows, { recursive: true });
+  const setup = prepareDockerFixture(root, bin, repoWindows);
   const archiveRoot = path.join(root, 'wheel');
   const fakeExe = path.join(archiveRoot, 'uv-0.13.8.data/scripts/uv.exe');
   makeFile(fakeExe, fs.readFileSync(uvFixture), 0o755);
@@ -171,7 +171,6 @@ test('PowerShell bootstraps a hash-verified uv without replacing an older uv', {
   const oldUv = path.join(bin, 'uv.exe');
   makeFile(oldUv, fs.readFileSync(uvFixture, 'utf8').replace("printf 'uv 0.13.8\\n'", "printf 'uv 0.8.0\\n'"), 0o755);
   const oldHash = hash(oldUv);
-  makeFile(path.join(bin, 'git.exe'), '#!/bin/sh\nexit 0\n', 0o755);
   makeFile(path.join(programs, 'Microsoft Visual Studio/Installer/vswhere.exe'), '#!/bin/sh\necho fake-build-tools\n', 0o755);
   makeFile(path.join(root, 'python-3.12'), '#!/bin/sh\nexit 0\n', 0o755);
   makeFile(path.join(root, 'python-3.14'), '#!/bin/sh\nexit 0\n', 0o755);
@@ -181,7 +180,7 @@ test('PowerShell bootstraps a hash-verified uv without replacing an older uv', {
   writeJson(manifestFile, manifest);
   const localRunner = path.join(repoWindows, 'run-local.ps1');
   const localInstaller = path.join(repoWindows, 'install-local.ps1');
-  const env = { ...process.env, OS: 'Windows_NT', PROCESSOR_ARCHITECTURE: 'AMD64', MCP_LOCAL_DIR: base,
+  const env = { ...process.env, ...setup.env, OS: 'Windows_NT', PROCESSOR_ARCHITECTURE: 'AMD64', MCP_LOCAL_DIR: base,
     MCP_TEST_ROOT: root, MCP_TEST_NODE: process.execPath, MCP_TEST_FIXTURE: fixture, MCP_TEST_UV_WHEEL: wheel, USERPROFILE: home, HOME: home,
     LOCALAPPDATA: root, ProgramFiles: root, 'ProgramFiles(x86)': programs, TEMP: root, npm_config_python: 'keep-original', NODE_GYP_FORCE_PYTHON: 'keep-forced-python',
     PATH: `${bin}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}` };

@@ -44,7 +44,7 @@ function validateSettings(settings, secrets) {
   if (typeof settings.allowInsecureLan !== 'boolean') throw new Error('allowInsecureLan must be true or false.');
   if (!secrets || typeof secrets.gatewayApiKey !== 'string' || !/^[a-f0-9]{64}$/.test(secrets.gatewayApiKey)) throw new Error('Invalid gateway key in secrets.json; do not delete it on an existing installation.');
   for (const key of ['obsidianApiKey', 'dbhubDsn']) if (typeof secrets[key] !== 'string') throw new Error(`${key} must be a string in secrets.json.`);
-  for (const key of ['tlsCertFile', 'tlsKeyFile', 'advertiseBaseUrl', 'metamcpOwnerEmail', 'linuxSshTarget', 'linuxKitDir']) if (typeof settings[key] !== 'string') throw new Error(`${key} must be a string.`);
+  for (const key of ['tlsCertFile', 'tlsKeyFile']) if (typeof settings[key] !== 'string') throw new Error(`${key} must be a string.`);
   if (Boolean(settings.tlsCertFile) !== Boolean(settings.tlsKeyFile)) throw new Error('Set both tlsCertFile and tlsKeyFile, or leave both blank.');
   for (const key of ['tlsCertFile', 'tlsKeyFile']) {
     if (settings[key] && (!path.isAbsolute(settings[key]) || !fs.existsSync(settings[key]))) throw new Error(`${key} must be an existing absolute file path.`);

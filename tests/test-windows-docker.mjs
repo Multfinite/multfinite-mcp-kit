@@ -1,0 +1,160 @@
+// Windows-local Docker Desktop orchestration with a real PowerShell runner,
+// local Git clone, synthetic native MCPs and a mocked Docker boundary. The
+// optional real Compose binary resolves YAML but does not run any containers.
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
+import path from 'node:path';
+import { spawnSync } from 'node:child_process';
+import { test } from 'node:test';
+import { fileURLToPath } from 'node:url';
+import { prepareDockerFixture } from './fixtures/docker-test-helpers.mjs';
+
+const ps = process.env.MCP_POWERSHELL || 'pwsh';
+const available = spawnSync(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' }).status === 0;
+const proxy = process.env.MCP_PROXY_CLI;
+const skip = (process.platform === 'win32' && 'synthetic POSIX executables') || (!available && 'set MCP_POWERSHELL') || (!proxy && 'set MCP_PROXY_CLI');
+const fixture = fileURLToPath(new URL('./fixtures/fake-stdio-mcp.cjs', import.meta.url));
+const readJson = (f) => JSON.parse(fs.readFileSync(f, 'utf8'));
+const writeJson = (f, data) => fs.writeFileSync(f, `${JSON.stringify(data, null, 2)}\n`);
+const readEnv = (f) => Object.fromEntries(fs.readFileSync(f, 'utf8').split(/\r?\n/).filter((s) => /^[A-Z][A-Z0-9_]*=/.test(s)).map((s) => { const i = s.indexOf('='); return [s.slice(0, i), s.slice(i + 1)]; }));
+async function freePort() {
+  const server = net.createServer(); await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const port = server.address().port; await new Promise((resolve) => server.close(resolve)); return port;
+}
+function invoke(env, runner, ...args) {
+  const result = spawnSync(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', runner, ...args], { env, encoding: 'utf8', timeout: 90000 });
+  if (result.error) throw result.error;
+  return result;
+}
+function success(result) { assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`); }
+function installFakes(base) {
+  const r = path.join(base, 'runtime');
+  const node = path.join(r, 'node/node_modules/node/bin/node.exe');
+  fs.mkdirSync(path.dirname(node), { recursive: true }); fs.symlinkSync(process.execPath, node);
+  const entries = [
+    'npm/core/node_modules/@wonderwhy-er/desktop-commander/dist/index.js',
+    'npm/core/node_modules/@j0hanz/filesystem-mcp/dist/index.js',
+    'npm/core/node_modules/@colbymchenry/codegraph/npm-shim.js',
+    'npm/codebase/node_modules/codebase-memory-mcp/bin.js',
+    'npm/core/node_modules/@playwright/mcp/cli.js',
+    'npm/core/node_modules/@bytebase/dbhub/dist/index.js',
+    'npm/vectorstore/node_modules/@lishenxydlgzs/simple-files-vectorstore/build/index.js',
+  ];
+  for (const [name, exe] of [['everything-search', 'mcp-server-everything-search'], ['git', 'mcp-server-git'], ['serena', 'serena'], ['markitdown', 'markitdown-mcp'], ['obsidian', 'mcp-obsidian']]) entries.push(`python/${name}/bin/${exe}`);
+  for (const name of entries) {
+    const dest = path.join(r, name); fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, `#!/usr/bin/env node\n${fs.readFileSync(fixture, 'utf8')}`, { mode: 0o755 });
+  }
+  const dest = path.join(r, 'npm/core/node_modules/mcp-proxy/dist/bin/mcp-proxy.mjs');
+  fs.mkdirSync(path.dirname(dest), { recursive: true }); fs.symlinkSync(proxy, dest);
+}
+
+test('local Docker setup is isolated, automatic, retryable and preserves existing files', { skip, timeout: 240000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpkit-local-docker- & '));
+  const home = path.join(root, 'дом'); const base = path.join(root, 'Профиль с пробелами'); const bin = path.join(root, 'инструменты');
+  fs.mkdirSync(home); fs.mkdirSync(base);
+  const setup = prepareDockerFixture(root, bin);
+  const env = { ...process.env, ...setup.env, OS: 'Windows_NT', USERPROFILE: home, HOME: home, MCP_LOCAL_DIR: base,
+    PATH: `${bin}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}`,
+    POSTGRES_PASSWORD: 'unrelated-database-password', APP_URL: 'https://unrelated.example',
+    DOCKER_CONTEXT: 'unrelated-remote-context', COMPOSE_FILE: 'unrelated.yml', MCPKIT_METAMCP_PORT: '12080' };
+  const existingClone = path.join(base, 'metamcp'); fs.mkdirSync(existingClone); fs.writeFileSync(path.join(existingClone, 'do-not-touch.txt'), 'existing user clone');
+  const legacy = path.join(base, 'config/.env'); fs.mkdirSync(path.dirname(legacy), { recursive: true }); fs.writeFileSync(legacy, 'OTHER=keep\n');
+  try {
+    success(invoke(env, setup.runner, 'init'));
+    const settingsFile = path.join(base, 'config/local-settings.json');
+    const settings = readJson(settingsFile); settings.port = await freePort();
+    // Settings written by the previous version must remain untouched.
+    Object.assign(settings, { advertiseBaseUrl: '', metamcpOwnerEmail: '', linuxSshTarget: '', linuxKitDir: '' });
+    writeJson(settingsFile, settings);
+    const secretsFile = path.join(base, 'config/private/secrets.json'); const secrets = readJson(secretsFile);
+    installFakes(base);
+    const first = invoke(env, setup.runner, 'start'); success(first);
+    assert.match(first.stdout, /13 Windows servers/);
+    assert.match(first.stdout, /Docker Desktop can reach the authenticated loopback/);
+    assert.match(first.stdout, /MetaMCP: http:\/\/localhost:12080/);
+    assert.doesNotMatch(first.stdout, /SSH|VPN|configure and register/i);
+    const metaFile = path.join(base, 'config/private/metamcp-state.json'); const meta = readJson(metaFile);
+    const metaEnvFile = path.join(base, 'config/private/metamcp.env'); const metaEnv = readEnv(metaEnvFile);
+    assert.equal(meta.port, 12080); assert.equal(meta.envCreated, true);
+    assert.match(meta.cloneDir, /metamcp-kit-[a-f0-9]{16}$/);
+    assert.equal(fs.readFileSync(path.join(existingClone, 'do-not-touch.txt'), 'utf8'), 'existing user clone');
+    assert.equal(fs.existsSync(path.join(meta.cloneDir, '.env')), false, 'secrets must stay outside the Docker build context');
+    assert.match(metaEnv.POSTGRES_PASSWORD, /^[a-f0-9]{64}$/);
+    assert.match(metaEnv.BETTER_AUTH_SECRET, /^[a-f0-9]{64}$/);
+    assert.match(metaEnv.BOOTSTRAP_USER_PASSWORD, /^[a-f0-9]{48}$/);
+    assert.equal(metaEnv.BOOTSTRAP_RECREATE_USER, 'false'); assert.equal(metaEnv.BOOTSTRAP_DELETE_OTHER_USERS, 'false');
+    assert.equal(metaEnv.BOOTSTRAP_DISABLE_REGISTRATION_UI, 'false'); // seeder closes signup after bootstrap
+    assert.deepEqual(JSON.parse(metaEnv.BOOTSTRAP_API_KEYS), [{ name: 'Windows LOCAL', is_public: false, user_email: meta.ownerEmail }]);
+    assert.equal(readJson(setup.env.MCP_TEST_CAPTURE).gatewayKey, secrets.gatewayApiKey);
+    assert.equal(readJson(setup.env.MCP_TEST_CAPTURE).port, settings.port);
+    assert.equal(readJson(setup.env.MCP_TEST_CAPTURE).ownerEmail, meta.ownerEmail);
+    const trace = fs.readFileSync(setup.env.MCP_TEST_DOCKER_TRACE, 'utf8');
+    for (const secret of [secrets.gatewayApiKey, metaEnv.POSTGRES_PASSWORD, metaEnv.BETTER_AUTH_SECRET, metaEnv.BOOTSTRAP_USER_PASSWORD]) {
+      assert.ok(!trace.includes(secret), 'secrets must not appear in docker command arguments');
+      assert.ok(!first.stdout.includes(secret), 'secrets must not appear in normal startup output');
+    }
+    const stateBefore = fs.readFileSync(metaFile, 'utf8'); const envBefore = fs.readFileSync(metaEnvFile, 'utf8');
+    const second = invoke(env, setup.runner, 'start'); success(second);
+    assert.match(second.stdout, /already initialized/);
+    assert.equal(fs.readFileSync(metaFile, 'utf8'), stateBefore); assert.equal(fs.readFileSync(metaEnvFile, 'utf8'), envBefore);
+    assert.deepEqual(readJson(settingsFile), settings); assert.deepEqual(readJson(secretsFile), secrets);
+    assert.equal(fs.readFileSync(legacy, 'utf8'), 'OTHER=keep\n');
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls, 2);
+    success(invoke(env, setup.runner, 'status'));
+    const credentials = invoke(env, setup.runner, 'credentials'); success(credentials);
+    assert.match(credentials.stdout, new RegExp(meta.ownerEmail)); assert.ok(credentials.stdout.includes(metaEnv.BOOTSTRAP_USER_PASSWORD));
+    success(invoke(env, setup.runner, 'seed'));
+
+    const beforeUnsafe = readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls;
+    const unsafe = invoke({ ...env, MCP_TEST_UNSAFE_PORT: '1' }, setup.runner, 'start');
+    assert.notEqual(unsafe.status, 0); assert.match(unsafe.stdout, /Unsafe published ports/);
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls, beforeUnsafe);
+    const remote = invoke({ ...env, MCP_TEST_REMOTE_CONTEXT: '1' }, setup.runner, 'start');
+    assert.notEqual(remote.status, 0); assert.match(remote.stdout, /does not point to the local Docker Desktop named pipe/);
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls, beforeUnsafe);
+    const bridge = invoke({ ...env, MCP_TEST_BRIDGE_FAIL: '1' }, setup.runner, 'start');
+    assert.notEqual(bridge.status, 0); assert.match(bridge.stdout, /cannot reach the loopback Windows gateway/);
+    assert.equal(readJson(settingsFile).listenHost, '127.0.0.1', 'a failed bridge must not widen the listener');
+
+    success(invoke(env, setup.runner, 'stop'));
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).running, false);
+    assert.equal(fs.readFileSync(metaEnvFile, 'utf8'), envBefore);
+    assert.equal(fs.readFileSync(metaFile, 'utf8'), stateBefore);
+
+    // Losing a credentials file never silently rotates the existing DB secret.
+    fs.unlinkSync(metaEnvFile);
+    const missing = invoke(env, setup.runner, 'start');
+    assert.notEqual(missing.status, 0); assert.match(missing.stdout, /credentials were not regenerated/);
+    assert.equal(fs.existsSync(metaEnvFile), false);
+    fs.writeFileSync(metaEnvFile, envBefore); // restore disposable fixture only
+    success(invoke(env, setup.runner, 'gateway-stop'));
+
+    // One broken server must not prevent MetaMCP and the other twelve records
+    // from being set up; it still yields an honest nonzero exit status.
+    const broken = path.join(base, 'runtime/npm/codebase/node_modules/codebase-memory-mcp/bin.js');
+    const saved = fs.readFileSync(broken); fs.unlinkSync(broken);
+    const partial = invoke(env, setup.runner, 'start');
+    assert.notEqual(partial.status, 0); assert.match(partial.stdout, /error\s+codebase-memory-mcp/);
+    assert.match(partial.stdout, /MetaMCP: http:\/\/localhost:12080/);
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).running, true);
+    fs.writeFileSync(broken, saved, { mode: 0o755 });
+    success(invoke(env, setup.runner, 'restart'));
+
+    // A colliding, differently owned container must never be started/stopped.
+    const dockerState = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    const app = `${meta.project}-app`; const oldLabels = dockerState.container[app];
+    dockerState.container[app] = { ...oldLabels, 'com.multfinite.mcpkit.instance': 'someone-else' }; writeJson(setup.env.MCP_TEST_DOCKER_STATE, dockerState);
+    const beforeCollision = dockerState.upCalls;
+    const collision = invoke(env, setup.runner, 'start');
+    assert.notEqual(collision.status, 0); assert.match(collision.stdout, /not owned by this kit/);
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls, beforeCollision);
+    dockerState.container[app] = oldLabels; writeJson(setup.env.MCP_TEST_DOCKER_STATE, dockerState);
+    success(invoke(env, setup.runner, 'stop'));
+  } finally {
+    try { invoke(env, setup.runner, 'stop'); } catch { /* fixture cleanup */ }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});

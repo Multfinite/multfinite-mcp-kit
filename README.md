@@ -124,37 +124,37 @@ The four local sidecars are launched in a separate kit-owned Compose project, ea
 
 ### LOCAL на Windows
 
-Нужны Windows 10/11 **x64**, интерактивный вход пользователя, PowerShell 5.1 или новее и интернет. Docker на Windows не нужен. Установка, запуск, управление и регистрация выполняются скриптами PowerShell; Node.js используется для MCP-шлюза и Node-серверов. При отсутствии зависимостей установщик использует WinGet ID `Git.Git`, `OpenJS.NodeJS.LTS`, `voidtools.Everything` и, с согласия пользователя, `Microsoft.VisualStudio.2022.BuildTools`. Нужен WinGet из Microsoft App Installer; возможен запрос UAC. Скрипт устанавливает отдельный Node 24, Python-окружения 3.12 и 3.14, все **13 серверов LOCAL**, Everything SDK и Chromium. Если подходящего `uv` нет, проверенная по SHA-256 копия ставится в каталог комплекта, не заменяя старую. Для `simple-files-vectorstore` могут потребоваться Visual Studio C++ Build Tools (несколько гигабайт); установщик спросит разрешение. Повторный запуск временно останавливает шлюз этого комплекта перед обновлением и пытается запустить его снова; пользовательские данные и глобальные npm/Python-пакеты не удаляются.
+Нужны Windows 10/11 x64, PowerShell 5.1+, интерактивный вход и **Docker Desktop с Linux containers**. Отдельный Linux-сервер, SSH, VPN и настройка сетевых адресов не нужны. MetaMCP клонируется из официального репозитория и собирается в отдельный Docker-проект на этом же компьютере; первый build может занять несколько минут и загрузить зависимости.
 
-Из корня этого репозитория в **пользовательской** сессии Windows:
+Если Windows-серверы **уже установлены**, из корня обновлённого репозитория выполните:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\windows\install-local.ps1
-.\windows\run-local.ps1 status
+.\windows\install-local.ps1 -MetaMcpOnly
 ```
 
-Если установка сообщает об ошибке, исправьте её и повторите команду: итог с ошибкой имеет ненулевой код. Для запуска без вопросов используйте `.\windows\install-local.ps1 -NonInteractive -InstallBuildTools`. Явные ключи `-SkipEverything` и `-SkipBrowserDownload` пропускают соответствующие компоненты; тогда часть функций может не работать. После установки скрипт предлагает настроить регистрацию в MetaMCP. Её также можно выполнить позже, как описано ниже.
+Этот вариант не переустанавливает npm/Python-серверы и не удаляет их данные. Если Docker Desktop отсутствует, скрипт попытается установить его через WinGet; могут понадобиться UAC, настройка WSL 2 или перезагрузка. Откройте Docker Desktop и повторите команду, если установка попросила перезапуск.
 
-По умолчанию данные находятся в `%USERPROFILE%\mcp-local`. Можно заранее задать `$env:MCP_LOCAL_DIR` и использовать то же значение при всех последующих запусках. Старые `config\.env` и `config\mcp-local.json` **не перезаписываются**; старый JSON не используется как исполняемый конфиг. При первом создании новых настроек существующие абсолютные `PROJECTS_DIR` и `WRITING_DIR` из `.env` копируются, как и заданные пользователем `DBHUB_DSN` и `OBSIDIAN_API_KEY`; старый пример DSN `postgres://user:pass@localhost:5432/devdb` игнорируется. Значения читаются буквально, без выполнения `.env`. Последующие изменения делайте в новых файлах:
+Для **новой полной установки** используйте `.\windows\install-local.ps1`. Установщик применяет WinGet для недостающих Git, Docker Desktop, Node, Everything и, с согласия, C++ Build Tools; ставит все 13 серверов в изолированные каталоги, Everything SDK и Chromium. `-NonInteractive -InstallBuildTools` запускает полную установку без вопросов; `-SkipEverything` / `-SkipBrowserDownload` явно пропускают эти компоненты.
 
-- `config\local-settings.json` — папки проектов и заметок, слушающий адрес, URL и параметры регистрации;
-- `config\private\secrets.json` — отдельный ключ шлюза, ключ Obsidian и необязательный DSN DBHub; файл не следует отправлять в чат или коммитить;
-- `logs\` и `runtime\` — журналы и изолированные зависимости; их ACL, как и ACL `config\private`, ограничиваются текущим пользователем, SYSTEM и администраторами. Остальные старые файлы не изменяются.
-
-Изменённые настройки применяются после `restart`. В JSON обратные слеши Windows должны быть удвоены (`C:\\...`).
+После запуска:
 
 ```powershell
-.\windows\run-local.ps1 start        # запустить после входа в Windows
-.\windows\run-local.ps1 restart      # применить новые настройки
+.\windows\run-local.ps1 credentials   # первоначальный логин и пароль MetaMCP; не публикуйте
 .\windows\run-local.ps1 status
-.\windows\run-local.ps1 logs         # последние строки всех журналов
-.\windows\run-local.ps1 logs gateway # журнал последнего запуска шлюза
-.\windows\run-local.ps1 logs obsidian
-.\windows\run-local.ps1 stop         # только процессы этого комплекта
+.\windows\run-local.ps1 logs codebase-memory-mcp
+.\windows\run-local.ps1 logs metamcp
+.\windows\run-local.ps1 restart
+.\windows\run-local.ps1 stop
 ```
 
-`ready` означает, что отдельный MCP-прокси ответил на `initialize`; это не проверка всех реальных операций. `waiting` означает отсутствие необходимого внешнего условия/настройки; `error` и `starting` делают команду `status` неуспешной. Запуск не создаёт системную службу или автозапуск: GUI-серверы работают в сессии вошедшего пользователя и после выхода или перезагрузки могут потребовать нового `start`.
+Откройте `http://localhost:12008`, войдите с показанными данными и откройте **API Keys**: личный ключ создаётся для приватного endpoint автоматически. Адрес endpoint выводится при старте: `http://localhost:12008/metamcp/local-<hostId>/mcp`. MCP-клиенту передайте личный ключ MetaMCP в `Authorization: Bearer <ключ>`. Ключ шлюза Windows — отдельный секрет.
+
+По умолчанию данные хранятся в `%USERPROFILE%\mcp-local`; прежние `config\.env`, `config\mcp-local.json`, `config\local-settings.json`, `config\private\secrets.json` и данные не перезаписываются. Если задан `$env:MCP_LOCAL_DIR`, используйте его и при дальнейших запусках. MetaMCP получает свои отдельные имена контейнеров/volumes и отдельный приватный `config\private\metamcp.env`; чужие Docker-проекты не используются. Остановка не удаляет контейнеры или volumes. Если порт 12008 занят, до **первого** запуска задайте `$env:MCPKIT_METAMCP_PORT = '12080'`; выбранный порт сохраняется для этой установки.
+
+Веб-интерфейс публикуется только на `127.0.0.1`; PostgreSQL не публикуется на хост. Windows MCP-шлюз остаётся на loopback и требует свой ключ. Docker Desktop обращается к нему через `host.docker.internal`; скрипт проверяет этот маршрут и не открывает доступ в LAN, если он не работает. Любой, кто получит доступ к приватному ключу, Docker или учётной записи, может получить широкие права на файлы и рабочий стол Windows — храните секреты и резервные копии БД приватно.
+
+`ready` означает ответ на MCP `initialize`, а не проверку всех операций. `waiting` означает, что требуется внешняя настройка; `error` выдаёт ненулевой код, но не мешает скрипту запустить MetaMCP и зарегистрировать остальные серверы. Например, для Obsidian нужен ключ плагина, а причину ошибки Codebase Memory смотрите в его журнале. Перед отправкой журналов удалите секреты и личные пути.
 
 #### Что нужно для отдельных серверов
 
@@ -181,27 +181,11 @@ Set-ExecutionPolicy -Scope Process Bypass
   Передайте путь индексированного проекта в параметре `projectPath` инструмента CodeGraph, если он отличается от `projectsDir`. Codebase Memory и Serena также требуют указания/активации проекта; необходимые LSP и индексы могут загружаться или создаваться при использовании.
 - **Playwright** запускает установленный Chromium в headless-режиме. **DBHub** по умолчанию использует сохраняемый `data\dbhub.sqlite`; другой DSN можно указать в `dbhubDsn` в `secrets.json`. **Simple Files Vectorstore** следит за `writingDir`, при первом индексировании скачивает модель из Hugging Face и, согласно текущей реализации сервера, хранит индекс в памяти и перестраивает его после перезапуска. **MarkItDown** ставится с дополнительными форматами.
 
-#### Подключение Windows к Linux MetaMCP
+#### Локальное подключение к MetaMCP
 
-Шлюз по умолчанию слушает только `127.0.0.1:13001`, требует свой случайный `X-API-Key` и не доступен Linux-машине напрямую. Ключ шлюза и ключ клиента MetaMCP — **разные** ключи. Для подключения сначала обеспечьте защищённый маршрут из **контейнера MetaMCP** к шлюзу: TLS с доверенным для контейнера сертификатом либо зашифрованный VPN/туннель. `localhost` внутри контейнера — это контейнер, а не Windows или хост Linux. SSH ниже переносит только конфигурацию, туннель для MCP-трафика он автоматически не создаёт.
+Регистрация выполняется автоматически при `start`: 13 серверов добавляются в приватный namespace/endpoint `local-<hostId>`. Повторный запуск не перезаписывает существующие настройки и намеренно удалённые записи. Для добавления недостающих записей после исправления конфликтов используйте `.\windows\run-local.ps1 seed`; изменённые серверы и отключённые mappings он не перезаписывает.
 
-Например, если защищённый VPN уже соединяет машины и адрес Windows в нём `10.55.0.2`:
-
-1. На Linux должен работать ранее установленный MetaMCP, существовать учётная запись и находиться актуальная копия этого репозитория с `linux/register-local.sh` и `linux/seed-local.sql`. SSH-пользователю нужны доступ к Docker без `sudo` и этот же `$HOME`, где установлен `~/mcp-global/metamcp`.
-2. В PowerShell выполните `.\windows\run-local.ps1 configure`. Введите `10.55.0.2` как **listen address**, `http://10.55.0.2:13001` как URL, оставьте TLS-пути пустыми, укажите email существующей учётной записи MetaMCP, SSH-адрес `user@linux-host` и абсолютный путь к репозиторию на Linux. Подтвердите `YES` **только для зашифрованного VPN/туннеля**. Для прямого TLS задайте оба PEM-файла, используйте `https://...` и убедитесь, что сертификату доверяет контейнер. При наличии внешнего TLS-прокси можно оставить шлюз на loopback.
-3. Ограничьте Windows Firewall разрешённым адресом/подсетью Linux и нужным VPN-интерфейсом. Скрипт не создаёт сетевых исключений автоматически. Проверьте, что адрес доступен именно контейнеру MetaMCP, а не только хосту Linux.
-4. Выполните:
-
-   ```powershell
-   .\windows\run-local.ps1 restart
-   .\windows\run-local.ps1 register
-   ```
-
-   Нужен установленный Windows OpenSSH и доступ по SSH (удобно настроить ключ/ssh-agent заранее). Ключ шлюза передаётся по stdin SSH, а не в аргументах команды. При недоступности SSH команда `export` создаёт `config\private\registration.json`: передайте его безопасно на Linux, выполните там `bash linux/register-local.sh --stdin < /путь/registration.json` и удалите переданную копию.
-
-Регистрация транзакционно добавляет приватные серверы, namespace и endpoint `local-<hostId>` **указанному владельцу**. Для нового endpoint в UI MetaMCP создайте личный API-ключ того же владельца и подключайте MCP-клиент к `http(s)://<адрес-metamcp>/metamcp/local-<hostId>/mcp` с `Authorization: Bearer <личный ключ MetaMCP>`. Если существующий endpoint был вручную переключён только на OAuth, используйте его настройки авторизации: скрипт их не меняет. Узнать `hostId` можно из `config\local-settings.json`. Обновите UI; при необходимости переподключите серверы после исправления ошибок сети. API-ключ шлюза хранится в заголовках записей MetaMCP: защищайте резервные копии БД и доступ администраторов.
-
-Повторный `register` не восстанавливает намеренно удалённые записи и не меняет существующие. Команда `.\windows\run-local.ps1 seed` явно добавляет недостающие значения, не перезаписывая изменённые серверы и не включая отключённые mappings. Конфликты URL/ключа нужно разрешить вручную в UI; если адрес шлюза или ключ менялся, существующие записи также меняются вручную. Если у целевого namespace есть открытый или принадлежащий другому пользователю endpoint, регистрация прерывается. Не отключайте авторизацию endpoint и не открывайте этот шлюз в недоверенную сеть: его инструменты дают доступ к рабочему столу, файлам и командам Windows.
+Если сеть Docker Desktop не даёт контейнеру обратиться к loopback-шлюзу Windows, команда сообщит об этом отдельно. Не меняйте адрес на `0.0.0.0` и не открывайте порт для решения проблемы: проверьте Docker Desktop и выполните `start` снова. Native Windows/Docker Desktop следует проверить на целевой машине.
 
 ### Seed regression tests
 
@@ -218,8 +202,7 @@ Gateway and installer/lifecycle tests use Node 24 and an installed copy of `mcp-
 npm install --prefix /tmp/mcp-proxy-test mcp-proxy@6.10.0
 export MCP_PROXY_CLI=/tmp/mcp-proxy-test/node_modules/mcp-proxy/dist/bin/mcp-proxy.mjs
 export MCP_POWERSHELL="$(command -v pwsh)"
-node --test tests/test-windows-gateway.mjs tests/test-local-cli.mjs tests/test-windows-installer.mjs
-python3 tests/test-local-configure.py
+node --test tests/test-windows-gateway.mjs tests/test-local-cli.mjs tests/test-windows-installer.mjs tests/test-windows-docker.mjs
 ```
 
 An optional real semantic-search test uses an existing vectorstore installation and a pre-populated `Xenova/all-MiniLM-L6-v2` model cache (the model is about 90 MB). It forbids model downloads during the test and writes only to a temporary directory:
@@ -231,4 +214,4 @@ MCP_VECTORSTORE_CACHE=/absolute/path/to/@xenova/transformers/.cache \
   node --test tests/test-vectorstore-real.mjs
 ```
 
-These protocol/database tests do not replace a native Windows test of installation, desktop interaction, Everything, Chromium, Obsidian, firewall rules, or the actual VPN/TLS path.
+These protocol/database tests do not replace a native Windows test of installation, desktop interaction, Everything, Chromium, Obsidian, firewall rules, or actual Docker Desktop networking.

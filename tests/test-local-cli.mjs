@@ -1,4 +1,4 @@
-// End-to-end PowerShell lifecycle and SSH-boundary tests with synthetic MCP servers.
+// End-to-end PowerShell gateway lifecycle tests with synthetic MCP servers.
 // On Linux/macOS: MCP_POWERSHELL=/path/to/pwsh MCP_PROXY_CLI=/path/to/mcp-proxy.mjs node --test tests/test-local-cli.mjs
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -88,34 +88,34 @@ test('preserves legacy files, manages the gateway, and never kills a port occupa
     assert.equal(fs.readFileSync(path.join(config, '.env'), 'utf8'), oldEnv);
     assert.equal(fs.readFileSync(path.join(config, 'mcp-local.json'), 'utf8'), oldJson);
     installFakes(base);
-    const started = invoke(env, 'start'); assertSuccess(started);
+    const started = invoke(env, 'gateway-start'); assertSuccess(started);
     assert.match(started.stdout, /Ready: 11; waiting for configuration: 2; starting: 0; errors: 0/);
     assert.equal((await fetch(`http://127.0.0.1:${settings.port}/servers/git/mcp`)).status, 401);
     const state = readJson(stateFile);
-    assertSuccess(invoke(env, 'start'));
+    assertSuccess(invoke(env, 'gateway-start'));
     assert.equal(readJson(stateFile).pid, state.pid, 'second start must not replace a running gateway');
-    assertSuccess(invoke(env, 'status'));
+    assertSuccess(invoke(env, 'gateway-status'));
 
     const git = path.join(base, 'runtime/python/git/bin/mcp-server-git');
     fs.unlinkSync(git);
-    const missing = invoke(env, 'restart');
+    const missing = invoke(env, 'gateway-restart');
     assert.notEqual(missing.status, 0, 'missing package must make restart fail');
     assert.match(missing.stdout, /error\s+git/);
-    assert.notEqual(invoke(env, 'start').status, 0, 'an already-running gateway with an error is not a successful start');
+    assert.notEqual(invoke(env, 'gateway-start').status, 0, 'an already-running gateway with an error is not a successful start');
     fs.writeFileSync(git, `#!/usr/bin/env node\n${fs.readFileSync(fixture, 'utf8')}`, { mode: 0o755 });
-    assertSuccess(invoke(env, 'restart'));
+    assertSuccess(invoke(env, 'gateway-restart'));
     const pids = fs.readdirSync(path.join(base, 'runtime/work'), { withFileTypes: true })
       .filter((d) => d.isDirectory()).map((d) => path.join(base, 'runtime/work', d.name, 'fixture.pid'))
       .filter(fs.existsSync).map((f) => Number(fs.readFileSync(f, 'utf8')));
     assert.ok(pids.length >= 10);
-    assertSuccess(invoke(env, 'stop'));
+    assertSuccess(invoke(env, 'gateway-stop'));
     await delay(300);
     for (const pid of pids) {
       let alive = false;
       try { process.kill(pid, 0); alive = true; } catch { /* exited */ }
       assert.equal(alive, false, `fixture PID ${pid} survived shutdown`);
     }
-    assertSuccess(invoke(env, 'stop'));
+    assertSuccess(invoke(env, 'gateway-stop'));
     assert.equal(fs.existsSync(stateFile), false);
     assert.deepEqual(readJson(secretsFile), secrets);
     assert.equal(fs.readFileSync(path.join(config, '.env'), 'utf8'), oldEnv);
@@ -124,12 +124,12 @@ test('preserves legacy files, manages the gateway, and never kills a port occupa
     const occupied = net.createServer();
     await new Promise((resolve) => occupied.listen(settings.port, '127.0.0.1', resolve));
     try {
-      const collision = invoke(env, 'start');
+      const collision = invoke(env, 'gateway-start');
       assert.notEqual(collision.status, 0, 'occupied port should make start fail');
       assert.equal(occupied.listening, true, 'an unrelated process must not be killed');
     } finally { await new Promise((resolve) => occupied.close(resolve)); }
   } finally {
-    try { invoke(env, 'stop'); } catch { /* best-effort cleanup */ }
+    try { invoke(env, 'gateway-stop'); } catch { /* best-effort cleanup */ }
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -150,19 +150,19 @@ test('PowerShell controls a TLS gateway using the pinned certificate', { skip: u
     const settings = readJson(settingsFile);
     Object.assign(settings, { port: await freePort(), tlsCertFile: cert, tlsKeyFile: key });
     writeJson(settingsFile, settings);
-    assertSuccess(invoke(env, 'start'));
-    assertSuccess(invoke(env, 'status'));
+    assertSuccess(invoke(env, 'gateway-start'));
+    assertSuccess(invoke(env, 'gateway-status'));
     const state = readJson(stateFile);
     assert.ok(state.certPin.length > 100, 'state should pin the actual certificate');
     writeJson(stateFile, { ...state, certPin: 'not-the-certificate' });
-    const wrongPin = invoke(env, 'status');
+    const wrongPin = invoke(env, 'gateway-status');
     assert.notEqual(wrongPin.status, 0, 'a different certificate must be rejected');
     assert.match(wrongPin.stdout, /still alive but not responding/);
     assert.doesNotThrow(() => process.kill(state.pid, 0), 'failed pin validation must not kill the gateway');
     writeJson(stateFile, state);
-    assertSuccess(invoke(env, 'stop'));
+    assertSuccess(invoke(env, 'gateway-stop'));
   } finally {
-    try { invoke(env, 'stop'); } catch { /* best-effort cleanup */ }
+    try { invoke(env, 'gateway-stop'); } catch { /* best-effort cleanup */ }
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 });
@@ -191,43 +191,3 @@ test('first initialization imports literal legacy values but ignores the sample 
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
 
-test('SSH registration sends the secret on stdin, never in arguments', { skip: unsupported }, () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpkit ssh '));
-  const base = path.join(tmp, 'base');
-  const fakebin = path.join(tmp, 'bin');
-  fs.mkdirSync(fakebin); fs.mkdirSync(path.join(tmp, 'home'));
-  const env = { ...process.env, MCP_LOCAL_DIR: base, HOME: path.join(tmp, 'home'), PATH: `${fakebin}${path.delimiter}${process.env.PATH}`, CAPTURE: tmp };
-  const fakeSsh = `#!${process.execPath}\nconst fs=require('fs'),path=require('path');let data='';process.stdin.setEncoding('utf8');process.stdin.on('data',s=>data+=s);process.stdin.on('end',()=>{fs.writeFileSync(path.join(process.env.CAPTURE,'args.json'),JSON.stringify(process.argv.slice(2)));fs.writeFileSync(path.join(process.env.CAPTURE,'stdin.json'),data);});\n`;
-  fs.writeFileSync(path.join(fakebin, 'ssh'), fakeSsh, { mode: 0o755 });
-  try {
-    assertSuccess(invoke(env, 'init'));
-    const settingsFile = path.join(base, 'config/local-settings.json');
-    const secretsFile = path.join(base, 'config/private/secrets.json');
-    const s = readJson(settingsFile);
-    Object.assign(s, { advertiseBaseUrl: 'https://win.example.com', metamcpOwnerEmail: 'alice@example.com', linuxSshTarget: 'alice@linux.example.com', linuxKitDir: "/home/alice/проекты/it's \"kit\"" });
-    writeJson(settingsFile, s);
-    const key = readJson(secretsFile).gatewayApiKey;
-    assertSuccess(invoke(env, 'register'));
-    const args = readJson(path.join(tmp, 'args.json'));
-    const body = readJson(path.join(tmp, 'stdin.json'));
-    assert.equal(args[0], '--'); assert.equal(args[1], 'alice@linux.example.com');
-    assert.equal(args[2], "bash '/home/alice/проекты/it'\\''s \"kit\"/linux/register-local.sh' --stdin");
-    assert.doesNotMatch(JSON.stringify(args), new RegExp(key));
-    assert.equal(body.gatewayKey, key);
-    assert.equal(body.ownerEmail, 'alice@example.com');
-    assertSuccess(invoke(env, 'seed'));
-    assert.match(readJson(path.join(tmp, 'args.json'))[2], / --force$/);
-    assertSuccess(invoke(env, 'export'));
-    const exported = path.join(base, 'config/private/registration.json');
-    assert.equal(readJson(exported).gatewayKey, key);
-    const originalExport = fs.readFileSync(exported, 'utf8');
-    for (const url of ['https://user:password@host/', 'https://host/path?token=x', 'http://192.168.1.20:13001']) {
-      s.advertiseBaseUrl = url; writeJson(settingsFile, s);
-      assert.notEqual(invoke(env, 'export').status, 0, `unsafe URL accepted: ${url}`);
-      assert.equal(fs.readFileSync(exported, 'utf8'), originalExport, 'failed validation must not overwrite the existing bundle');
-    }
-    s.allowInsecureLan = true; writeJson(settingsFile, s);
-    assertSuccess(invoke(env, 'export'));
-    assert.equal(readJson(exported).baseUrl, 'http://192.168.1.20:13001');
-  } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
-});

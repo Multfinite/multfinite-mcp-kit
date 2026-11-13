@@ -1,15 +1,18 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Install and start the native Windows LOCAL MCP stack.
+    Install the native Windows LOCAL servers and local Docker Desktop MetaMCP.
 .DESCRIPTION
     Uses isolated, pinned runtimes under %USERPROFILE%\mcp-local. Existing
     .env, mcp-local.json, user data, and global npm/Python packages are kept.
+    MetaMCP is cloned and built into a separate Docker Desktop project.
     Run from an interactive Windows user session, not as a Windows service.
 #>
 [CmdletBinding()]
 param(
     [switch]$NonInteractive,
+    # Add local Docker MetaMCP to an already installed native LOCAL stack.
+    [switch]$MetaMcpOnly,
     [switch]$InstallBuildTools,
     [switch]$SkipEverything,
     [switch]$SkipBrowserDownload
@@ -52,6 +55,28 @@ function Install-Winget([string]$Id, [string[]]$Extra = @()) {
     $args = @('install', '--id', $Id, '--exact', '--silent', '--accept-source-agreements', '--accept-package-agreements') + $Extra
     Invoke-Native $winget $args
     Refresh-Path
+}
+function Ensure-GitPrerequisite {
+    Step 'Git'
+    $git = Find-Application 'git.exe'
+    if (-not $git) { Install-Winget 'Git.Git'; $git = Find-Application 'git.exe' }
+    if (-not $git) { throw 'Git was installed but is not in PATH. Reopen PowerShell and retry.' }
+    Ok "Git: $git"
+}
+function Ensure-DockerPrerequisite {
+    Step 'Docker Desktop'
+    $docker = Find-Application 'docker.exe'
+    $desktop = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
+    $desktopCli = Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe'
+    if (-not $docker -and (Test-Path -LiteralPath $desktopCli -PathType Leaf)) { $docker = $desktopCli }
+    if (-not $docker -and -not (Test-Path -LiteralPath $desktop -PathType Leaf)) {
+        Note 'Docker Desktop may require administrator approval, WSL 2 setup, and a Windows reboot.'
+        Install-Winget 'Docker.DockerDesktop'
+        $docker = Find-Application 'docker.exe'
+        if (-not $docker -and (Test-Path -LiteralPath $desktopCli -PathType Leaf)) { $docker = $desktopCli }
+    }
+    if (-not $docker) { throw 'Docker Desktop was found or installed, but its CLI is not available yet. Complete its setup/reboot, reopen PowerShell, and retry.' }
+    Ok "Docker CLI: $docker (the runner checks the local Docker Desktop Linux engine)"
 }
 function Get-UvVersion([string]$Executable) {
     if (-not $Executable) { return $null }
@@ -156,16 +181,27 @@ Protect-PrivateDirectory (Join-Path $BaseDir 'logs')
 Protect-PrivateDirectory $Runtime
 Refresh-Path
 
+if ($MetaMcpOnly) {
+    if (-not (Test-Path -LiteralPath (Join-Path $BaseDir 'config\local-settings.json') -PathType Leaf) -or
+        -not (Test-Path -LiteralPath (Join-Path $PrivateDir 'secrets.json') -PathType Leaf)) {
+        throw 'The native LOCAL stack is not initialized. Run install-local.ps1 without -MetaMcpOnly first.'
+    }
+    # Do not reinstall npm/Python packages or stop an already-running gateway.
+    Ensure-GitPrerequisite
+    Ensure-DockerPrerequisite
+    Step 'Starting local MetaMCP and connecting existing Windows servers'
+    Invoke-Runner 'start'
+    Ok 'MetaMCP is ready. Use run-local.ps1 credentials for the initial login.'
+    exit 0
+}
+
 Step 'Preparing the kit for updates'
 # Windows may lock running executables and packages. Stop only this kit's
 # authenticated gateway before touching its runtimes; never kill a port owner.
-Invoke-Runner 'stop'
+Invoke-Runner 'gateway-stop'
 
-Step 'Git'
-$git = Find-Application 'git.exe'
-if (-not $git) { Install-Winget 'Git.Git'; $git = Find-Application 'git.exe' }
-if (-not $git) { throw 'Git was installed but is not in PATH. Reopen PowerShell and retry.' }
-Ok "Git: $git"
+Ensure-GitPrerequisite
+try { Ensure-DockerPrerequisite } catch { Fail "Docker Desktop: $($_.Exception.Message)" }
 
 Step 'Node.js bootstrap'
 $nodeDir = Join-Path $Runtime 'node'
@@ -336,32 +372,22 @@ if (-not $SkipBrowserDownload) {
 # this installer's temporary node-gyp selection.
 [Environment]::SetEnvironmentVariable('npm_config_python', $originalNpmPython, 'Process')
 [Environment]::SetEnvironmentVariable('NODE_GYP_FORCE_PYTHON', $originalNodeGypPython, 'Process')
-Step 'Starting LOCAL servers'
-# The kit gateway was stopped before package updates; start it with the repaired
-# dependencies and leave all user data and unrelated processes untouched.
+Step 'Starting LOCAL servers and Docker Desktop MetaMCP'
+# Even if one native server fails, the runner still starts MetaMCP and
+# registers the other servers, then reports the incomplete status.
 try { Invoke-Runner 'start' }
-catch { Fail "Gateway: $($_.Exception.Message)" }
+catch { Fail "LOCAL stack: $($_.Exception.Message)" }
 
 Write-Host "`nSettings: $BaseDir\config\local-settings.json"
 Write-Host "Secrets:  $PrivateDir\secrets.json (keep private)"
-Write-Host "Commands: .\windows\run-local.ps1 status | logs | restart | stop"
+Write-Host 'MetaMCP login: .\windows\run-local.ps1 credentials'
+Write-Host 'Commands: .\windows\run-local.ps1 status | logs | restart | stop'
 Note 'Obsidian requires its Local REST API plugin and key; the server waits until configured.'
-Note 'Registration on the existing Linux MetaMCP needs a reachable gateway URL and SSH; run configure then register.'
-if (-not $NonInteractive) {
-    $answer = Read-Host 'Configure and register this Windows machine with MetaMCP now? (y/N)'
-    if ($answer -match '^[Yy]') {
-        try {
-            Invoke-Runner 'configure'
-            Invoke-Runner 'restart'
-            Invoke-Runner 'register'
-        } catch { Fail "MetaMCP registration: $($_.Exception.Message)" }
-    }
-}
 if ($Failures.Count -gt 0) {
     Write-Host "`nInstallation is incomplete. Fix the errors above and rerun this script; existing configuration and data are preserved." -ForegroundColor Red
     exit 1
 }
-Ok 'Installation completed. Check status and configure any credentials/MetaMCP connection as described above.'
+Ok 'Installation completed. Open local MetaMCP and check server-specific prerequisites as described above.'
 } finally {
     # Restore the caller's PATH, node-gyp Python and TLS protocol settings.
     [Environment]::SetEnvironmentVariable('Path', $originalPath, 'Process')

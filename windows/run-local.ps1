@@ -1,18 +1,18 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Manage the native Windows LOCAL MCP gateway and its servers.
+    Manage the native Windows servers and local MetaMCP in Docker Desktop.
 .EXAMPLE
     .\windows\run-local.ps1 start
     .\windows\run-local.ps1 status
     .\windows\run-local.ps1 logs obsidian
-    .\windows\run-local.ps1 configure
-    .\windows\run-local.ps1 register
+    .\windows\run-local.ps1 credentials
+    .\windows\run-local.ps1 logs metamcp
 #>
 [CmdletBinding()]
 param(
     # init is used by the installer; it never replaces existing settings.
-    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'configure', 'register', 'seed', 'export')]
+    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
     [string]$Command = 'start',
     [string]$Server = ''
 )
@@ -104,10 +104,6 @@ function Initialize-Configuration {
         everythingSdkPath = Join-Path $Runtime 'everything-sdk\Everything64.dll'
         obsidianHost = '127.0.0.1'
         obsidianPort = 27124
-        advertiseBaseUrl = ''
-        metamcpOwnerEmail = ''
-        linuxSshTarget = ''
-        linuxKitDir = ''
     }
     $secrets = [ordered]@{
         gatewayApiKey = New-RandomHex 32
@@ -133,7 +129,7 @@ function Test-Settings($Settings, $Secrets) {
     if ($Settings.allowInsecureLan -isnot [bool]) { throw 'allowInsecureLan must be true or false.' }
     if ($Secrets.gatewayApiKey -isnot [string] -or $Secrets.gatewayApiKey -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid gateway key in secrets.json; do not delete it on an existing installation.' }
     foreach ($key in @('obsidianApiKey', 'dbhubDsn')) { if ($Secrets.$key -isnot [string]) { throw "$key must be a string in secrets.json." } }
-    foreach ($key in @('tlsCertFile', 'tlsKeyFile', 'advertiseBaseUrl', 'metamcpOwnerEmail', 'linuxSshTarget', 'linuxKitDir')) {
+    foreach ($key in @('tlsCertFile', 'tlsKeyFile')) {
         if ($Settings.$key -isnot [string]) { throw "$key must be a string." }
     }
     if ([bool]$Settings.tlsCertFile -ne [bool]$Settings.tlsKeyFile) { throw 'Set both tlsCertFile and tlsKeyFile, or leave both blank.' }
@@ -363,109 +359,54 @@ function Show-Logs([string]$Name) {
     }
 }
 
-function Get-RegistrationData($Settings, $Secrets) {
-    $email = $Settings.metamcpOwnerEmail.Trim()
-    if ($email.Length -gt 320 -or $email -notmatch '^[^\s@]+@[^\s@]+$') { throw 'Set metamcpOwnerEmail to an existing MetaMCP account email.' }
-    $rawUrl = $Settings.advertiseBaseUrl
-    $uri = $null
-    if (-not [Uri]::TryCreate($rawUrl, [UriKind]::Absolute, [ref]$uri)) { throw 'Set advertiseBaseUrl to the gateway URL reachable from MetaMCP.' }
-    if ($rawUrl -notmatch '^https?://[a-zA-Z0-9.-]+(?::[0-9]+)?(?:/[a-zA-Z0-9._~/-]*)?$' -or $rawUrl.Contains('..')) {
-        throw 'advertiseBaseUrl must be an HTTP(S) URL without credentials, query, fragment, IPv6, or unsafe path characters.'
+# The local Docker integration uses the same generated gateway key and
+# settings, but never asks for a Linux host, SSH, a URL, TLS or VPN details.
+. (Join-Path $ScriptDir 'metamcp-local.ps1')
+
+function Start-LocalStack {
+    $problems = New-Object 'System.Collections.Generic.List[string]'
+    try { Start-Gateway } catch {
+        $message = "Windows MCP gateway: $($_.Exception.Message)"
+        Write-Host "[WARN] $message" -ForegroundColor Yellow
+        $problems.Add($message)
     }
-    if ($uri.Scheme -eq 'http' -and $uri.Host.ToLowerInvariant() -notin @('localhost', '127.0.0.1') -and -not $Settings.allowInsecureLan) {
-        throw 'Refusing plaintext HTTP to a non-loopback address. Use HTTPS or explicitly permit HTTP inside a protected tunnel/VPN.'
+    # An individual native server may be broken while the gateway and the
+    # others work. Still start MetaMCP and register all servers, then report
+    # the partial failure rather than hiding it or leaving Docker unconfigured.
+    try { Start-MetaMcp } catch {
+        $message = "Local MetaMCP: $($_.Exception.Message)"
+        Write-Host "[WARN] $message" -ForegroundColor Yellow
+        $problems.Add($message)
     }
-    return [ordered]@{ version = 1; hostId = $Settings.hostId; ownerEmail = $email; baseUrl = $uri.AbsoluteUri.TrimEnd('/'); gatewayKey = $Secrets.gatewayApiKey; allowInsecureLan = $Settings.allowInsecureLan }
+    if ($problems.Count -gt 0) { throw ($problems -join '; ') }
 }
-function Configure-Gateway {
-    if ([Console]::IsInputRedirected) { throw 'configure requires an interactive terminal; edit config/local-settings.json instead.' }
-    $config = Get-Configuration
-    $settings = $config.settings
-    Write-Host 'For a VPN, bind to this Windows machine VPN IP. For a local tunnel or TLS reverse proxy, keep 127.0.0.1.'
-    $questions = @(
-        @('Windows gateway listen address', 'listenHost', $false),
-        @('Gateway base URL reachable from the Linux MetaMCP container', 'advertiseBaseUrl', $false),
-        @('TLS certificate PEM path (empty for tunnel/VPN; - clears)', 'tlsCertFile', $true),
-        @('TLS private key PEM path (empty for tunnel/VPN; - clears)', 'tlsKeyFile', $true),
-        @('MetaMCP account email (the endpoint will be private)', 'metamcpOwnerEmail', $false),
-        @('Linux SSH destination, for example user@host', 'linuxSshTarget', $false),
-        @('Absolute path to this repository on the Linux host', 'linuxKitDir', $false)
-    )
-    foreach ($question in $questions) {
-        $label, $key, $clearable = $question
-        $prompt = if ($settings.$key) { "$label [$($settings.$key)]" } else { $label }
-        $value = (Read-Host $prompt).Trim()
-        if ($clearable -and $value -eq '-') { $settings.$key = '' }
-        elseif ($value) { $settings.$key = $value }
-    }
-    $localBind = $settings.listenHost.ToLowerInvariant() -in @('127.0.0.1', '::1', 'localhost')
-    $uri = $null
-    $hasUrl = [Uri]::TryCreate($settings.advertiseBaseUrl, [UriKind]::Absolute, [ref]$uri)
-    $nonlocalHttp = $hasUrl -and $uri.Scheme -eq 'http' -and $uri.Host.ToLowerInvariant() -notin @('127.0.0.1', 'localhost')
-    if (((-not $localBind -and -not $settings.tlsCertFile) -or $nonlocalHttp) -and -not $settings.allowInsecureLan) {
-        $settings.allowInsecureLan = (Read-Host 'Allow plaintext HTTP ONLY inside a trusted encrypted VPN/tunnel? Type YES to allow') -ceq 'YES'
-    }
-    Test-Settings $settings $config.secrets
-    $data = Get-RegistrationData $settings $config.secrets
-    Save-Json $SettingsFile $settings
-    if ($data.baseUrl -match '^http://(localhost|127\.0\.0\.1)(:|/|$)') { Write-Host 'WARNING: localhost refers to the MetaMCP container itself. Use it only if your tunnel terminates inside that container.' }
-    if ($localBind -and $data.baseUrl -notmatch '^https?://(localhost|127\.0\.0\.1)(:|/|$)') { Write-Host 'The listener is loopback-only: ensure your tunnel or reverse proxy forwards the advertised address to it.' }
-    Write-Host "Saved $SettingsFile. Restart the gateway to apply changes, then run register."
+function Stop-LocalStack {
+    $problems = New-Object 'System.Collections.Generic.List[string]'
+    try { Stop-Gateway } catch { $problems.Add("Windows MCP gateway: $($_.Exception.Message)") }
+    try { Stop-MetaMcp } catch { $problems.Add("Local MetaMCP: $($_.Exception.Message)") }
+    if ($problems.Count -gt 0) { throw ($problems -join '; ') }
 }
-function Quote-NativeArgument([string]$Value) {
-    # The Windows C runtime parses backslashes before quotes specially.
-    $escaped = [regex]::Replace($Value, '(\\*)"', '$1$1\"')
-    $escaped = [regex]::Replace($escaped, '(\\+)$', '$1$1')
-    return '"' + $escaped + '"'
-}
-function Register-Gateway([bool]$Force, [bool]$ExportOnly) {
-    $config = Get-Configuration
-    $settings = $config.settings
-    $data = Get-RegistrationData $settings $config.secrets
-    if ($ExportOnly) {
-        $file = Join-Path $PrivateDir 'registration.json'
-        Save-Json $file $data
-        Write-Host "Wrote $file. It contains a secret: transfer it securely and remove the copy after registration."
-        return
-    }
-    if ($settings.linuxSshTarget -notmatch '^(?:[a-zA-Z0-9._-]+@)?[a-zA-Z0-9.-]+$') { throw 'Set linuxSshTarget to an SSH user and hostname.' }
-    if (-not $settings.linuxKitDir.StartsWith('/') -or $settings.linuxKitDir -match '[\r\n\x00]') { throw 'Set linuxKitDir to the absolute path of this repository on Linux.' }
-    $ssh = Get-Command 'ssh.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
-    if (-not $ssh) { $ssh = Get-Command 'ssh' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
-    if (-not $ssh) { throw 'Windows OpenSSH client was not found in PATH.' }
-    $remotePath = $settings.linuxKitDir.TrimEnd('/') + '/linux/register-local.sh'
-    $shellQuoted = "'" + $remotePath.Replace("'", "'\''") + "'"
-    $remote = "bash $shellQuoted --stdin"
-    if ($Force) { $remote += ' --force' }
-    $start = New-Object Diagnostics.ProcessStartInfo
-    $start.FileName = $ssh.Source
-    $start.Arguments = '-- ' + (Quote-NativeArgument $settings.linuxSshTarget) + ' ' + (Quote-NativeArgument $remote)
-    $start.UseShellExecute = $false
-    $start.RedirectStandardInput = $true
-    $child = New-Object Diagnostics.Process
-    $child.StartInfo = $start
-    Write-Host 'Registering private Windows servers through SSH. The gateway key is sent on stdin, not in the command line.'
-    try {
-        if (-not $child.Start()) { throw 'Could not start SSH.' }
-        $writer = New-Object IO.StreamWriter($child.StandardInput.BaseStream, (New-Object Text.UTF8Encoding($false)))
-        try { $writer.WriteLine((ConvertTo-Json -InputObject $data -Depth 10 -Compress)) } finally { $writer.Dispose() }
-        $child.WaitForExit()
-        if ($child.ExitCode -ne 0) { throw "SSH registration failed (exit $($child.ExitCode)). Existing MetaMCP settings were not overwritten." }
-    } finally { $child.Dispose() }
+function Get-LocalStackStatus {
+    $problems = New-Object 'System.Collections.Generic.List[string]'
+    try { Get-GatewayStatus } catch { $problems.Add("Windows MCP gateway: $($_.Exception.Message)") }
+    try { Show-MetaStatus } catch { $problems.Add("Local MetaMCP: $($_.Exception.Message)") }
+    if ($problems.Count -gt 0) { throw ($problems -join '; ') }
 }
 
 try {
     switch ($Command) {
         'init'      { Initialize-Configuration }
-        'start'     { Start-Gateway }
-        'stop'      { Stop-Gateway }
-        'restart'   { Stop-Gateway; Start-Gateway }
-        'status'    { Get-GatewayStatus }
-        'logs'      { Show-Logs $Server }
-        'configure' { Configure-Gateway }
-        'register'  { Register-Gateway $false $false }
-        'seed'      { Register-Gateway $true $false }
-        'export'    { Register-Gateway $false $true }
+        'start'        { Start-LocalStack }
+        'stop'         { Stop-LocalStack }
+        'restart'      { Stop-LocalStack; Start-LocalStack }
+        'status'       { Get-LocalStackStatus }
+        'logs'         { if ($Server -eq 'metamcp') { Show-MetaLogs } else { Show-Logs $Server } }
+        'credentials'  { Show-MetaCredentials }
+        'seed'            { Repair-MetaSeed }
+        'gateway-start'   { Start-Gateway }
+        'gateway-stop'    { Stop-Gateway }
+        'gateway-restart' { Stop-Gateway; Start-Gateway }
+        'gateway-status'  { Get-GatewayStatus }
     }
     exit 0
 } catch {
