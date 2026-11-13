@@ -170,6 +170,7 @@ header "Конфигурация ключей API (.env)"
 GLOBAL_ENV="${CONFIG_DIR}/.env"
 
 if [ ! -f "$GLOBAL_ENV" ]; then
+    # Keep this heredoc quoted: examples/comments contain backticks and must not execute.
     cat > "$GLOBAL_ENV" <<'EOF'
 # Global defaults for LLM APIs. Per-service values below override these.
 LLM_API_ENDPOINT=https://api.openai.com/v1
