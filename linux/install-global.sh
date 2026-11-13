@@ -116,9 +116,32 @@ else
 
     AUTH_SECRET="$(openssl rand -hex 32)"
     PG_PASS="m3t4mcp_pass_$(openssl rand -hex 16)"
-    sed -i \
-        -e 's|^APP_URL=.*|APP_URL=http://localhost:12008|' \
-        -e 's|^NEXT_PUBLIC_APP_URL=.*|NEXT_PUBLIC_APP_URL=http://localhost:12008|' \
+    META_APP_URL='http://localhost:12008'
+    META_NEXT_PUBLIC_APP_URL="$META_APP_URL"
+    if [ -f "$CONFIG_DIR/.env" ]; then
+        if ! URL_VALUES=$( (
+            unset APP_URL NEXT_PUBLIC_APP_URL
+            # shellcheck source=/dev/null
+            source "$CONFIG_DIR/.env" >/dev/null || exit 1
+            printf '%s\n' "$(printf '%s' "${APP_URL:-}" | base64 | tr -d '\n')"
+            printf '%s\n' "$(printf '%s' "${NEXT_PUBLIC_APP_URL:-}" | base64 | tr -d '\n')"
+        ) ); then
+            error "Не удалось прочитать $CONFIG_DIR/.env"
+        fi
+        mapfile -t URL_VALUES <<< "$URL_VALUES"
+        if [ -n "${URL_VALUES[0]:-}" ]; then
+            META_APP_URL="$(printf '%s' "${URL_VALUES[0]}" | base64 -d)"
+        elif [ -n "${URL_VALUES[1]:-}" ]; then
+            META_APP_URL="$(printf '%s' "${URL_VALUES[1]}" | base64 -d)"
+        fi
+        META_NEXT_PUBLIC_APP_URL="$META_APP_URL"
+    fi
+    sed_escape() { printf '%s' "$1" | sed 's/[&|]/\\&/g'; }
+    META_APP_URL_ESCAPED="$(sed_escape "$META_APP_URL")"
+    META_NEXT_PUBLIC_APP_URL_ESCAPED="$(sed_escape "$META_NEXT_PUBLIC_APP_URL")"
+    sed -i \\
+        -e "s|^APP_URL=.*|APP_URL=${META_APP_URL_ESCAPED}|" \\
+        -e "s|^NEXT_PUBLIC_APP_URL=.*|NEXT_PUBLIC_APP_URL=${META_NEXT_PUBLIC_APP_URL_ESCAPED}|" \\
         -e "s|^BETTER_AUTH_SECRET=.*|BETTER_AUTH_SECRET=${AUTH_SECRET}|" \
         -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${PG_PASS}|" \
         -e 's|^BOOTSTRAP_USER_EMAIL=.*|BOOTSTRAP_USER_EMAIL=|' \
@@ -145,16 +168,27 @@ GLOBAL_ENV="${CONFIG_DIR}/.env"
 
 if [ ! -f "$GLOBAL_ENV" ]; then
     cat > "$GLOBAL_ENV" << EOF
-# ── OpenAI: Graphiti and Cognee (LLM + embeddings) ─────
-# Add your own key; empty credentials are not usable.
+# ── OpenAI-compatible APIs: each service can use its own key and base URL ──
+# Legacy shared key fallback; prefer the per-service keys below.
 OPENAI_API_KEY=
+GRAPHITI_API_KEY=
+GRAPHITI_BASE_URL=https://api.openai.com/v1
+# Graphiti uses this API key/base URL for its LLM and embeddings.
 # GRAPHITI_MODEL=gpt-4o-mini
 # GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small
 # GRAPHITI_GROUP_ID=multfinite-mcp-kit-global
 
-# Cognee can use different providers/keys; see README for all options.
-# COGNEE_LLM_API_KEY=
-# COGNEE_EMBEDDING_API_KEY=
+# Cognee LLM and embeddings are independently configurable. Set a provider,
+# API key, model and OpenAI-compatible /v1 endpoint for each component.
+COGNEE_LLM_PROVIDER=openai
+COGNEE_LLM_API_KEY=
+COGNEE_LLM_MODEL=gpt-4o-mini
+COGNEE_LLM_ENDPOINT=https://api.openai.com/v1
+COGNEE_EMBEDDING_PROVIDER=openai
+COGNEE_EMBEDDING_API_KEY=
+COGNEE_EMBEDDING_MODEL=text-embedding-3-small
+COGNEE_EMBEDDING_DIMENSIONS=1536
+COGNEE_EMBEDDING_ENDPOINT=https://api.openai.com/v1
 
 # ── Neo4j & Qdrant ──────────────────────────────────────
 NEO4J_URI=bolt://localhost:7687
@@ -162,6 +196,13 @@ NEO4J_USER=neo4j
 NEO4J_PASSWORD=mcp-neo4j-pass
 # NEO4J_DATABASE=neo4j  # Graphiti's database; must already exist.
 QDRANT_URL=http://localhost:6333
+
+# ── Public MetaMCP address ───────────────────────────────
+# Set the public origin (normally HTTPS) and apply it to MetaMCP with
+# `bash linux/run-global.sh apply-metamcp-config`.
+APP_URL=
+# If omitted, NEXT_PUBLIC_APP_URL inherits APP_URL.
+NEXT_PUBLIC_APP_URL=
 
 # ── Integrations ────────────────────────────────────────
 GITHUB_PERSONAL_ACCESS_TOKEN=

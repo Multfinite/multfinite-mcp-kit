@@ -11,11 +11,32 @@
 Начальный вариант файла:
 
 ```dotenv
-# OpenAI используется Graphiti и по умолчанию Cognee
+# Legacy fallback для старых конфигураций; задайте отдельные ключи ниже
 OPENAI_API_KEY=
-# GRAPHITI_MODEL=gpt-4o-mini
-# GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small
-# GRAPHITI_GROUP_ID=multfinite-mcp-kit-global
+
+# Graphiti: один OpenAI-compatible endpoint для LLM и embeddings
+GRAPHITI_API_KEY=
+GRAPHITI_BASE_URL=https://api.openai.com/v1
+GRAPHITI_MODEL=gpt-4o-mini
+GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small
+GRAPHITI_GROUP_ID=multfinite-mcp-kit-global
+
+# Cognee: отдельная пара provider/key/endpoint/model для LLM
+COGNEE_LLM_PROVIDER=openai
+COGNEE_LLM_API_KEY=
+COGNEE_LLM_ENDPOINT=https://api.openai.com/v1
+COGNEE_LLM_MODEL=gpt-4o-mini
+
+# Cognee: отдельная пара provider/key/endpoint/model для embeddings
+COGNEE_EMBEDDING_PROVIDER=openai
+COGNEE_EMBEDDING_API_KEY=
+COGNEE_EMBEDDING_ENDPOINT=https://api.openai.com/v1
+COGNEE_EMBEDDING_MODEL=text-embedding-3-small
+COGNEE_EMBEDDING_DIMENSIONS=1536
+
+# Публичный адрес MetaMCP (не адрес MCP endpoint)
+APP_URL=
+NEXT_PUBLIC_APP_URL=
 
 # Neo4j; пароль должен совпадать с паролем созданного Neo4j
 NEO4J_URI=bolt://localhost:7687
@@ -46,7 +67,7 @@ CONTEXT7_API_KEY=
 
 | Переменная | Назначение, значение по умолчанию и пример |
 |---|---|
-| `OPENAI_API_KEY` | Ключ OpenAI для Graphiti, а также ключ по умолчанию для LLM и embedding Cognee. Без ключа Graphiti и Cognee остаются в ожидании и не предоставляют инструменты. Пример: `OPENAI_API_KEY='sk-…'`. Не помещайте настоящий ключ в документацию или Git. Если для Cognee заданы собственные ключи, имена ниже, они имеют приоритет для соответствующей части Cognee. |
+| `OPENAI_API_KEY` | Устаревший общий ключ для обратной совместимости. Если задан, используется только как fallback для `GRAPHITI_API_KEY`, `COGNEE_LLM_API_KEY` и `COGNEE_EMBEDDING_API_KEY`, когда конкретный ключ не задан. Для независимых аккаунтов оставьте пустым и задайте отдельные ключи. Пример старого формата: `OPENAI_API_KEY='sk-…'`. |
 | `NEO4J_URI` | Адрес Bolt, который используют Graphiti и legacy-сервер Neo4j. По умолчанию `bolt://localhost:7687`; в контейнерах `localhost`, `127.0.0.1` и `[::1]` автоматически заменяются на `host.docker.internal`, чтобы обращаться к опубликованному порту Docker-хоста. Пример удалённого сервера: `NEO4J_URI='bolt+s://neo4j.example.net:7687'`. Хост и порт должны быть доступны как с Docker-хоста, так и из контейнеров sidecar. |
 | `NEO4J_USER` | Пользователь Neo4j; по умолчанию `neo4j`. Пример: `NEO4J_USER=app_user`. |
 | `NEO4J_USERNAME` | Альтернативное имя той же настройки, поддерживаемое скриптами и Graphiti. Если заданы оба имени, `NEO4J_USERNAME` имеет приоритет над `NEO4J_USER`. Для стандартного случая достаточно `NEO4J_USER`. |
@@ -56,16 +77,21 @@ CONTEXT7_API_KEY=
 | `QDRANT_API_KEY` | Необязательный API-ключ Qdrant для legacy-сервера. Если пуст, поле не добавляется. Пример: `QDRANT_API_KEY='…'`. Не задаёт ключ на самом сервере Qdrant и не включает там аутентификацию автоматически. |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | Токен, который при первоначальной регистрации задаётся как Bearer token официального удалённого сервера `https://api.githubcopilot.com/mcp/`. Пример: `GITHUB_PERSONAL_ACCESS_TOKEN='github_pat_…'`. Можно оставить пустым и добавить токен в настройках сервера MetaMCP. Дайте токену только необходимые разрешения; переменная не создаёт доступ к GitHub и не обходит ограничения учётной записи/сервиса. |
 | `CONTEXT7_API_KEY` | Необязательный ключ Context7. При первоначальной регистрации добавляется в окружение сервера `context7`; без него сервер работает с лимитами upstream. Пример: `CONTEXT7_API_KEY='…'`. |
-| `GRAPHITI_MODEL` | LLM-модель Graphiti; по умолчанию `gpt-4o-mini`. Передаётся в контейнер как `MODEL_NAME`. Пример: `GRAPHITI_MODEL=gpt-4o-mini`. Указывайте модель, доступную выбранному API-провайдеру. |
+| `APP_URL` | Публичный base URL MetaMCP (origin/base path reverse proxy), например `APP_URL=https://mcp.example.com`. При пустом значении используется имеющаяся настройка MetaMCP; при непустом скрипт `apply-metamcp-config` переносит её в `~/mcp-global/metamcp/.env`. URL сам по себе не открывает порт/firewall и не настраивает TLS/proxy. |
+| `NEXT_PUBLIC_APP_URL` | Дублирует публичный URL для frontend. В upstream Compose `APP_URL` является каноническим: он используется и для `NEXT_PUBLIC_APP_URL`. Команда применяет один origin к обоим значениям; обычно задавайте только `APP_URL=https://mcp.example.com`. |
+| `GRAPHITI_API_KEY` | Отдельный ключ OpenAI-compatible API для Graphiti, используется и его LLM, и embeddings. Если пуст, применяется legacy fallback `OPENAI_API_KEY`. Пример: `GRAPHITI_API_KEY='provider-key'`. |
+| `GRAPHITI_BASE_URL` | Base URL OpenAI-compatible API для Graphiti; по умолчанию `https://api.openai.com/v1`. Передаётся в контейнер как `OPENAI_BASE_URL`. Пример другого сервиса: `GRAPHITI_BASE_URL=https://llm-gateway.example/v1`. Указывайте base URL с `/v1`, если этого требует совместимый сервис, не полный путь `/chat/completions`. |
+| `GRAPHITI_MODEL` | LLM-модель Graphiti; по умолчанию `gpt-4o-mini`. Передаётся в контейнер как `MODEL_NAME`. Пример: `GRAPHITI_MODEL=gpt-4o-mini`. Модель должна существовать у выбранного endpoint. |
 | `GRAPHITI_EMBEDDER_MODEL` | Модель эмбеддингов Graphiti; по умолчанию `text-embedding-3-small`. Передаётся как `EMBEDDER_MODEL`. Пример: `GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small`. Модель и её размерность должны поддерживаться конфигурацией Graphiti. |
 | `GRAPHITI_GROUP_ID` | Идентификатор группы Graphiti, по умолчанию `multfinite-mcp-kit-global`. Определяет группировку/изоляцию данных внутри Graphiti. Пример: `GRAPHITI_GROUP_ID=team-knowledge`. Используйте одинаковое значение для клиентов, которым нужен общий граф; изменение не переносит уже записанные данные. |
 | `COGNEE_LLM_PROVIDER` | Провайдер языковой модели Cognee; по умолчанию `openai`. Пример зависит от списка поддерживаемых Cognee провайдеров, например `COGNEE_LLM_PROVIDER=openai`. Проверьте поддерживаемое Cognee имя и нужные параметры у используемой версии. |
-| `COGNEE_LLM_API_KEY` | Ключ провайдера LLM Cognee. Если не задан, используется `OPENAI_API_KEY`. При выбранном `openai` без эффективного ключа контейнер ждёт настройки и не обслуживает инструменты. Пример: `COGNEE_LLM_API_KEY='…'`. |
+| `COGNEE_LLM_API_KEY` | Отдельный ключ для LLM Cognee; если пуст, legacy fallback `OPENAI_API_KEY`. При `COGNEE_LLM_PROVIDER=openai` без эффективного ключа sidecar ждёт настройки. Пример: `COGNEE_LLM_API_KEY='llm-provider-key'`. |
 | `COGNEE_LLM_MODEL` | LLM-модель Cognee; по умолчанию `gpt-4o-mini`. Пример: `COGNEE_LLM_MODEL=gpt-4o-mini`. Имя должно быть доступно выбранному провайдеру. |
-| `COGNEE_LLM_ENDPOINT` | Необязательный endpoint/custom base URL для LLM, передаётся как `LLM_ENDPOINT`; по умолчанию пуст. Пример: `COGNEE_LLM_ENDPOINT='https://api.example.net/v1'`. Формат и смысл зависят от провайдера Cognee. |
+| `COGNEE_LLM_ENDPOINT` | Base URL/endpoint LLM Cognee, передаётся как `LLM_ENDPOINT`; созданный шаблон устанавливает `https://api.openai.com/v1`. Если оставить пустым, Cognee использует default endpoint выбранного провайдера. Для другого OpenAI-compatible сервиса укажите API base, например `COGNEE_LLM_ENDPOINT=https://llm.example.net/v1`. Согласуйте provider, модель и формат endpoint с Cognee/LiteLLM. |
 | `COGNEE_EMBEDDING_PROVIDER` | Провайдер эмбеддингов Cognee; по умолчанию `openai`. Пример: `COGNEE_EMBEDDING_PROVIDER=openai`. Выберите поддерживаемое Cognee значение. |
-| `COGNEE_EMBEDDING_API_KEY` | Ключ embedding-провайдера Cognee. Если не задан, используется `OPENAI_API_KEY`; если эффективного ключа для OpenAI нет, Cognee не стартует с инструментами. Пример: `COGNEE_EMBEDDING_API_KEY='…'`. |
-| `COGNEE_EMBEDDING_MODEL` | Модель эмбеддингов Cognee; по умолчанию `text-embedding-3-small`. Пример: `COGNEE_EMBEDDING_MODEL=text-embedding-3-small`. |
+| `COGNEE_EMBEDDING_API_KEY` | Независимый ключ embeddings Cognee; если пуст, legacy fallback `OPENAI_API_KEY`. Пример: `COGNEE_EMBEDDING_API_KEY='embedding-provider-key'`. При OpenAI provider без ключа Cognee ждёт настройки. |
+| `COGNEE_EMBEDDING_ENDPOINT` | Endpoint/base URL API embeddings Cognee, передаётся как `EMBEDDING_ENDPOINT`; созданный шаблон устанавливает `https://api.openai.com/v1`. Пустое значение оставляет default endpoint провайдера. Пример для другого сервиса: `COGNEE_EMBEDDING_ENDPOINT=https://embeddings.example.net/v1`. Можно задать независимо от LLM endpoint и ключа. |
+| `COGNEE_EMBEDDING_MODEL` | Модель эмбеддингов Cognee; по умолчанию `text-embedding-3-small`. Пример: `COGNEE_EMBEDDING_MODEL=text-embedding-3-small`; модель и размерность должны соответствовать endpoint. |
 | `COGNEE_EMBEDDING_DIMENSIONS` | Размерность вектора Cognee; по умолчанию `1536`. Пример: `COGNEE_EMBEDDING_DIMENSIONS=1536`. Укажите число, которое соответствует выбранной embedding-модели/провайдеру и уже созданным данным. Несоответствие модели и размерности может ломать индексацию и поиск. |
 
 После изменения переменных Graphiti/Cognee примените изменения командой:
@@ -76,14 +102,17 @@ bash linux/run-global.sh apply-services
 
 Она пересоздаёт только контейнеры Graphiti и Cognee, сохраняет их named volumes и не меняет настройки серверов MetaMCP. Секреты GitHub, Context7 и параметры Neo4j/Qdrant, передаваемые при первоначальном seed, не обновляются повторным обычным `start`: существующие записи MetaMCP намеренно не перезаписываются. Измените такие серверы через UI MetaMCP либо отдельно выполните `bash linux/run-global.sh seed` после проверки поведения seed; seed добавляет отсутствующие записи, но не обновляет имеющиеся.
 
+Чтобы применить изменённые `APP_URL` / `NEXT_PUBLIC_APP_URL` из этого же `.env`, выполните `bash linux/run-global.sh apply-metamcp-config`. Эта команда обновит соответствующие строки в upstream `~/mcp-global/metamcp/.env` и, если приложение уже запущено, пересоздаст только MetaMCP `app`, дождётся healthcheck и подключит sidecar-сети заново. **Перед запуском сохраните ручные файлы из writable layer контейнера app**; Compose volumes не удаляются. Публичный URL также требует настроенного DNS, TLS/reverse proxy или открытого порта и правил firewall. `APP_URL` сам по себе не публикует приложение в интернет.
+
 > **Важно для первого запуска Neo4j.** Задайте `NEO4J_PASSWORD` до `install-global.sh`, создав `~/mcp-global/config/.env` вручную (папку можно создать заранее). Установщик создаёт `neo4j-mcp` только если такого контейнера ещё нет. Для уже созданного контейнера изменение `.env` не меняет пароль и не пересоздаёт контейнер.
 
 #### Как значения попадают в контейнеры и MetaMCP
 
 | Источник `.env` | Получатель |
 |---|---|
-| `NEO4J_URI`, `NEO4J_USER` или `NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`, `OPENAI_API_KEY`, `GRAPHITI_*` | Контейнер `mcpkit-graphiti`, с отображением в официальный интерфейс Graphiti: `NEO4J_*`, `OPENAI_API_KEY`, `MODEL_NAME`, `EMBEDDER_MODEL`, `GRAPHITI_GROUP_ID`. |
-| `OPENAI_API_KEY` и `COGNEE_*` | Контейнер `mcpkit-cognee`, отображаются в `LLM_*` и `EMBEDDING_*`; постоянные файлы находятся в отдельных Cognee volumes. Neo4j-переменные этому контейнеру не передаются. |
+| `NEO4J_URI`, `NEO4J_USER`/`NEO4J_USERNAME`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`, `GRAPHITI_API_KEY` (или legacy fallback), `GRAPHITI_BASE_URL`, `GRAPHITI_*` | Контейнер `mcpkit-graphiti`; API key и URL отображаются в `OPENAI_API_KEY` и `OPENAI_BASE_URL`, модели — в `MODEL_NAME`/`EMBEDDER_MODEL`. |
+| `COGNEE_*` и соответствующие legacy fallbacks | Контейнер `mcpkit-cognee`; LLM-настройки отображаются в `LLM_*`, embeddings — в `EMBEDDING_*` включая `EMBEDDING_ENDPOINT`; Graphiti variables в Cognee не передаются. Постоянные файлы Cognee находятся в отдельных volumes. |
+| `APP_URL`, `NEXT_PUBLIC_APP_URL` | По команде `apply-metamcp-config` записываются в одноимённые ключи `~/mcp-global/metamcp/.env`; затем приложение пересоздаётся, чтобы Compose передал обновлённое окружение. |
 | `NEO4J_URI`, пользователь, пароль | Запись legacy-сервера `neo4j-global` в MetaMCP как `NEO4J_URI`, `NEO4J_USERNAME`, `NEO4J_PASSWORD`. |
 | `QDRANT_URL`, `QDRANT_API_KEY` | Запись legacy-сервера `qdrant-global` как `QDRANT_URL`, `QDRANT_API_KEY` (пустой ключ опускается). |
 | `GITHUB_PERSONAL_ACCESS_TOKEN` | Bearer token удалённого сервера `github-mcp-server`. |
@@ -99,8 +128,8 @@ Graphiti, Cognee, Memory Bank и GDrive подключаются к MetaMCP по
 
 | Переменная / ключ | Назначение и пример |
 |---|---|
-| `APP_URL` | Публичный базовый URL MetaMCP, который используется серверной частью при генерации адресов/ссылок. Установщик задаёт `http://localhost:12008`. Для доступного снаружи сервера задайте фактический URL, например `APP_URL=https://mcp.example.com`; обеспечьте TLS/reverse proxy и согласуйте URL клиента. |
-| `NEXT_PUBLIC_APP_URL` | URL MetaMCP, встраиваемый в клиентскую часть. Установщик задаёт `http://localhost:12008`. Для веб-интерфейса за reverse proxy задайте соответствующий внешний адрес, обычно такой же, как `APP_URL`. Для корректной работы может понадобиться пересоздать/пересобрать контейнер приложения согласно процедуре upstream; обычный `start` использует `--no-recreate`. |
+| `APP_URL` | Публичный базовый URL MetaMCP, используемый сервером для ссылок. При первом создании upstream `.env` берётся из `~/mcp-global/config/.env`; иначе исходное значение `http://localhost:12008`. Для внешнего доступа укажите, например, `APP_URL=https://mcp.example.com`, затем запустите `bash linux/run-global.sh apply-metamcp-config`. |
+| `NEXT_PUBLIC_APP_URL` | URL MetaMCP, встраиваемый во frontend. В upstream Compose `APP_URL` подставляется в оба поля и является каноническим. Команда `apply-metamcp-config` записывает одинаковый origin в оба значения; обычный `start` контейнер не пересоздаёт. |
 | `BETTER_AUTH_SECRET` | Секрет подписи/шифрования Better Auth. Генерируется случайно при создании `.env` (64 шестнадцатеричных символа). Держите постоянным и конфиденциальным; замена может повлиять на сессии/зашифрованные данные. Не используйте демонстрационные значения. |
 | `POSTGRES_HOST` | Имя хоста PostgreSQL для приложения; берётся из upstream `example.env`, обычно это service name Compose, например `postgres`. Изменяйте только вместе с соответствующей конфигурацией PostgreSQL. |
 | `POSTGRES_PORT` | Порт PostgreSQL, обычно `5432`. Это порт внутри Docker-сети, не обязательно опубликованный порт хоста. |
@@ -172,8 +201,8 @@ Graphiti, Cognee, Memory Bank и GDrive подключаются к MetaMCP по
 | Endpoint — `update` | Обновлять ли существующий endpoint; upstream default `true`. Установщик меняет буквальное `"update":true` на `"update":false`. |
 
 Параметр `BOOTSTRAP_API_KEYS` в upstream-шаблоне содержит по умолчанию JSON-массив `[{"name":"Public","is_public":true},{"name":"Private","is_public":false}]`; его объекты и ключи описаны в таблице выше. Установщик проекта не меняет этот массив. Bootstrap-конфиг MetaMCP и записи, которые отдельно добавляет `seed-global.sql`, — разные механизмы; сверяйте имена endpoint/namespace, чтобы не создавать конфликты или неосознанно открытые endpoints.
-| Namespace — `user_email` или `owner` | Необязательный владелец private namespace; `owner` — alias `user_email`. |
-| Namespace — `update` | Обновлять ли существующий namespace с таким именем; upstream default `true`. Установщик меняет буквальный ` `APP_URL` и `NEXT_PUBLIC_APP_URL` на localhost:12008, генерирует `BETTER_AUTH_SECRET` и пароль PostgreSQL, очищает bootstrap email/password, устанавливает `BOOTSTRAP_RECREATE_USER=false` и отключает обновление bootstrap namespace/endpoints. Уже существующий `.env` не исправляется и не дополняется автоматически. Проверьте его содержимое до первого запуска и сверяйте прочие upstream-настройки с `example.env` конкретной клонированной версии MetaMCP.
+
+При первом создании MetaMCP `.env` установщик берёт публичный origin из `APP_URL` (или из `NEXT_PUBLIC_APP_URL`, если `APP_URL` пуст) в kit `.env` и записывает его в оба ключа. `APP_URL` — каноническое значение, как ожидает upstream Compose. Если ни один адрес не задан, остаётся default `http://localhost:12008`. Установщик генерирует `BETTER_AUTH_SECRET` и пароль PostgreSQL, очищает bootstrap email/password, устанавливает `BOOTSTRAP_RECREATE_USER=false` и меняет `update:true` на `update:false` у bootstrap namespace/endpoints. Уже существующий MetaMCP `.env` при повторном запуске установщика не изменяется.
 
 При ручном изменении `.env` одного редактирования может быть недостаточно: `run-global.sh start` запускает MetaMCP с `docker compose up -d --no-recreate`, чтобы не уничтожать конфигурацию существующего контейнера. Для применения изменений следуйте процедуре MetaMCP/Compose и заранее сохраните ручные данные контейнера. Не удаляйте контейнер и не запускайте `down -v`, если не хотите потерять данные.
 
@@ -236,12 +265,12 @@ Graphiti, Cognee, Memory Bank и GDrive подключаются к MetaMCP по
 
 ## `linux/services/docker-compose.yml`
 
-Это Compose-описание четырёх sidecar-контейнеров набора. Оно настраивается через `~/mcp-global/config/.env` и `linux/run-global.sh`, а не через `.env` MetaMCP. `MCPKIT_*` — промежуточные переменные окружения, которые формирует `run-global.sh`; вручную задавать их обычно не нужно. Для полноты это `MCPKIT_NEO4J_URI`, `MCPKIT_NEO4J_USER`, `MCPKIT_NEO4J_PASSWORD`, `MCPKIT_NEO4J_DATABASE`, `MCPKIT_OPENAI_API_KEY`, `MCPKIT_GRAPHITI_MODEL`, `MCPKIT_GRAPHITI_EMBEDDER_MODEL`, `MCPKIT_GRAPHITI_GROUP_ID`, `MCPKIT_COGNEE_LLM_PROVIDER`, `MCPKIT_COGNEE_LLM_API_KEY`, `MCPKIT_COGNEE_LLM_MODEL`, `MCPKIT_COGNEE_LLM_ENDPOINT`, `MCPKIT_COGNEE_EMBEDDING_PROVIDER`, `MCPKIT_COGNEE_EMBEDDING_API_KEY`, `MCPKIT_COGNEE_EMBEDDING_MODEL`, `MCPKIT_COGNEE_EMBEDDING_DIMENSIONS`. Их значения и соответствия официальным переменным указаны в таблицах Linux `.env` выше.
+Это Compose-описание четырёх sidecar-контейнеров набора. Оно настраивается через `~/mcp-global/config/.env` и `linux/run-global.sh`, а не через `.env` MetaMCP. `MCPKIT_*` — промежуточные переменные окружения, которые формирует `run-global.sh`; вручную задавать их обычно не нужно. Для полноты это `MCPKIT_NEO4J_URI`, `MCPKIT_NEO4J_USER`, `MCPKIT_NEO4J_PASSWORD`, `MCPKIT_NEO4J_DATABASE`, `MCPKIT_OPENAI_API_KEY` (legacy fallback), `MCPKIT_GRAPHITI_API_KEY`, `MCPKIT_GRAPHITI_BASE_URL`, `MCPKIT_GRAPHITI_MODEL`, `MCPKIT_GRAPHITI_EMBEDDER_MODEL`, `MCPKIT_GRAPHITI_GROUP_ID`, `MCPKIT_COGNEE_LLM_PROVIDER`, `MCPKIT_COGNEE_LLM_API_KEY`, `MCPKIT_COGNEE_LLM_MODEL`, `MCPKIT_COGNEE_LLM_ENDPOINT`, `MCPKIT_COGNEE_EMBEDDING_PROVIDER`, `MCPKIT_COGNEE_EMBEDDING_API_KEY`, `MCPKIT_COGNEE_EMBEDDING_ENDPOINT`, `MCPKIT_COGNEE_EMBEDDING_MODEL`, `MCPKIT_COGNEE_EMBEDDING_DIMENSIONS`. Их значения и соответствия официальным переменным указаны в таблицах Linux `.env` выше.
 
 | Сервис | Внутренний адрес, используемый MetaMCP | Настройки контейнера |
 |---|---|---|
-| `mcpkit-graphiti` | `http://mcpkit-graphiti:8000/mcp` | `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`; `OPENAI_API_KEY`; `MODEL_NAME`, `EMBEDDER_MODEL`, `GRAPHITI_GROUP_ID`. Источники значений описаны выше. Без OpenAI-ключа сервер ждёт настройки. |
-| `mcpkit-cognee` | `http://mcpkit-cognee:8000/mcp` | `TRANSPORT_MODE=http`; `MCP_ALLOWED_HOSTS=mcpkit-cognee:*`; `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_ENDPOINT`; `EMBEDDING_PROVIDER`, `EMBEDDING_API_KEY`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`; каталоги данных фиксированы как `/cognee-storage/system` и `/cognee-storage/data`. Без ключа для OpenAI сервер ждёт настройки. |
+| `mcpkit-graphiti` | `http://mcpkit-graphiti:8000/mcp` | `NEO4J_URI`, `NEO4J_USER`, `NEO4J_PASSWORD`, `NEO4J_DATABASE`; `OPENAI_API_KEY`, `OPENAI_BASE_URL`; `MODEL_NAME`, `EMBEDDER_MODEL`, `GRAPHITI_GROUP_ID`. Ключ и base URL идут из Graphiti-specific переменных (или legacy fallback). Без API key сервер ждёт настройки. |
+| `mcpkit-cognee` | `http://mcpkit-cognee:8000/mcp` | `TRANSPORT_MODE=http`; `MCP_ALLOWED_HOSTS=mcpkit-cognee:*`; `LLM_PROVIDER`, `LLM_API_KEY`, `LLM_MODEL`, `LLM_ENDPOINT`; `EMBEDDING_PROVIDER`, `EMBEDDING_API_KEY`, `EMBEDDING_ENDPOINT`, `EMBEDDING_MODEL`, `EMBEDDING_DIMENSIONS`; каталоги данных фиксированы как `/cognee-storage/system` и `/cognee-storage/data`. Без ключа для OpenAI сервер ждёт настройки. |
 | `mcpkit-memory-bank` | `http://mcpkit-memory-bank:8000/mcp` | `MEMORY_BANK_ROOT=/mcpkit/memory`; данные хранятся в volume `multfinite-mcp-kit-global-memory-data`. `mcp-proxy` принимает Streamable HTTP на порту 8000 внутри Docker-сети. |
 | `mcpkit-gdrive` | `http://mcpkit-gdrive:8000/mcp` | `GDRIVE_CREDENTIALS_PATH=/mcpkit/gdrive/credentials.json`; контейнер ждёт OAuth-файл в volume `multfinite-mcp-kit-global-gdrive-data`. Получение credentials описано в README. |
 
@@ -251,7 +280,7 @@ Compose объявляет изолированные Docker-сети `multfinit
 
 - `linux/seed-global.sql` задаёт серверы, их тип подключения, команды/аргументы, URL, namespace, endpoint и auth defaults. Эти настройки не являются `.env`-переменными. Имена серверов допускают латиницу, цифры, `_` и `-` (поэтому `io.draw` называется `io-draw`). Группы и endpoint URL приведены в основном README.
 - Новые endpoints защищены API-key authentication. API keys создаются в UI MetaMCP, затем настраиваются в MCP-клиенте как `Authorization: Bearer <key>` или `X-API-Key: <key>`. Sidecar HTTP-сервисы сами по себе не проверяют этот ключ.
-- `linux/run-global.sh` принимает команды `start`, `stop`, `restart`, `status`, `logs`, `services-logs`, `seed`, `apply-services`. Это аргументы запуска, а не ключи конфигурации.
+- `linux/run-global.sh` принимает команды `start`, `stop`, `restart`, `status`, `logs`, `services-logs`, `seed`, `apply-services`, `apply-metamcp-config`. Это аргументы запуска, а не ключи конфигурации.
 - Linux использует фиксированный базовый путь `${HOME}/mcp-global/{config,data,metamcp}`. Windows использует `$env:USERPROFILE\mcp-local\{config,data}`. Это вычисляемые пути установщиков, а не настройки `.env`.
 - Linux-инсталлятор задаёт фиксированные имена контейнеров `neo4j-mcp` и `qdrant-mcp`, публикует Neo4j на `7474`/`7687`, Qdrant на `6333`/`6334`, включает Neo4j plugin `apoc` и хранит их данные в `~/mcp-global/data/{neo4j,qdrant}`. Эти параметры не настраиваются переменными `.env`; изменение портов, образов или mount-путей требует редактирования `linux/install-global.sh` и соответствующей сетевой конфигурации. Пароль нового Neo4j контейнера — исключение, он читается из `NEO4J_PASSWORD`.
 - MetaMCP installer настраивает стандартный адрес `http://localhost:12008`; run-скрипт проверяет health на внутреннем порту `12008`. Если меняете адрес/публикацию порта, согласуйте Compose MetaMCP, `APP_URL`, `NEXT_PUBLIC_APP_URL`, health check и URL клиентов; одного изменения публичных URL может быть недостаточно.
@@ -261,7 +290,7 @@ Compose объявляет изолированные Docker-сети `multfinit
 
 - Linux API-ключи и параметры sidecar: `~/mcp-global/config/.env`; для Graphiti/Cognee выполнить `bash linux/run-global.sh apply-services`.
 - Настройки существующих записей GitHub, Context7, Neo4j и Qdrant: менять через UI MetaMCP. `start` не перезаписывает существующие записи; `seed` добавляет отсутствующие по правилам README.
-- URL MetaMCP, секрет auth и параметры PostgreSQL: `~/mcp-global/metamcp/.env`, с учётом правил upstream и процедур применения Compose. Перед изменениями сделайте резервную копию.
+- Публичный URL MetaMCP: задайте `APP_URL` / `NEXT_PUBLIC_APP_URL` в `~/mcp-global/config/.env` и выполните `bash linux/run-global.sh apply-metamcp-config`. Секрет auth и параметры PostgreSQL настраиваются в `~/mcp-global/metamcp/.env` согласно правилам upstream; заранее сохраните ручные файлы из writable layer перед пересозданием app.
 - Windows команды, каталоги, env и DSN: редактировать `mcp-local.json`; Windows `.env` автоматически его не обновляет.
 - Установщик Linux задаёт права `600` созданным `.env`; на Windows проверьте ACL профиля пользователя. Не помещайте пароли/API-ключи в Git, публичный JSON, скриншоты, логи или команды, сохраняемые в shell history.
 

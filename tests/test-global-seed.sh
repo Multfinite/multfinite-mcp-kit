@@ -122,9 +122,12 @@ case "${1:-}" in
                     printf '%s' "${MCPKIT_NEO4J_PASSWORD:-}" > "$MOCK_STATE/graphiti-password"
                     printf '%s' "${MCPKIT_NEO4J_DATABASE:-}" > "$MOCK_STATE/graphiti-database"
                     printf '%s' "${MCPKIT_GRAPHITI_GROUP_ID:-}" > "$MOCK_STATE/graphiti-group"
-                    printf '%s' "${MCPKIT_OPENAI_API_KEY:-}" > "$MOCK_STATE/graphiti-openai"
+                    printf '%s' "${MCPKIT_GRAPHITI_API_KEY:-}" > "$MOCK_STATE/graphiti-openai"
+                    printf '%s' "${MCPKIT_GRAPHITI_BASE_URL:-}" > "$MOCK_STATE/graphiti-base-url"
                     printf '%s' "${MCPKIT_COGNEE_LLM_API_KEY:-}" > "$MOCK_STATE/cognee-llm"
+                    printf '%s' "${MCPKIT_COGNEE_LLM_ENDPOINT:-}" > "$MOCK_STATE/cognee-llm-endpoint"
                     printf '%s' "${MCPKIT_COGNEE_EMBEDDING_API_KEY:-}" > "$MOCK_STATE/cognee-embedding"
+                    printf '%s' "${MCPKIT_COGNEE_EMBEDDING_ENDPOINT:-}" > "$MOCK_STATE/cognee-embedding-endpoint"
                     ;;
                 stop|logs) exit 0 ;;
                 *) echo "Unexpected service Compose command: $*" >&2; exit 1 ;;
@@ -138,7 +141,9 @@ case "${1:-}" in
         case "${1:-}" in
             version) echo '2.30.0' ;;
             pull|up|stop|down|logs) exit 0 ;;
-            ps) [ "$2" = -q ] && [ "$3" = app ] && echo mock-app ;;
+            ps)
+                if { [ "$2" = -q ] && [ "$3" = app ]; } || { [ "$2" = -a ] && [ "$3" = -q ] && [ "$4" = app ]; }; then echo mock-app; fi
+                ;;
             exec)
                 [ "$2" = -T ] && [ "$3" = app ] || exit 1
                 shift 3
@@ -250,7 +255,12 @@ assert_contains "$HOME/mcp-global/metamcp/.env" 'BOOTSTRAP_USER_PASSWORD=' 'exam
 assert_not_contains "$HOME/mcp-global/metamcp/.env" 'BOOTSTRAP_USER_PASSWORD=changeme' 'example password not retained'
 assert_contains "$HOME/mcp-global/metamcp/.env" 'BOOTSTRAP_RECREATE_USER=false' 'bootstrap will not recreate users'
 assert_contains "$HOME/mcp-global/metamcp/.env" '"update":false' 'bootstrap will not overwrite edits'
-assert_contains "$HOME/mcp-global/config/.env" 'OPENAI_API_KEY=' 'blank credentials are documented'
+assert_contains "$HOME/mcp-global/config/.env" 'OPENAI_API_KEY=' 'legacy fallback is documented'
+assert_contains "$HOME/mcp-global/config/.env" 'GRAPHITI_API_KEY=' 'Graphiti gets an independent key setting'
+assert_contains "$HOME/mcp-global/config/.env" 'GRAPHITI_BASE_URL=https://api.openai.com/v1' 'Graphiti endpoint has an explicit OpenAI-compatible base URL'
+assert_contains "$HOME/mcp-global/config/.env" 'COGNEE_LLM_ENDPOINT=https://api.openai.com/v1' 'Cognee LLM endpoint has its own base URL'
+assert_contains "$HOME/mcp-global/config/.env" 'COGNEE_EMBEDDING_ENDPOINT=https://api.openai.com/v1' 'Cognee embedding endpoint has its own base URL'
+assert_contains "$HOME/mcp-global/config/.env" 'APP_URL=' 'public MetaMCP URL is configurable from the kit environment'
 assert_not_contains "$HOME/mcp-global/config/.env" 'your-openai-key-here' 'new installs must not send fake keys'
 assert_contains "$MOCK_LOG" 'compose up -d --no-recreate' 'MetaMCP is not recreated on start'
 assert_contains "$MOCK_LOG" 'compose -p multfinite-mcp-kit-global -f ' 'separate Compose project used'
@@ -292,9 +302,13 @@ NEO4J_USER=custom-user
 NEO4J_PASSWORD='pa$$word'"'"' with spaces; SELECT pg_sleep(99); --'
 QDRANT_URL='https://qdrant.example.test:443'
 QDRANT_API_KEY='key-with-"quotes"'
-OPENAI_API_KEY='openai-secret-$quoted'
+OPENAI_API_KEY='legacy-shared-secret'
+GRAPHITI_API_KEY='graphiti-specific-secret'
+GRAPHITI_BASE_URL='https://graphiti.example.test/v1'
 COGNEE_LLM_API_KEY='cognee-llm-secret'
+COGNEE_LLM_ENDPOINT='https://llm.example.test/v1'
 COGNEE_EMBEDDING_API_KEY='cognee-embedding-secret'
+COGNEE_EMBEDDING_ENDPOINT='https://embeddings.example.test/v1'
 GITHUB_PERSONAL_ACCESS_TOKEN='github-secret-$quoted'
 CONTEXT7_API_KEY='context-secret-$quoted'
 export POSTGRES_PASSWORD=must-not-override-compose
@@ -341,9 +355,12 @@ assert_eq "pa\$\$word' with spaces; SELECT pg_sleep(99); --" "$(query "SELECT en
 assert_eq 'bolt://host.docker.internal:9767' "$(cat "$MOCK_STATE/graphiti-uri")" 'Graphiti gets container-compatible Neo4j address'
 assert_eq 'custom-user' "$(cat "$MOCK_STATE/graphiti-user")" 'Graphiti gets configured Neo4j user'
 assert_eq "pa\$\$word' with spaces; SELECT pg_sleep(99); --" "$(cat "$MOCK_STATE/graphiti-password")" 'Graphiti gets the exact password'
-assert_eq "openai-secret-\$quoted" "$(cat "$MOCK_STATE/graphiti-openai")" 'Graphiti gets the OpenAI key'
-assert_eq 'cognee-llm-secret' "$(cat "$MOCK_STATE/cognee-llm")" 'Cognee gets its configured LLM key'
-assert_eq 'cognee-embedding-secret' "$(cat "$MOCK_STATE/cognee-embedding")" 'Cognee gets its configured embedding key'
+assert_eq 'graphiti-specific-secret' "$(cat "$MOCK_STATE/graphiti-openai")" 'Graphiti gets its per-service API key instead of the legacy shared key'
+assert_eq 'https://graphiti.example.test/v1' "$(cat "$MOCK_STATE/graphiti-base-url")" 'Graphiti gets its custom OpenAI-compatible base URL'
+assert_eq 'cognee-llm-secret' "$(cat "$MOCK_STATE/cognee-llm")" 'Cognee gets its independent LLM key'
+assert_eq 'https://llm.example.test/v1' "$(cat "$MOCK_STATE/cognee-llm-endpoint")" 'Cognee gets its independent LLM endpoint'
+assert_eq 'cognee-embedding-secret' "$(cat "$MOCK_STATE/cognee-embedding")" 'Cognee gets its independent embedding key'
+assert_eq 'https://embeddings.example.test/v1' "$(cat "$MOCK_STATE/cognee-embedding-endpoint")" 'Cognee gets its independent embedding endpoint'
 assert_eq "github-secret-\$quoted" "$(query "SELECT bearer_token FROM mcp_servers WHERE name='github-mcp-server'")" 'GitHub bearer token encoded safely'
 assert_eq "context-secret-\$quoted" "$(query "SELECT env->>'CONTEXT7_API_KEY' FROM mcp_servers WHERE name='context7'")" 'Context7 key encoded safely'
 assert_eq 'https://qdrant.example.test:443|key-with-"quotes"' "$(query "SELECT (env->>'QDRANT_URL')||'|'||(env->>'QDRANT_API_KEY') FROM mcp_servers WHERE name='qdrant-global' AND user_id IS NULL")" 'custom Qdrant settings'
@@ -525,13 +542,16 @@ printf 'ok - foreign Docker volumes are not adopted\n'
 reset_db
 prepare_existing
 bash "$ROOT/linux/run-global.sh" start > "$TMP/provider-start.out" 2>&1 || { cat "$TMP/provider-start.out" >&2; fail 'provider start failed'; }
-printf '\nOPENAI_API_KEY=updated-key\nNEO4J_DATABASE=separate-graph\nGRAPHITI_GROUP_ID=custom-group\n' >> "$HOME/mcp-global/config/.env"
+printf '\nOPENAI_API_KEY=updated-key\nNEO4J_DATABASE=separate-graph\nGRAPHITI_GROUP_ID=custom-group\nGRAPHITI_BASE_URL=https://graphiti-gateway.example/v1\nCOGNEE_LLM_ENDPOINT=https://llm-gateway.example/v1\nCOGNEE_EMBEDDING_ENDPOINT=https://embedding-gateway.example/v1\n' >> "$HOME/mcp-global/config/.env"
 : > "$MOCK_LOG"
 bash "$ROOT/linux/run-global.sh" apply-services > "$TMP/provider-apply.out" 2>&1 || { cat "$TMP/provider-apply.out" >&2; fail 'provider apply failed'; }
 assert_contains "$MOCK_LOG" 'up -d --no-deps --force-recreate mcpkit-graphiti mcpkit-cognee' 'only provider services are explicitly recreated'
 assert_not_contains "$MOCK_LOG" 'compose up ' 'MetaMCP is not recreated by provider apply'
 assert_not_contains "$MOCK_LOG" 'volume rm' 'provider apply never removes persistent volumes'
-assert_eq updated-key "$(cat "$MOCK_STATE/graphiti-openai")" 'changed key reaches Graphiti'
+assert_eq updated-key "$(cat "$MOCK_STATE/graphiti-openai")" 'legacy shared key remains a Graphiti fallback'
+assert_eq https://graphiti-gateway.example/v1 "$(cat "$MOCK_STATE/graphiti-base-url")" 'Graphiti base URL can be changed independently'
+assert_eq https://llm-gateway.example/v1 "$(cat "$MOCK_STATE/cognee-llm-endpoint")" 'Cognee LLM endpoint reaches its own client'
+assert_eq https://embedding-gateway.example/v1 "$(cat "$MOCK_STATE/cognee-embedding-endpoint")" 'Cognee embedding endpoint reaches its own client'
 assert_eq separate-graph "$(cat "$MOCK_STATE/graphiti-database")" 'Graphiti database override is passed to Compose'
 assert_eq custom-group "$(cat "$MOCK_STATE/graphiti-group")" 'Graphiti group override is passed to Compose'
 assert_eq updated-key "$(cat "$MOCK_STATE/cognee-llm")" 'OpenAI key is Cognee fallback'
@@ -542,6 +562,32 @@ assert_contains "$MOCK_LOG" 'compose stop' 'stop preserves MetaMCP container wri
 assert_not_contains "$MOCK_LOG" 'compose down' 'stop must not remove MetaMCP containers'
 assert_not_contains "$MOCK_LOG" 'volume rm' 'stop never removes persistent volumes'
 printf 'ok - explicit provider configuration update and non-destructive stop\n'
+
+# APP_URL values in the kit .env are synced into MetaMCP and explicitly applied
+# by recreating only the app container; public and frontend URLs stay aligned.
+reset_db
+prepare_existing
+bash "$ROOT/linux/run-global.sh" start > "$TMP/url-start.out" 2>&1 || { cat "$TMP/url-start.out" >&2; fail 'URL setup start failed'; }
+printf '\nAPP_URL=https://mcp.example.test\n' >> "$HOME/mcp-global/config/.env"
+: > "$MOCK_LOG"
+bash "$ROOT/linux/run-global.sh" apply-metamcp-config > "$TMP/url-apply.out" 2>&1 || { cat "$TMP/url-apply.out" >&2; fail 'MetaMCP URL apply failed'; }
+assert_contains "$HOME/mcp-global/metamcp/.env" 'APP_URL=https://mcp.example.test' 'kit APP_URL reaches MetaMCP dotenv'
+assert_contains "$HOME/mcp-global/metamcp/.env" 'NEXT_PUBLIC_APP_URL=https://mcp.example.test' 'frontend URL follows APP_URL when omitted'
+assert_contains "$MOCK_LOG" 'compose up -d --no-deps --force-recreate app' 'URL update explicitly recreates only app'
+assert_contains "$TMP/url-apply.out" 'APP_URL и NEXT_PUBLIC_APP_URL применены' 'URL update reports success'
+printf 'ok - public URL sync and explicit MetaMCP app recreation\n'
+
+# A pre-created kit .env also supplies the public address when the installer
+# creates MetaMCP's .env for the first time.
+reset_db
+prepare_home
+cat > "$HOME/mcp-global/config/.env" <<'EOF'
+APP_URL=https://initial.example.test
+EOF
+bash "$ROOT/linux/install-global.sh" > "$TMP/initial-url-install.out" 2>&1 || { cat "$TMP/initial-url-install.out" >&2; fail 'install with preconfigured APP_URL failed'; }
+assert_contains "$HOME/mcp-global/metamcp/.env" 'APP_URL=https://initial.example.test' 'installer seeds APP_URL from pre-existing kit config'
+assert_contains "$HOME/mcp-global/metamcp/.env" 'NEXT_PUBLIC_APP_URL=https://initial.example.test' 'installer aligns frontend URL with APP_URL'
+printf 'ok - initial installer carries the configured public origin\n'
 
 reset_db
 prepare_existing
