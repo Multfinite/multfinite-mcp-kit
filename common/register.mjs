@@ -188,7 +188,7 @@ async function main() {
   if (!opts.dir) fail('--dir is required.');
   const base = path.resolve(opts.dir);
   const bundle = profile === 'local' ? localBundle(base) : globalBundle(base);
-  console.log(`This creates public ${profile.toUpperCase()} servers, namespaces and endpoints without instance prefixes. An administrator account is required.`);
+  console.log(`This creates public ${profile.toUpperCase()} servers, each with a same-named namespace and endpoint, without instance prefixes. An administrator account is required.`);
   console.log('New endpoints require a MetaMCP API key. Every MetaMCP user can use the shared servers and their configured credentials/data.');
   if (profile === 'local') console.log('WARNING: shared LOCAL servers can expose files, databases, terminals and desktop control to other users.');
   console.log('Existing records are never updated or deleted; conflicting names are not adopted.');
@@ -216,16 +216,20 @@ async function main() {
     let journal;
     if (fs.existsSync(file)) {
       journal = json(file);
-      if (![1, 2].includes(journal.version) || journal.origin !== target.base || journal.owner !== auth.userId || journal.gateway !== gateway.base ||
+      if (![1, 2, 3].includes(journal.version) || journal.origin !== target.base || journal.owner !== auth.userId || journal.gateway !== gateway.base ||
           journal.profile !== profile || journal.hostId !== bundle.id || journal.keyHash !== keyHash ||
           (journal.version === 1 && !new RegExp(`^mcpkit-${profile}-[a-f0-9]{12}$`).test(journal.prefix || '')) ||
           (journal.version === 2 && journal.naming !== 'official-v1') ||
+          (journal.version === 3 && journal.naming !== 'official-per-server-v1') ||
           !journal.servers || !journal.namespaces || !journal.endpoints) {
         fail('Saved registration state differs from the selected target or key. Existing records were not changed; inspect it manually.');
       }
       if (journal.pending) fail(`A previous operation has an unknown outcome (${journal.pending.kind} ${journal.pending.name}). Inspect the MetaMCP UI and the journal before retrying; no records were changed now.`);
+      if (journal.version !== 3) {
+        fail('This registration uses the older grouped layout. Do not recreate it; use the explicit sharing migration described in the independent installation guide, then manage existing records in MetaMCP.');
+      }
     } else {
-      journal = { version: 2, naming: 'official-v1', origin: target.base, owner: auth.userId, gateway: gateway.base, profile, hostId: bundle.id, keyHash,
+      journal = { version: 3, naming: 'official-per-server-v1', origin: target.base, owner: auth.userId, gateway: gateway.base, profile, hostId: bundle.id, keyHash,
         servers: {}, namespaces: {}, endpoints: {}, pending: null };
       writeAtomic(file, journal);
     }
@@ -262,8 +266,7 @@ async function main() {
         if (typeof name !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(name)) fail(`Invalid expected ${kind} name; no records were changed.`);
         const record = saved[id];
         if (Object.hasOwn(saved, id)) {
-          const original = journal.version === 1 ? `${journal.prefix}-${id}` : name;
-          if (!record || typeof record !== 'object' || !validUuid(record.uuid) || record.name !== original || used.has(record.uuid.toLowerCase())) {
+          if (!record || typeof record !== 'object' || !validUuid(record.uuid) || record.name !== name || used.has(record.uuid.toLowerCase())) {
             fail(`Invalid saved ${kind} identity; no MetaMCP records were changed.`);
           }
           used.add(record.uuid.toLowerCase());
@@ -313,12 +316,7 @@ async function main() {
         for (const id of members) {
           const record = journal.servers[id];
           const current = serverList.find((s) => s.uuid === record.uuid);
-          // An explicitly converted v1 record retains its original hash in the
-          // journal. Only the expected name/owner may differ from that hash.
-          const unchanged = current && (serverHash(current) === record.hash ||
-            (journal.version === 1 && current.user_id === null &&
-             serverHash({ ...current, name: record.name, user_id: journal.owner }) === record.hash));
-          if (!unchanged) fail(`Server ${record.name} was changed or removed; it was not attached to a new namespace.`);
+          if (!current || serverHash(current) !== record.hash) fail(`Server ${record.name} was changed or removed; it was not attached to a new namespace.`);
         }
         const created = await create('namespace', name, 'namespaces.create', { name, description: `MCP Kit ${profile}: ${group}`, mcpServerUuids: uuids, ...publicOwner });
         ns = journal.namespaces[group] = { uuid: created.uuid, name, servers: uuids };

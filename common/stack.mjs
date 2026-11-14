@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { setTimeout as delay } from 'node:timers/promises';
-import { GLOBAL_GROUPS, GLOBAL_SERVER_NAMES, GLOBAL_GROUP_NAMES, localGroups, LOCAL_SERVER_NAMES, LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
+import { GLOBAL_SERVER_NAMES, LOCAL_SERVER_NAMES, LEGACY_GLOBAL_GROUPS, LEGACY_GLOBAL_GROUP_NAMES, legacyLocalGroups, LEGACY_LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const revision = '05818ec2767b946f98d280ae9cefa401f0362d62';
@@ -85,14 +85,25 @@ function dockerContext() {
   run('docker', ['--context', name, 'compose', 'version'], { capture: true });
   return name;
 }
-function originState(base) {
+function originState(base, { allowRelocated = false } = {}) {
   const f = path.join(base, '.mcpkit', 'state.json');
   if (!fs.existsSync(f)) fail(`Independent kit state not found: ${f}. Existing/legacy files were not changed.`);
   const s = JSON.parse(fs.readFileSync(f, 'utf8'));
-  if (s.version !== 1 || !['meta', 'global'].includes(s.type) || !/^[a-f0-9]{16}$/.test(s.id) ||
-      s.project !== `mcpkit-${s.type}-${s.id}` || s.base !== base || validPort(s.port) !== s.port ||
-      (s.type === 'meta' && validOrigin(s.appUrl) !== s.appUrl)) fail('Invalid or relocated kit state; no Docker resource was changed.');
+  if (!s || typeof s !== 'object' || Array.isArray(s) || s.version !== 1 || !['meta', 'global'].includes(s.type) ||
+      typeof s.id !== 'string' || !/^[a-f0-9]{16}$/.test(s.id) || s.project !== `mcpkit-${s.type}-${s.id}` ||
+      typeof s.base !== 'string' || !path.isAbsolute(s.base) || path.resolve(s.base) !== s.base || validPort(s.port) !== s.port ||
+      (s.type === 'meta' && validOrigin(s.appUrl) !== s.appUrl)) fail(`Invalid kit state in ${f}; no Docker resource was changed.`);
+  if (!allowRelocated && s.base !== base) {
+    fail(`Kit state in ${f} refers to ${s.base}, not ${base}. On Linux, use linux/relocate-kit.sh after reviewing the move; no Docker resource was changed.`);
+  }
   return s;
+}
+function sharingState(saved, base) {
+  if (saved.base !== base) {
+    console.log(`Using moved ${saved.type.toUpperCase()} directory ${base} for this sharing operation (saved path: ${saved.base}).`);
+    console.log('The saved path is not changed; use linux/relocate-kit.sh for subsequent lifecycle commands.');
+  }
+  return { ...saved, base };
 }
 function readEnv(base, type, { ignoreAppUrl = false } = {}) {
   const file = path.join(base, '.mcpkit', '.env');
@@ -495,6 +506,92 @@ function privateRegularFile(file) {
   if (!item.isFile() || item.isSymbolicLink() || item.size > 1024 * 1024) fail('A private configuration file is not a regular file or is too large; it was not changed.');
   return fs.readFileSync(file);
 }
+function relocationContainerIds(ctx, state, values) {
+  checkResources(ctx, state);
+  if (state.type === 'meta') {
+    if (state.revision !== revision) fail('The MetaMCP revision is unexpected; no file was changed.');
+    const snapshot = metaContainerSnapshot(ctx, state);
+    if (snapshot.password !== values.POSTGRES_PASSWORD || snapshot.secret !== values.BETTER_AUTH_SECRET) {
+      fail('MetaMCP container credentials differ from the private configuration; no file was changed.');
+    }
+    return [snapshot.appId, snapshot.postgresId];
+  }
+  const id = ownedMetaService(ctx, state, 'gateway');
+  const env = containerEnvironment(ctx, id);
+  if (env.MCPKIT_INSTANCE_ID !== state.id || env.MCPKIT_GATEWAY_KEY !== values.MCPKIT_GATEWAY_KEY ||
+      env.MCPKIT_CONTROL_KEY !== values.MCPKIT_CONTROL_KEY || env.NEO4J_PASSWORD !== values.NEO4J_PASSWORD) {
+    fail('GLOBAL gateway credentials differ from the private configuration; no file was changed.');
+  }
+  const result = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', id], { capture: true });
+  let mounts;
+  try { mounts = JSON.parse(result.stdout); } catch { fail('Cannot inspect the GLOBAL gateway mount; no file was changed.'); }
+  const mounted = Array.isArray(mounts) ? mounts.filter((item) => item?.Destination === '/data') : [];
+  const volume = `${state.project}_gateway_data`;
+  if (mounted.length !== 1 || mounted[0].Type !== 'volume' || mounted[0].Name !== volume) {
+    fail('Unexpected GLOBAL gateway data mount; no file was changed.');
+  }
+  const labels = inspect(ctx, 'volume', volume);
+  if (!labels) fail('The GLOBAL gateway data volume is missing; no file was changed.');
+  checkLabel(labels, state, 'volume', volume);
+  if (labels['com.docker.compose.volume'] !== 'gateway_data') fail('Unexpected GLOBAL gateway volume identity; no file was changed.');
+  return [id];
+}
+async function relocateKit(ctx, saved, base) {
+  if (process.platform !== 'linux') fail('relocate is only available on Linux.');
+  if (saved.base === base) { console.log(`The ${saved.type} directory is already registered at ${base}; nothing was changed.`); return; }
+  const dir = fs.lstatSync(base);
+  const priv = path.join(base, '.mcpkit');
+  if (!dir.isDirectory() || dir.isSymbolicLink()) fail('The new installation directory must be a real directory, not a link.');
+  requirePrivateDirectory(priv);
+  const stateFile = path.join(priv, 'state.json');
+  const envFile = path.join(priv, '.env');
+  const stateBytes = privateRegularFile(stateFile);
+  const envBytes = privateRegularFile(envFile);
+  if (!stateBytes || !envBytes || JSON.stringify(JSON.parse(stateBytes)) !== JSON.stringify(saved)) {
+    fail('The state or private configuration is missing or changed; no file was changed.');
+  }
+  const ensureOldPath = () => {
+    let previous;
+    try { previous = fs.statSync(saved.base); }
+    catch (error) { if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return; throw error; }
+    const current = fs.statSync(base);
+    if (previous.dev !== current.dev || previous.ino !== current.ino) {
+      fail('The previous directory still exists as a different location. Inspect both copies before relocating; no file was changed.');
+    }
+  };
+  const state = { ...saved, base };
+  const values = readEnv(base, saved.type);
+  ensureOldPath();
+  const ids = relocationContainerIds(ctx, state, values);
+  const unchanged = () => {
+    requirePrivateDirectory(priv);
+    const currentState = privateRegularFile(stateFile);
+    const currentEnv = privateRegularFile(envFile);
+    if (!currentState || !currentState.equals(stateBytes) || !currentEnv || !currentEnv.equals(envBytes)) {
+      fail('The state or private configuration changed; no relocation was applied.');
+    }
+    ensureOldPath();
+    const currentIds = relocationContainerIds(ctx, state, values);
+    if (JSON.stringify(currentIds) !== JSON.stringify(ids)) fail('The kit containers changed; no relocation was applied.');
+  };
+  const message = `Update the saved directory of ${saved.project}?\nFrom: ${saved.base}\nTo:   ${base}\n` +
+    'Only state.json will be updated after a private backup. Containers, volumes, databases and secrets are not changed.\n' +
+    'Do not start, stop, apply, or relocate this project concurrently. A later Compose start/apply may recreate containers; preserve their writable layers first.';
+  if (!(await confirm(message, `MOVE ${saved.type.toUpperCase()}`))) { console.log('Cancelled; no file was changed.'); process.exitCode = 1; return; }
+  unchanged();
+  const backup = path.join(priv, `state.before-move-${crypto.randomBytes(8).toString('hex')}.backup`);
+  privateWrite(backup, stateBytes);
+  const temp = path.join(priv, `state.move-${crypto.randomBytes(8).toString('hex')}.tmp`);
+  let tempCreated = false;
+  try {
+    privateWrite(temp, `${JSON.stringify(state, null, 2)}\n`);
+    tempCreated = true;
+    unchanged();
+    fs.renameSync(temp, stateFile);
+    tempCreated = false;
+  } finally { if (tempCreated) { try { fs.unlinkSync(temp); } catch { /* left for inspection */ } } }
+  console.log(`Updated ${saved.project} directory to ${base}. Previous state: ${backup}. No Docker resource was changed.`);
+}
 async function recoverMetaEnv(ctx, state) {
   if (process.platform !== 'linux' || state.type !== 'meta') fail('recover-env is only available for an independent MetaMCP on Linux.');
   const priv = path.join(state.base, '.mcpkit');
@@ -886,18 +983,19 @@ function exactKeys(value, expected) {
     JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
 }
 function sharingManifest(journal) {
-  if (journal?.version !== 1 || !['global', 'local'].includes(journal.profile)) {
-    fail('Only completed v1 independent LOCAL/GLOBAL registrations can be converted.');
+  if (![1, 2].includes(journal?.version) || !['global', 'local'].includes(journal.profile) ||
+      (journal.version === 2 && journal.naming !== 'official-v1')) {
+    fail('Only completed grouped v1/v2 independent LOCAL/GLOBAL registrations can be converted.');
   }
   const linuxLocal = journal.servers && Object.hasOwn(journal.servers, 'linux-desktop');
-  const definitions = journal.profile === 'global' ? GLOBAL_GROUPS : localGroups(linuxLocal);
+  const definitions = journal.profile === 'global' ? LEGACY_GLOBAL_GROUPS : legacyLocalGroups(linuxLocal);
   const serverNames = journal.profile === 'global' ? GLOBAL_SERVER_NAMES : LOCAL_SERVER_NAMES;
-  const groupNames = journal.profile === 'global' ? GLOBAL_GROUP_NAMES : LOCAL_GROUP_NAMES;
+  const previousGroups = journal.profile === 'global' ? LEGACY_GLOBAL_GROUP_NAMES : LEGACY_LOCAL_GROUP_NAMES;
   const groups = Object.keys(definitions);
   const serverIds = [...new Set(Object.values(definitions).flat())];
   const validUuid = (value) => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
   if (journal.pending !== null || typeof journal.owner !== 'string' || !journal.owner || journal.owner.length > 320 || /[\x00-\x1f\x7f]/.test(journal.owner) ||
-      !new RegExp(`^mcpkit-${journal.profile}-[a-f0-9]{12}$`).test(journal.prefix || '') ||
+      (journal.version === 1 && !new RegExp(`^mcpkit-${journal.profile}-[a-f0-9]{12}$`).test(journal.prefix || '')) ||
       !exactKeys(journal.servers, serverIds) || !exactKeys(journal.namespaces, groups) || !exactKeys(journal.endpoints, groups)) {
     fail('Registration is incomplete, pending, or has unexpected records; no database records were changed.');
   }
@@ -905,8 +1003,9 @@ function sharingManifest(journal) {
   const servers = serverIds.map((id) => {
     const item = journal.servers[id];
     const name = serverNames[id];
-    if (!item || !validUuid(item.uuid) || item.name !== `${journal.prefix}-${id}` || !/^[a-f0-9]{64}$/.test(item.hash || '') ||
-        typeof name !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(name)) {
+    const oldName = journal.version === 1 ? `${journal.prefix}-${id}` : name;
+    if (!item || !validUuid(item.uuid) || item.name !== oldName || !/^[a-f0-9]{64}$/.test(item.hash || '') ||
+        typeof name !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(name) || /__/.test(name)) {
       fail('Registration contains an invalid server record; no database records were changed.');
     }
     return { uuid: item.uuid, old_name: item.name, name };
@@ -914,24 +1013,40 @@ function sharingManifest(journal) {
   if (!unique(servers.map((item) => item.uuid)) || !unique(servers.map((item) => item.name))) fail('Duplicate registered server UUID or name; no database records were changed.');
   const namespaces = groups.map((group) => {
     const item = journal.namespaces[group];
-    const name = groupNames[group];
+    const name = serverNames[definitions[group][0]];
+    const oldName = journal.version === 1 ? `${journal.prefix}-${group}` : previousGroups[group];
     const expected = definitions[group].map((id) => journal.servers[id].uuid.toLowerCase()).sort();
-    if (!item || !validUuid(item.uuid) || item.name !== `${journal.prefix}-${group}` || typeof name !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(name) || !Array.isArray(item.servers) ||
+    if (!item || !validUuid(item.uuid) || item.name !== oldName || typeof name !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(name) || !Array.isArray(item.servers) ||
         item.servers.some((id) => !validUuid(id)) || JSON.stringify(item.servers.map((id) => id.toLowerCase()).sort()) !== JSON.stringify(expected)) {
       fail('Registration contains an invalid namespace or membership; no database records were changed.');
     }
-    return { uuid: item.uuid, old_name: item.name, name, servers: [...item.servers] };
+    return { uuid: item.uuid, old_name: item.name, previous_name: previousGroups[group], name,
+      servers: [...item.servers], member_names: definitions[group].map((id) => serverNames[id]) };
   });
   if (!unique(namespaces.map((item) => item.uuid)) || !unique(namespaces.map((item) => item.name))) fail('Duplicate registered namespace UUID or name; no database records were changed.');
   const endpoints = groups.map((group) => {
     const item = journal.endpoints[group];
-    if (!item || !validUuid(item.uuid) || item.name !== `${journal.prefix}-${group}`) {
+    const oldName = journal.version === 1 ? `${journal.prefix}-${group}` : previousGroups[group];
+    if (!item || !validUuid(item.uuid) || item.name !== oldName) {
       fail('Registration contains an invalid endpoint; no database records were changed.');
     }
-    return { uuid: item.uuid, old_name: item.name, name: groupNames[group], namespace_uuid: journal.namespaces[group].uuid };
+    return { uuid: item.uuid, old_name: item.name, previous_name: previousGroups[group],
+      name: serverNames[definitions[group][0]], namespace_uuid: journal.namespaces[group].uuid };
   });
   if (!unique(endpoints.map((item) => item.uuid)) || !unique(endpoints.map((item) => item.name))) fail('Duplicate registered endpoint UUID or name; no database records were changed.');
-  return { owner: journal.owner, servers, namespaces, endpoints };
+  const anchors = new Set(groups.map((group) => definitions[group][0]));
+  const additional = serverIds.filter((id) => !anchors.has(id)).map((id) => {
+    const source = groups.find((group) => definitions[group].includes(id));
+    return { namespace_uuid: crypto.randomUUID(), endpoint_uuid: crypto.randomUUID(), name: serverNames[id],
+      server_uuid: journal.servers[id].uuid, source_namespace_uuid: journal.namespaces[source].uuid,
+      source_endpoint_uuid: journal.endpoints[source].uuid, description: `MCP Kit ${journal.profile}: ${id}` };
+  });
+  if (!unique([...namespaces.map((item) => item.uuid), ...additional.map((item) => item.namespace_uuid)]) ||
+      !unique([...endpoints.map((item) => item.uuid), ...additional.map((item) => item.endpoint_uuid)]) ||
+      !unique([...namespaces.map((item) => item.name), ...additional.map((item) => item.name)])) {
+    fail('Duplicate generated namespace or endpoint identity; no database records were changed.');
+  }
+  return { owner: journal.owner, servers, namespaces, endpoints, additional };
 }
 function registeredGlobalJournal(state, snapshot, gatewayKey, registration) {
   const dir = path.join(state.base, '.mcpkit', 'registrations');
@@ -945,7 +1060,7 @@ function registeredGlobalJournal(state, snapshot, gatewayKey, registration) {
     if (!bytes) continue;
     let journal;
     try { journal = JSON.parse(bytes.toString('utf8')); } catch { continue; }
-    if (!journal || journal.version !== 1 || journal.profile !== 'global' || journal.hostId !== state.id ||
+    if (!journal || ![1, 2].includes(journal.version) || journal.profile !== 'global' || journal.hostId !== state.id ||
         journal.origin !== snapshot.appUrl || journal.keyHash !== sha256(gatewayKey) ||
         typeof journal.owner !== 'string' || typeof journal.gateway !== 'string') continue;
     const expected = sha256(`${journal.origin}\n${journal.owner}\n${journal.gateway}\n${journal.profile}\n${journal.hostId}`).slice(0, 32);
@@ -1027,7 +1142,7 @@ function assertFilesUnchanged(files) {
     if (!current || !current.equals(item.bytes)) fail('A kit state, configuration, or registration changed; no sharing update was attempted.');
   }
 }
-function prepareSharingMeta(ctx, meta) {
+function prepareSharingMeta(ctx, meta, savedMeta) {
   if (process.platform !== 'linux' || meta.type !== 'meta' || meta.revision !== revision) {
     fail('Sharing requires a local Linux independent MetaMCP with the expected pinned revision.');
   }
@@ -1036,7 +1151,9 @@ function prepareSharingMeta(ctx, meta) {
   const priv = path.join(meta.base, '.mcpkit');
   requirePrivateDirectory(priv);
   const files = snapshotFiles([path.join(priv, 'state.json'), path.join(priv, '.env')]);
-  if (JSON.stringify(JSON.parse(files[0].bytes)) !== JSON.stringify(meta)) fail('The MetaMCP state changed; no database records were changed.');
+  // Compare the bytes on disk to the original state, not the temporary view
+  // whose base points at the directory explicitly selected for this command.
+  if (JSON.stringify(JSON.parse(files[0].bytes)) !== JSON.stringify(savedMeta)) fail('The MetaMCP state changed; no database records were changed.');
   const env = readEnv(meta.base, 'meta');
   checkResources(ctx, meta);
   const before = metaContainerSnapshot(ctx, meta);
@@ -1072,29 +1189,37 @@ async function shareSelectedRegistration(ctx, meta, prepared, selected, extraChe
     const profile = selected.journal.profile.toUpperCase();
     console.log(`Public server names: ${manifest.servers.map((item) => item.name).join(', ')}`);
     console.log('New endpoint URLs:');
-    for (const item of manifest.endpoints) console.log(`  ${prepared.before.appUrl}/metamcp/${item.name}/mcp`);
+    for (const item of [...manifest.endpoints, ...manifest.additional]) console.log(`  ${prepared.before.appUrl}/metamcp/${item.name}/mcp`);
+    console.log('Existing groups retain all of their members. These renamed endpoints expose MORE THAN ONE server:');
+    for (const item of manifest.namespaces.filter((entry) => entry.member_names.length > 1)) {
+      console.log(`  ${item.name}: ${item.member_names.join(', ')}`);
+    }
     const message = `Rename and make the registered ${profile} records shared in ${meta.project}?\n` +
-      `Registration: ${selected.journal.prefix}; ${manifest.servers.length} servers, ${manifest.namespaces.length} namespaces, ${manifest.endpoints.length} endpoints.\n` +
+      `Registration: ${selected.id}; ${manifest.servers.length} existing servers, ${manifest.namespaces.length} existing groups, ${manifest.additional.length} additional single-server endpoints.\n` +
       'All MetaMCP users can use the shared servers, including configured credentials and stored data.\n' +
+      'Server connection settings may have been edited; they are not compared with the journal hash and will be shared as they are. Review them first.\n' +
       (profile === 'LOCAL' ? 'WARNING: LOCAL tools can expose files, terminal, databases and desktop control.\n' : '') +
-      'Existing endpoint authentication is preserved. Any valid MetaMCP API key can use a shared API-key endpoint.\n' +
+      'Existing group memberships and endpoint authentication remain unchanged; additional endpoints copy their source group settings. Any valid MetaMCP API key can use a shared API-key endpoint.\n' +
       'Old endpoint URLs and server-prefixed tool names will change; reconnect clients. Avoid concurrent edits during this operation.\n' +
-      'A private dump of the selected MetaMCP database will be saved first. Names and ownership of journaled records are changed in one transaction; no records are deleted.';
+      'A private database dump and migration plan will be saved first. The database changes run in one transaction; no existing records are deleted.';
     if (!(await confirm(message, `SHARE ${profile}`))) { console.log('Cancelled; no database records were changed.'); process.exitCode = 1; return; }
     unchanged();
     const backup = backupMetaForSharing(ctx, meta, prepared.before.postgresId);
+    const plan = `${backup}.plan.json`;
+    privateWrite(plan, `${JSON.stringify({ version: 1, registration: selected.id, manifest }, null, 2)}\n`);
     unchanged();
     try { shareSql(ctx, prepared.before.postgresId, manifest, true); }
-    catch (error) { console.error(`Database backup saved at ${backup}. Inspect the result before retrying.`); throw error; }
-    console.log(`${profile} registration ${selected.journal.prefix} is now shared with the displayed names. UUIDs, endpoint authentication, settings, and mappings were preserved.`);
-    console.log('Refresh MetaMCP and reconnect clients using the new URLs; the old URLs and server-based tool names have changed.');
+    catch (error) { console.error(`Database backup: ${backup}; migration plan: ${plan}. Inspect the result before retrying.`); throw error; }
+    console.log(`${profile} registration ${selected.id} is shared. Existing UUIDs, endpoint authentication, settings, and mappings were preserved; additional endpoints were created.`);
+    console.log(`Private migration plan: ${plan}`);
+    console.log('Refresh MetaMCP and reconnect clients using the new URLs. Direct SQL does not invalidate existing MetaMCP pool sessions; active/idle sessions may temporarily retain old server names.');
     console.log('Only trusted users/clients should receive access; shared services can use configured credentials.');
   } finally {
     fs.closeSync(lock);
     fs.unlinkSync(lockFile);
   }
 }
-async function shareGlobalRegistration(ctx, globalState, metaDir, registration) {
+async function shareGlobalRegistration(ctx, globalState, savedGlobal, metaDir, registration) {
   if (process.platform !== 'linux' || globalState.type !== 'global' || !metaDir) {
     fail('GLOBAL sharing requires a local Linux GLOBAL directory and independent MetaMCP directory.');
   }
@@ -1103,28 +1228,36 @@ async function shareGlobalRegistration(ctx, globalState, metaDir, registration) 
   const priv = path.join(globalState.base, '.mcpkit');
   requirePrivateDirectory(priv);
   const files = snapshotFiles([path.join(priv, 'state.json'), path.join(priv, '.env')]);
-  if (JSON.stringify(JSON.parse(files[0].bytes)) !== JSON.stringify(globalState)) fail('The GLOBAL state changed; no database records were changed.');
+  if (JSON.stringify(JSON.parse(files[0].bytes)) !== JSON.stringify(savedGlobal)) fail('The GLOBAL state changed; no database records were changed.');
   const env = readEnv(globalState.base, 'global');
   checkResources(ctx, globalState);
-  const meta = originState(path.resolve(metaDir));
-  const prepared = prepareSharingMeta(ctx, meta);
+  // If the directory moved, do not trust a copied state/journal alone: also
+  // match its original credentials and data volume to the owned gateway.
+  const gatewayIds = savedGlobal.base === globalState.base ? null : relocationContainerIds(ctx, globalState, env);
+  const metaBase = path.resolve(metaDir);
+  const savedMeta = originState(metaBase, { allowRelocated: true });
+  const meta = sharingState(savedMeta, metaBase);
+  const prepared = prepareSharingMeta(ctx, meta, savedMeta);
   const selected = registeredGlobalJournal(globalState, prepared.before, env.MCPKIT_GATEWAY_KEY, registration);
   await shareSelectedRegistration(ctx, meta, prepared, selected, () => {
     requirePrivateDirectory(priv);
     assertFilesUnchanged(files);
     checkResources(ctx, globalState);
+    if (gatewayIds && JSON.stringify(relocationContainerIds(ctx, globalState, env)) !== JSON.stringify(gatewayIds)) {
+      fail('The GLOBAL gateway changed during inspection; no sharing update was attempted.');
+    }
   });
 }
-async function shareRegistrationFile(ctx, meta, registrationFile) {
+async function shareRegistrationFile(ctx, meta, savedMeta, registrationFile) {
   if (!registrationFile) fail('Pass the completed registration journal file.');
-  const prepared = prepareSharingMeta(ctx, meta);
+  const prepared = prepareSharingMeta(ctx, meta, savedMeta);
   const file = path.resolve(registrationFile);
   requirePrivateDirectory(path.dirname(file));
   const bytes = privateRegularFile(file);
   if (!bytes) fail('Registration journal not found; no database records were changed.');
   let journal;
   try { journal = JSON.parse(bytes.toString('utf8')); } catch { fail('Invalid registration journal; no database records were changed.'); }
-  if (!journal || journal.version !== 1 || !['global', 'local'].includes(journal.profile) ||
+  if (!journal || ![1, 2].includes(journal.version) || !['global', 'local'].includes(journal.profile) ||
       journal.origin !== prepared.before.appUrl || typeof journal.owner !== 'string' || !journal.owner ||
       typeof journal.gateway !== 'string' || !journal.gateway || /[\r\n\0]/.test(journal.owner + journal.gateway) ||
       !/^[a-f0-9]{64}$/.test(journal.keyHash || '') ||
@@ -1139,7 +1272,7 @@ async function shareRegistrationFile(ctx, meta, registrationFile) {
 
 try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'check-env', 'recover-env', 'share-global', 'share-registration'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|check-env|recover-env|share-global|share-registration} --dir DIR [--port PORT] [--app-url URL] [--delete-volumes] [--meta-dir DIR] [--server ID] [--registration ID] [--registration-file FILE]');
+  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|check-env|recover-env|share-global|share-registration|relocate} --dir DIR [--port PORT] [--app-url URL] [--delete-volumes] [--meta-dir DIR] [--server ID] [--registration ID] [--registration-file FILE]');
   const opts = parseArgs(argv);
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
   if (opts.metaDir && !['link', 'unlink', 'share-global'].includes(action)) fail('--meta-dir is only valid for link/unlink/share-global.');
@@ -1151,22 +1284,26 @@ try {
   if (!isInit && (opts.port || opts.appUrl)) fail('Ports and APP_URL are only accepted for new installations.');
   if (action === 'init-global' && opts.appUrl) fail('--app-url is only for MetaMCP.');
   const base = path.resolve(opts.dir);
-  const state = isInit ? initialize(action === 'init-meta' ? 'meta' : 'global', opts) : originState(base);
+  const isSharing = action === 'share-global' || action === 'share-registration';
+  const saved = isInit ? initialize(action === 'init-meta' ? 'meta' : 'global', opts) :
+    originState(base, { allowRelocated: isSharing || action === 'relocate' });
+  const state = isSharing ? sharingState(saved, base) : saved;
   if (opts.server && state.type !== 'global') fail('--server is only available for GLOBAL logs.');
   // Stopping, basic status and the explicit recovery path can operate without
   // credentials; creation, start, apply and removal still validate them.
   let envError = null;
   if (action === 'status') {
     try { readEnv(state.base, state.type); } catch (error) { envError = error; }
-  } else if (!['stop', 'check-env', 'recover-env'].includes(action)) readEnv(state.base, state.type);
+  } else if (!['stop', 'check-env', 'recover-env', 'relocate'].includes(action)) readEnv(state.base, state.type);
   const ctx = dockerContext();
   if (isInit || action === 'start') await start(ctx, state);
   else if (action === 'stop') stopOwnedContainers(ctx, state);
   else if (action === 'check-env') checkMetaEnv(ctx, state);
   else if (action === 'recover-env') await recoverMetaEnv(ctx, state);
+  else if (action === 'relocate') await relocateKit(ctx, saved, base);
   else if (action === 'link' || action === 'unlink') connectLocalProjects(ctx, state, opts.metaDir, action === 'unlink');
-  else if (action === 'share-global') await shareGlobalRegistration(ctx, state, opts.metaDir, opts.registration);
-  else if (action === 'share-registration') await shareRegistrationFile(ctx, state, opts.registrationFile);
+  else if (action === 'share-global') await shareGlobalRegistration(ctx, state, saved, opts.metaDir, opts.registration);
+  else if (action === 'share-registration') await shareRegistrationFile(ctx, state, saved, opts.registrationFile);
   else if (action === 'apply') {
     if (state.type === 'meta') await applyMetaConfig(ctx, state);
     else {
