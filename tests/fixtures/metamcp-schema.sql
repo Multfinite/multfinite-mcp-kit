@@ -5,6 +5,14 @@ CREATE TYPE mcp_server_status AS ENUM ('ACTIVE', 'INACTIVE');
 CREATE TYPE mcp_server_error_status AS ENUM ('NONE', 'ERROR');
 
 CREATE TABLE users (id text PRIMARY KEY, email text UNIQUE);
+CREATE TABLE api_keys (
+    uuid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    name text NOT NULL,
+    key text NOT NULL UNIQUE,
+    user_id text REFERENCES users(id) ON DELETE CASCADE,
+    is_active boolean NOT NULL DEFAULT true,
+    CONSTRAINT api_keys_name_per_user_idx UNIQUE (user_id, name)
+);
 CREATE TABLE config (
     id text PRIMARY KEY,
     value text NOT NULL,
@@ -89,6 +97,8 @@ CREATE TABLE oauth_sessions (
 );
 CREATE TABLE mcp_request_audit_logs (
     uuid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    namespace_uuid uuid REFERENCES namespaces(uuid) ON DELETE SET NULL,
+    api_key_uuid uuid REFERENCES api_keys(uuid) ON DELETE SET NULL,
     mcp_server_uuid uuid REFERENCES mcp_servers(uuid) ON DELETE SET NULL,
     mcp_server_name text,
     tool_name text NOT NULL DEFAULT 'example-tool'

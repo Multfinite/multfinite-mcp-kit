@@ -17,7 +17,9 @@ DECLARE
     owner_matches integer;
     port_text text := bundle->>'port';
     gateway_key text := bundle->>'gatewayKey';
-    forced boolean := current_setting('mcpkit.local_force') = 'true';
+    seed_mode text := current_setting('mcpkit.local_force');
+    reset_all boolean := seed_mode = 'reset-all';
+    forced boolean := seed_mode IN ('true', 'reset-all');
     base_name text;
     base_url text;
     marker text;
@@ -76,6 +78,9 @@ BEGIN
     END IF;
     IF port_text::integer NOT BETWEEN 1 AND 65535 THEN
         RAISE EXCEPTION 'Invalid local gateway port';
+    END IF;
+    IF seed_mode NOT IN ('false', 'true', 'skip-only', 'reset-all') OR (reset_all AND requested_email <> '') THEN
+        RAISE EXCEPTION 'Invalid local registration mode';
     END IF;
     PERFORM set_config('mcpkit.local_result', '', false);
     PERFORM set_config('mcpkit.local_owner', '', false);
@@ -148,6 +153,63 @@ BEGIN
         LOCK TABLE namespaces, mcp_servers, namespace_server_mappings, endpoints,
                    namespace_tool_mappings, tools, oauth_sessions, mcp_request_audit_logs
             IN SHARE ROW EXCLUSIVE MODE;
+        IF reset_all THEN
+            -- This mode is available only through the explicitly confirmed
+            -- Windows reset command. Everything below, including the fresh
+            -- seed, is one transaction; a failure rolls the deletion back.
+            LOCK TABLE config IN SHARE ROW EXCLUSIVE MODE;
+            -- Refuse unknown schema extensions: their cascades or triggers
+            -- could delete data outside the records the user agreed to reset.
+            IF EXISTS (
+                SELECT 1 FROM pg_constraint c
+                WHERE c.contype = 'f'
+                  AND c.confrelid IN ('config'::regclass, 'endpoints'::regclass,
+                      'namespaces'::regclass, 'mcp_servers'::regclass, 'tools'::regclass,
+                      'namespace_server_mappings'::regclass, 'namespace_tool_mappings'::regclass,
+                      'oauth_sessions'::regclass)
+                  AND NOT EXISTS (
+                      SELECT 1 FROM (VALUES
+                          ('endpoints'::regclass, 'namespace_uuid', 'namespaces'::regclass, 'c'),
+                          ('namespace_server_mappings'::regclass, 'namespace_uuid', 'namespaces'::regclass, 'c'),
+                          ('namespace_tool_mappings'::regclass, 'namespace_uuid', 'namespaces'::regclass, 'c'),
+                          ('mcp_request_audit_logs'::regclass, 'namespace_uuid', 'namespaces'::regclass, 'n'),
+                          ('tools'::regclass, 'mcp_server_uuid', 'mcp_servers'::regclass, 'c'),
+                          ('oauth_sessions'::regclass, 'mcp_server_uuid', 'mcp_servers'::regclass, 'c'),
+                          ('namespace_server_mappings'::regclass, 'mcp_server_uuid', 'mcp_servers'::regclass, 'c'),
+                          ('namespace_tool_mappings'::regclass, 'mcp_server_uuid', 'mcp_servers'::regclass, 'c'),
+                          ('mcp_request_audit_logs'::regclass, 'mcp_server_uuid', 'mcp_servers'::regclass, 'n'),
+                          ('namespace_tool_mappings'::regclass, 'tool_uuid', 'tools'::regclass, 'c')
+                      ) AS known(child_table, child_column, parent_table, delete_action)
+                      WHERE c.conrelid = known.child_table AND c.confrelid = known.parent_table
+                        AND c.confdeltype::text = known.delete_action
+                        AND cardinality(c.conkey) = 1 AND cardinality(c.confkey) = 1
+                        AND (SELECT a.attname FROM pg_attribute a WHERE a.attrelid = c.conrelid AND a.attnum = c.conkey[1]) = known.child_column
+                        AND (SELECT a.attname FROM pg_attribute a WHERE a.attrelid = c.confrelid AND a.attnum = c.confkey[1]) = 'uuid'
+                  )
+            ) OR EXISTS (
+                SELECT 1 FROM pg_trigger t WHERE NOT t.tgisinternal
+                  AND t.tgrelid IN ('config'::regclass, 'endpoints'::regclass,
+                      'namespaces'::regclass, 'mcp_servers'::regclass, 'tools'::regclass,
+                      'namespace_server_mappings'::regclass, 'namespace_tool_mappings'::regclass,
+                      'oauth_sessions'::regclass, 'mcp_request_audit_logs'::regclass)
+            ) THEN
+                RAISE EXCEPTION 'MCPKIT_RESET_UNSUPPORTED_SCHEMA';
+            END IF;
+            DELETE FROM endpoints;
+            DELETE FROM namespaces;
+            DELETE FROM mcp_servers;
+            -- These markers describe records just deleted, including any
+            -- other host IDs in this dedicated database. Other config stays.
+            DELETE FROM config WHERE starts_with(id, 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_V1:')
+                OR starts_with(id, 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V2:')
+                OR starts_with(id, 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V3:');
+            v2_exists := false;
+            v3_exists := false;
+            known_namespaces := '{}'::jsonb;
+            known_servers := '{}'::jsonb;
+            known_legacy := '{}'::jsonb;
+            diagnostics := NULL;
+        END IF;
         CREATE TEMP TABLE mcpkit_legacy_owners (
             owner_id text PRIMARY KEY, namespace_id uuid, namespace_name text, issue text NOT NULL
         ) ON COMMIT DROP;
@@ -552,6 +614,21 @@ BEGIN
         SELECT COALESCE(array_agg(DISTINCT x ORDER BY x), ARRAY[]::text[]) INTO blocked FROM unnest(blocked) x WHERE x IS NOT NULL;
         SELECT COALESCE(array_agg(DISTINCT x ORDER BY x), ARRAY[]::text[]) INTO conflicts FROM unnest(conflicts) x WHERE x IS NOT NULL;
         SELECT COALESCE(array_agg(DISTINCT x ORDER BY x), ARRAY[]::text[]) INTO deferred FROM unnest(deferred) x WHERE x IS NOT NULL;
+        IF reset_all AND (cardinality(blocked) <> 0 OR cardinality(conflicts) <> 0 OR cardinality(deferred) <> 0
+            OR (SELECT count(*) FROM mcp_servers) <> 13
+            OR (SELECT count(*) FROM mcpkit_chosen) <> 13
+            OR EXISTS (SELECT 1 FROM mcpkit_chosen c JOIN mcp_servers s ON s.uuid = c.server_uuid
+                       WHERE s.name <> c.id OR s.user_id IS NOT NULL OR NOT c.default_connection)
+            OR (SELECT count(*) FROM namespaces) <> 6
+            OR (SELECT count(*) FROM endpoints) <> 6
+            OR (SELECT count(*) FROM endpoints e WHERE e.user_id IS NULL AND e.enable_api_key_auth AND NOT e.enable_oauth) <> 6
+            OR (SELECT count(*) FROM namespace_server_mappings WHERE status = 'ACTIVE') <> 13
+            OR (SELECT count(*) FROM namespace_server_mappings) <> 13
+            OR EXISTS (SELECT 1 FROM tools)
+            OR EXISTS (SELECT 1 FROM namespace_tool_mappings)
+            OR EXISTS (SELECT 1 FROM oauth_sessions)) THEN
+            RAISE EXCEPTION 'MCPKIT_RESET_INCOMPLETE';
+        END IF;
         INSERT INTO config (id, value, description)
         VALUES (marker, jsonb_build_object('blocked', array_to_string(blocked, ','),
                                           'conflicts', array_to_string(conflicts, ','),

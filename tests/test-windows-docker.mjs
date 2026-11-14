@@ -28,6 +28,11 @@ function invoke(env, runner, ...args) {
   if (result.error) throw result.error;
   return result;
 }
+function invokeInteractive(env, runner, response, ...args) {
+  const result = spawnSync(ps, ['-NoLogo', '-NoProfile', '-File', runner, ...args], { env, input: `${response}\n`, encoding: 'utf8', timeout: 90000 });
+  if (result.error) throw result.error;
+  return result;
+}
 function success(result) { assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`); }
 function installFakes(base) {
   const r = path.join(base, 'runtime');
@@ -134,6 +139,39 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     assert.equal(fs.readFileSync(legacy, 'utf8'), 'OTHER=keep\n');
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls, 3);
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).databaseBackups.length, 2, 'ordinary starts do not back up or restart an initialized app');
+
+    // Reset is explicit, targets all records in this project, and never runs
+    // automatically. Accounts and API keys survive; every attempt backs up.
+    const manual = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    manual.manualRecords = ['manual-server', 'manual-namespace', 'manual-endpoint'];
+    manual.apiKeys = [{ name: 'personal', key: 'test-api-key' }];
+    writeJson(setup.env.MCP_TEST_DOCKER_STATE, manual);
+    const cancelled = invokeInteractive(env, setup.runner, 'NO', 'reset-metamcp-records'); success(cancelled);
+    assert.match(cancelled.stdout, /reset cancelled/i);
+    assert.deepEqual(readJson(setup.env.MCP_TEST_DOCKER_STATE), manual, 'declining confirmation does not touch Docker or the database');
+    const resetBackupFailure = invokeInteractive({ ...env, MCP_TEST_BACKUP_FAIL: '1' }, setup.runner, 'DELETE ALL LOCAL RECORDS', 'reset-metamcp-records');
+    assert.notEqual(resetBackupFailure.status, 0); assert.match(resetBackupFailure.stdout, /no reset was attempted/i);
+    const afterResetBackupFailure = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.deepEqual(afterResetBackupFailure.manualRecords, manual.manualRecords);
+    assert.equal(afterResetBackupFailure.resetCalls || 0, 0); assert.equal(afterResetBackupFailure.running, true);
+    const resetSqlFailure = invokeInteractive({ ...env, MCP_TEST_RESET_FAIL: '1' }, setup.runner, 'DELETE ALL LOCAL RECORDS', 'reset-metamcp-records');
+    assert.notEqual(resetSqlFailure.status, 0); assert.match(resetSqlFailure.stdout, /result is uncertain/i);
+    const afterResetSqlFailure = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.deepEqual(afterResetSqlFailure.manualRecords, manual.manualRecords);
+    assert.equal(afterResetSqlFailure.resetCalls || 0, 0); assert.equal(afterResetSqlFailure.running, true);
+    const reset = invokeInteractive(env, setup.runner, 'DELETE ALL LOCAL RECORDS', 'reset-metamcp-records'); success(reset);
+    assert.match(reset.stdout, /records were reset once/i);
+    const afterReset = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.equal(afterReset.resetCalls, 1); assert.deepEqual(afterReset.manualRecords, []);
+    assert.deepEqual(afterReset.users, manual.users); assert.deepEqual(afterReset.apiKeys, manual.apiKeys);
+    assert.equal(afterReset.signupDisabled, true); assert.equal(afterReset.sharedSeed.serverCount, 13);
+    assert.match(afterReset.databaseBackups.at(-1), /^mcpkit-pre-reset-v3-/);
+    afterReset.manualRecords = ['manual-after-reset']; writeJson(setup.env.MCP_TEST_DOCKER_STATE, afterReset);
+    const afterResetStart = invoke(env, setup.runner, 'start'); success(afterResetStart);
+    const afterNormalStart = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.equal(afterNormalStart.resetCalls, 1); assert.deepEqual(afterNormalStart.manualRecords, ['manual-after-reset']);
+    assert.equal(afterNormalStart.databaseBackups.length, afterReset.databaseBackups.length);
+
     // A failed backup must not apply the seed and must restart the same app.
     const beforeBackupFailure = readJson(setup.env.MCP_TEST_DOCKER_STATE);
     const backupFailure = invoke({ ...env, MCP_TEST_BACKUP_FAIL: '1' }, setup.runner, 'seed');

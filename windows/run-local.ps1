@@ -8,6 +8,7 @@
     .\windows\run-local.ps1 logs obsidian
     .\windows\run-local.ps1 seed
     .\windows\run-local.ps1 seed -OwnerEmail 'you@example.com'
+    .\windows\run-local.ps1 reset-metamcp-records
     .\windows\run-local.ps1 enable-signup
     .\windows\run-local.ps1 logs metamcp
     .\windows\run-local.ps1 ports
@@ -16,7 +17,7 @@
 [CmdletBinding()]
 param(
     # init is used by the installer; it never replaces existing settings.
-    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
+    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'reset-metamcp-records', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
     [string]$Command = 'start',
     [string]$Server = '',
     [string]$OwnerEmail = '',
@@ -413,6 +414,7 @@ try {
         'logs'         { if ($Server -eq 'metamcp') { Show-MetaLogs } else { Show-Logs $Server } }
         'credentials'  { Show-MetaCredentials }
         'seed'            { Repair-MetaSeed $OwnerEmail }
+        'reset-metamcp-records' { Reset-MetaRecords }
         'enable-signup'   { Enable-MetaSignup }
         'ports'           { Show-MetaPorts }
         'set-ports'       {

@@ -454,15 +454,24 @@ function Invoke-MetaSeedQuery($State, [string]$Sql, [string]$Encoded, [string]$M
     # has psql and its own database credentials. Neither appears in argv.
     $script = 'PGPASSWORD="$POSTGRES_PASSWORD"; export PGPASSWORD; exec psql -h 127.0.0.1 -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -qAt'
     $result = Invoke-Docker @('--context', 'desktop-linux', 'exec', '-i', ($State.project + '-postgres'), 'sh', '-c', $script) $inputText 120
-    # SQL input includes the gateway key. Do not echo SQL/stdout/stderr on error.
+    # SQL input includes the gateway key. Never echo SQL/stdout/stderr on error.
+    if ($Mode -ceq 'reset-all' -and $result.code -ne 0) {
+        if ($result.stderr -match 'MCPKIT_RESET_UNSUPPORTED_SCHEMA') {
+            throw 'Reset was blocked by custom database foreign keys or triggers; no records were deleted.'
+        }
+        if ($result.stderr -match 'MCPKIT_RESET_INCOMPLETE') {
+            throw 'Reset was rolled back because the new default records could not be confirmed.'
+        }
+        Assert-DockerResult $result 'reset; outcome may be unknown, inspect MetaMCP before retrying' $false
+    }
     Assert-DockerResult $result 'local server registration; check MetaMCP logs and retry' $false
     return $result.stdout.Trim()
 }
-function Backup-MetaDatabase($State) {
-    # A transaction protects against partial writes, but consolidation also
-    # removes equivalent duplicate UUIDs. Keep a private pre-change dump in
-    # the existing PostgreSQL volume; it is never copied into the repository.
-    $name = 'mcpkit-pre-seed-v3-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') + '-' + (New-RandomHex 4) + '.dump'
+function Backup-MetaDatabase($State, [bool]$ForReset = $false) {
+    # Keep a private pre-change dump in the existing PostgreSQL volume; it is
+    # never copied into the repository and is not an independent volume backup.
+    $purpose = if ($ForReset) { 'reset' } else { 'seed' }
+    $name = 'mcpkit-pre-' + $purpose + '-v3-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') + '-' + (New-RandomHex 4) + '.dump'
     $script = @'
 set -eu
 umask 077
@@ -477,11 +486,16 @@ printf 'backup-ok\n'
 '@
     $script = $script.Replace('__BACKUP_NAME__', $name)
     $result = Invoke-Docker @('--context', 'desktop-linux', 'exec', '--user', 'postgres', ($State.project + '-postgres'), 'sh', '-c', $script) '' 600
-    Assert-DockerResult $result 'pre-migration PostgreSQL backup; no migration was attempted' $false
-    if ($result.stdout.Trim() -cne 'backup-ok') { throw 'Could not confirm the PostgreSQL backup; no migration was attempted.' }
+    $action = if ($ForReset) { 'pre-reset PostgreSQL backup; no reset was attempted' } else { 'pre-migration PostgreSQL backup; no migration was attempted' }
+    Assert-DockerResult $result $action $false
+    if ($result.stdout.Trim() -cne 'backup-ok') {
+        if ($ForReset) { throw 'Could not confirm the PostgreSQL backup; no reset was attempted.' }
+        throw 'Could not confirm the PostgreSQL backup; no migration was attempted.'
+    }
     Write-Host "Database backup: PostgreSQL volume /mcpkit-backups/$name (contains secrets; keep private)."
 }
-function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
+function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '', [bool]$ResetAll = $false) {
+    if ($ResetAll -and (-not $Force -or $RequestedOwner)) { throw 'Invalid reset request; no records were changed.' }
     $config = Get-Configuration
     $settings = $config.settings
     if ($settings.listenHost.ToLowerInvariant() -notin @('127.0.0.1', 'localhost') -or $settings.tlsCertFile -or $settings.tlsKeyFile) {
@@ -505,28 +519,57 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
     if ($needsApply) {
         if (-not (Test-OwnedDockerObject 'container' ($State.project + '-app') $State) -or
             -not (Test-OwnedDockerObject 'container' ($State.project + '-postgres') $State)) {
-            throw 'The kit MetaMCP containers could not be verified; no migration was attempted.'
+            throw 'The kit MetaMCP containers could not be verified; no database changes were attempted.'
         }
         # Stopping (not recreating) clears both active sessions and prewarmed
-        # idle servers, and prevents stale tool names during the DB migration.
-        Write-Host 'Temporarily stopping the kit MetaMCP app for a database backup and server-name migration; clients will need to reconnect.'
+        # idle servers, and prevents stale tool names during the DB change.
+        if ($ResetAll) { Write-Host 'Stopping the kit MetaMCP app for a database backup and explicit reset; clients will need to reconnect.' }
+        else { Write-Host 'Temporarily stopping the kit MetaMCP app for a database backup and server-name migration; clients will need to reconnect.' }
         $stop = Invoke-Docker @('--context', 'desktop-linux', 'stop', '--time', '20', ($State.project + '-app')) '' 180
         Assert-DockerResult $stop 'MetaMCP app stop before local seed'
+        $resetAttempted = $false
+        $resetCommitted = $false
         try {
-            Backup-MetaDatabase $State
-            $forceValue = if ($Force) { 'true' } else { 'false' }
-            $rawResult = Invoke-MetaSeedQuery $State $sql $encoded $forceValue
+            Backup-MetaDatabase $State $ResetAll
+            $forceValue = if ($ResetAll) { 'reset-all' } elseif ($Force) { 'true' } else { 'false' }
+            if ($ResetAll) { $resetAttempted = $true }
+            try { $rawResult = Invoke-MetaSeedQuery $State $sql $encoded $forceValue }
+            catch {
+                if ($ResetAll -and $_.Exception.Message -notmatch '^Reset was (blocked|rolled back)') {
+                    Write-Host '[WARN] The reset result is uncertain. Inspect MetaMCP and the backup before running reset again.' -ForegroundColor Yellow
+                }
+                throw
+            }
+            if ($ResetAll -and $rawResult.StartsWith('seeded|')) {
+                $resetCommitted = $true
+                Write-Host 'The reset transaction committed; do not run reset again if the app restart fails.'
+            }
         } finally {
             # The same container and writable layer are reused, even if the
-            # backup or transaction failed. A later start can retry safely.
-            $restart = Invoke-Docker @('--context', 'desktop-linux', 'start', ($State.project + '-app')) '' 180
-            Assert-DockerResult $restart 'MetaMCP app restart; run start to retry'
-            Wait-MetaMcp $State
+            # backup or transaction failed. A later start can restore the app.
+            try {
+                $restart = Invoke-Docker @('--context', 'desktop-linux', 'start', ($State.project + '-app')) '' 180
+                Assert-DockerResult $restart 'MetaMCP app restart; run start to retry'
+                Wait-MetaMcp $State
+            } catch {
+                if ($resetAttempted) {
+                    $status = if ($resetCommitted) { 'committed' } else { 'may have committed' }
+                    Write-Host "[WARN] The reset $status. Do not repeat it; run start and inspect MetaMCP first." -ForegroundColor Yellow
+                }
+                throw
+            }
         }
         Write-Host 'MetaMCP app restarted without recreating its container. Reconnect MCP clients to refresh server and tool names.'
     }
     $parts = $rawResult -split '\|', 6
-    if ($parts.Count -ne 6) { throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.' }
+    if ($parts.Count -ne 6) {
+        if ($ResetAll) { throw 'The reset may have committed, but its result could not be confirmed. Inspect MetaMCP before retrying.' }
+        throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.'
+    }
+    if ($ResetAll -and ($parts[0] -cne 'seeded' -or $parts[1] -or $parts[3] -or $parts[4] -or $parts[5] -or
+            @($parts[2] -split ',' | Where-Object { $_ }).Count -ne 6)) {
+        throw 'The reset may have committed, but its result could not be confirmed. Inspect MetaMCP before retrying.'
+    }
     switch ($parts[0]) {
         'missing'   { throw 'The selected MetaMCP account was not found. Register first, then run seed -OwnerEmail <your-email>.' }
         'ambiguous' { throw 'The selected MetaMCP email is ambiguous. Choose a unique existing account with seed -OwnerEmail <your-email>.' }
@@ -538,7 +581,10 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
     $allowedGroups = foreach ($suffix in @('system', 'files', 'code', 'web', 'data', 'memory')) { $baseGroup + '-' + $suffix }
     if ($parts[2]) {
         foreach ($group in @($parts[2] -split ',')) {
-            if ($allowedGroups -cnotcontains $group) { throw 'Unexpected local MetaMCP endpoint name; existing state was not changed.' }
+            if ($allowedGroups -cnotcontains $group) {
+                if ($ResetAll) { throw 'The reset may have committed, but its endpoint names are unexpected. Inspect MetaMCP before retrying.' }
+                throw 'Unexpected local MetaMCP endpoint name; existing state was not changed.'
+            }
         }
     }
     # Explicit selection remains backward-compatible for legacy installations
@@ -646,6 +692,32 @@ function Save-MetaAppImage($State) {
     Write-Host "Preserved app image: $image (local only; it may contain secrets)."
     return $image
 }
+function Start-MetaApp($State) {
+    if ($State.portsPending -or -not $State.manualAuthApplied -or $State.authPending) {
+        # A port change, old bootstrap environment, or an explicitly added
+        # administrator requires replacing only the app. Keep retry state
+        # until Compose succeeds; never recreate the DB or remove volumes.
+        $database = Invoke-Compose $State @('up', '-d', '--no-recreate', '--no-build', 'postgres') 600
+        Assert-DockerResult $database 'MetaMCP database start'
+        $snapshot = Save-MetaAppImage $State
+        if ($snapshot) {
+            $State.appImage = $snapshot
+            $null = Save-Json $MetaStateFile $State
+            Test-MetaCompose $State
+            Test-MetaResources $State
+        }
+        $start = Invoke-Compose $State @('up', '-d', '--no-deps', '--force-recreate', '--no-build', 'app') 600
+        Assert-DockerResult $start 'MetaMCP start with updated configuration'
+        $State.portsPending = $false
+        $State.manualAuthApplied = $true
+        $State.authPending = $false
+        $null = Save-Json $MetaStateFile $State
+    } else {
+        $start = Invoke-Compose $State @('up', '-d', '--no-recreate', '--no-build') 600
+        Assert-DockerResult $start 'MetaMCP start'
+    }
+    Wait-MetaMcp $State
+}
 function Start-MetaMcp {
     $lock = Enter-MetaLock
     try {
@@ -656,30 +728,7 @@ function Start-MetaMcp {
         Test-MetaResources $state
         Ensure-MetaImage $state
         Test-MetaResources $state
-        if ($state.portsPending -or -not $state.manualAuthApplied -or $state.authPending) {
-            # A port change, old bootstrap environment, or an explicitly added
-            # administrator requires replacing only the app. Keep retry state
-            # until Compose succeeds; never recreate the DB or remove volumes.
-            $database = Invoke-Compose $state @('up', '-d', '--no-recreate', '--no-build', 'postgres') 600
-            Assert-DockerResult $database 'MetaMCP database start'
-            $snapshot = Save-MetaAppImage $state
-            if ($snapshot) {
-                $state.appImage = $snapshot
-                $null = Save-Json $MetaStateFile $state
-                Test-MetaCompose $state
-                Test-MetaResources $state
-            }
-            $start = Invoke-Compose $state @('up', '-d', '--no-deps', '--force-recreate', '--no-build', 'app') 600
-            Assert-DockerResult $start 'MetaMCP start with updated configuration'
-            $state.portsPending = $false
-            $state.manualAuthApplied = $true
-            $state.authPending = $false
-            $null = Save-Json $MetaStateFile $state
-        } else {
-            $start = Invoke-Compose $state @('up', '-d', '--no-recreate', '--no-build') 600
-            Assert-DockerResult $start 'MetaMCP start'
-        }
-        Wait-MetaMcp $state
+        Start-MetaApp $state
         $endpointGroups = Invoke-MetaSeed $state $false
         Test-MetaBridge $state
         Write-Host "MetaMCP: http://localhost:$($state.port)"
@@ -847,4 +896,42 @@ function Repair-MetaSeed([string]$RequestedOwner = '') {
     # administrator without removing the old allowlist. Recreate only the app,
     # after releasing the lock; a failed application remains retryable.
     if ($needsApply) { Start-MetaMcp }
+}
+function Reset-MetaRecords {
+    # This command is intentionally separate from start/seed. It applies to
+    # the dedicated Windows MetaMCP database, including manually added rows.
+    $initialState = Get-MetaState
+    if (-not $initialState) { throw 'Local MetaMCP has not been created. No reset was attempted.' }
+    Write-Host "WARNING: reset ALL servers, namespaces and endpoints in Windows MetaMCP project $($initialState.project), including manually created records." -ForegroundColor Yellow
+    Write-Host 'Their tool settings, mappings and server OAuth sessions will be deleted; historical audit links to those records will be cleared.' -ForegroundColor Yellow
+    Write-Host 'User accounts, MetaMCP API keys, native server files, other databases and Docker volumes are not deleted.'
+    Write-Host 'A secret-bearing PostgreSQL dump will be made inside the same database volume; make a separate secure backup first.'
+    $confirmation = Read-Host 'Type DELETE ALL LOCAL RECORDS to continue'
+    if ($confirmation -cne 'DELETE ALL LOCAL RECORDS') {
+        Write-Host 'Reset cancelled; no records were changed.'
+        return
+    }
+    $lock = Enter-MetaLock
+    try {
+        $state = Get-MetaState
+        if (-not $state -or $state.instanceId -cne $initialState.instanceId -or $state.project -cne $initialState.project -or
+            $state.cloneDir -cne $initialState.cloneDir) {
+            throw 'The target MetaMCP project changed after confirmation; no reset was attempted.'
+        }
+        Ensure-DesktopDocker
+        Assert-MetaClone $state
+        Test-MetaCompose $state
+        Test-MetaResources $state
+        Ensure-MetaImage $state
+        Test-MetaResources $state
+        # Apply pending app/bootstrap settings without invoking the normal V3
+        # migration first. Otherwise an old bootstrap could recreate old rows
+        # when the stopped app is restarted after the reset.
+        Start-MetaApp $state
+        $endpointGroups = Invoke-MetaSeed $state $true '' $true
+        Write-Host 'Windows MetaMCP records were reset once and the 13 default short-name servers and six protected groups were created.'
+        Show-MetaEndpoints $state $endpointGroups
+        try { Test-MetaBridge $state }
+        catch { Write-Host "[WARN] Reset already completed, but gateway connectivity could not be verified: $($_.Exception.Message)" -ForegroundColor Yellow }
+    } finally { Exit-MetaLock $lock }
 }
