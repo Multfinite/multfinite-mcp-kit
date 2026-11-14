@@ -96,7 +96,11 @@ function readEnv(base, type) {
     }
   }
   const required = type === 'meta' ? ['POSTGRES_PASSWORD', 'BETTER_AUTH_SECRET'] : ['MCPKIT_GATEWAY_KEY', 'MCPKIT_CONTROL_KEY', 'NEO4J_PASSWORD'];
-  for (const key of required) if (!/^[a-f0-9]{64}$/.test(values[key] || '')) fail(`Invalid ${key}; existing credentials were not changed.`);
+  for (const key of required) {
+    if (!/^[a-f0-9]{64}$/.test(values[key] || '')) {
+      fail(`Invalid or missing ${key} in the private .env: expected the original 64 lowercase hexadecimal characters without quotes or spaces. Restore the exact original value from a private backup; existing credentials were not changed.`);
+    }
+  }
   if (type === 'global' && values.MCPKIT_GATEWAY_KEY === values.MCPKIT_CONTROL_KEY) fail('Gateway and control credentials must differ.');
   return values;
 }
@@ -197,6 +201,41 @@ function checkResources(ctx, state) {
     const name = `${state.project}_${suffix}`;
     checkLabel(inspect(ctx, 'volume', name), state, 'volume', name);
   }
+}
+function stopOwnedContainers(ctx, state) {
+  // Stopping running containers must work even when the private .env is
+  // missing or invalid. Select only this instance's Compose services, verify
+  // ownership of every candidate before stopping anything, and leave one-off
+  // containers alone. No credentials, networks or volumes are changed.
+  const order = state.type === 'meta'
+    ? ['app', 'postgres']
+    : ['gateway', 'graphiti', 'cognee', 'gdrive', 'memory', 'neo4j', 'qdrant'];
+  const result = run('docker', ['--context', ctx, 'container', 'ls', '-q', '--filter', `label=com.docker.compose.project=${state.project}`], { capture: true });
+  const ids = result.stdout.trim().split(/\s+/).filter(Boolean);
+  const groups = new Map(order.map((service) => [service, []]));
+  let oneOffs = 0;
+  for (const id of ids) {
+    if (!/^[a-f0-9]{12,64}$/.test(id)) fail('Unexpected Docker container ID; no containers were stopped.');
+    const labels = inspect(ctx, 'container', id);
+    if (!labels) fail(`Container ${id} disappeared during preflight; no containers were stopped. Retry after checking status.`);
+    checkLabel(labels, state, 'container', id);
+    if (String(labels['com.docker.compose.oneoff'] || '').toLowerCase() === 'true') { oneOffs++; continue; }
+    const service = labels['com.docker.compose.service'];
+    if (!groups.has(service)) fail(`Unexpected service for container ${id}; no containers were stopped.`);
+    groups.get(service).push(id);
+  }
+  if (oneOffs) console.log(`Leaving ${oneOffs} Compose one-off container(s) unchanged.`);
+  if (![...groups.values()].some((group) => group.length)) {
+    console.log(`No running kit service containers found for ${state.project}.`);
+    return;
+  }
+  // Stop clients first, then their dependencies, preserving Compose's usual
+  // dependency order. Already-stopped containers were not included above.
+  for (const service of order) {
+    const group = groups.get(service);
+    if (group.length) run('docker', ['--context', ctx, 'container', 'stop', ...group]);
+  }
+  console.log('Kit service containers stopped. Credentials, files and volumes were not changed.');
 }
 function networkMembers(ctx, name) {
   const result = run('docker', ['--context', ctx, 'network', 'inspect', '--format', '{{json .Containers}}', name], { capture: true });
@@ -389,9 +428,15 @@ try {
   const base = path.resolve(opts.dir);
   const state = isInit ? initialize(action === 'init-meta' ? 'meta' : 'global', opts) : originState(base);
   if (opts.server && state.type !== 'global') fail('--server is only available for GLOBAL logs.');
-  readEnv(state.base, state.type);
+  // Stopping and basic status do not need credentials. Keep strict validation
+  // for operations that create, start, reconfigure or delete project resources.
+  let envError = null;
+  if (action === 'status') {
+    try { readEnv(state.base, state.type); } catch (error) { envError = error; }
+  } else if (action !== 'stop') readEnv(state.base, state.type);
   const ctx = dockerContext();
   if (isInit || action === 'start') await start(ctx, state);
+  else if (action === 'stop') stopOwnedContainers(ctx, state);
   else if (action === 'link' || action === 'unlink') connectLocalProjects(ctx, state, opts.metaDir, action === 'unlink');
   else if (action === 'apply') {
     if (state.type !== 'global') fail('apply is only for GLOBAL services.');
@@ -411,11 +456,18 @@ try {
     console.log('Removal completed. No other projects or system packages were intentionally removed.');
   } else {
     checkResources(ctx, state);
-    if (action === 'stop') compose(ctx, state, ['stop']);
-    else if (action === 'status') {
-      compose(ctx, state, ['ps', '-a']);
+    if (action === 'status') {
+      if (envError) {
+        // Compose needs a parseable env file even for `ps`. Fall back to
+        // Docker's label-filtered container list without printing secrets.
+        run('docker', ['--context', ctx, 'container', 'ls', '-a',
+          '--filter', `label=com.docker.compose.project=${state.project}`,
+          '--filter', `label=com.multfinite.mcpkit.instance=${state.id}`,
+          '--format', 'table {{.Names}}\t{{.Status}}\t{{.Ports}}']);
+        console.warn(`Private configuration needs attention; showing only container status: ${envError.message}`);
+      } else compose(ctx, state, ['ps', '-a']);
       console.log(`Project: ${state.project}; port: ${state.port}; directory: ${state.base}`);
-      if (state.type === 'global') showGlobalStatus(ctx, state);
+      if (state.type === 'global' && !envError) showGlobalStatus(ctx, state);
     } else if (opts.server) showGlobalLog(ctx, state, opts.server);
     else {
       compose(ctx, state, ['logs', '--tail', '100']);
