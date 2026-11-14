@@ -77,6 +77,11 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     const secretsFile = path.join(base, 'config/private/secrets.json'); const secrets = readJson(secretsFile);
     installFakes(base);
     const first = invoke(env, setup.runner, 'start'); success(first);
+    // Console decoration is host output, not part of returned status/seed data.
+    const firstPlain = first.stdout.replace(/\x1b\[[0-9;]*m/g, '');
+    assert.match(firstPlain, /\u2550{3} Windows LOCAL MCP servers \u2550{3}/);
+    assert.match(firstPlain, /\[OK\] Gateway listening on/);
+    assert.match(firstPlain, /\[INFO\] MetaMCP: http:/);
     assert.match(first.stdout, /Registered the 13 Windows servers in shared/);
     assert.match(first.stdout, /database backup and server-name migration/i);
     assert.match(first.stdout, /Reconnect MCP clients/);
@@ -149,6 +154,21 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     const cancelled = invokeInteractive(env, setup.runner, 'NO', 'reset-metamcp-records'); success(cancelled);
     assert.match(cancelled.stdout, /reset cancelled/i);
     assert.deepEqual(readJson(setup.env.MCP_TEST_DOCKER_STATE), manual, 'declining confirmation does not touch Docker or the database');
+
+    // A newer runner with an older SQL file must refuse the reset before
+    // starting, stopping, backing up, or changing any Docker/database state.
+    const seedFile = path.join(setup.windowsDir, 'seed-local.sql');
+    const currentSeed = fs.readFileSync(seedFile, 'utf8');
+    const olderSeed = currentSeed.replace('-- MCPKIT_RESET_CONTRACT: short-names-v4', '-- older SQL without the reset contract');
+    assert.notEqual(olderSeed, currentSeed);
+    fs.writeFileSync(seedFile, olderSeed);
+    try {
+      const mixed = invokeInteractive(env, setup.runner, 'DELETE ALL LOCAL RECORDS', 'reset-metamcp-records');
+      assert.notEqual(mixed.status, 0);
+      assert.match(mixed.stdout, /Reset not attempted: seed-local\.sql is not the short-name reset version/i);
+      assert.deepEqual(readJson(setup.env.MCP_TEST_DOCKER_STATE), manual, 'mixed kit files do not touch Docker or the database');
+    } finally { fs.writeFileSync(seedFile, currentSeed); }
+
     const resetBackupFailure = invokeInteractive({ ...env, MCP_TEST_BACKUP_FAIL: '1' }, setup.runner, 'DELETE ALL LOCAL RECORDS', 'reset-metamcp-records');
     assert.notEqual(resetBackupFailure.status, 0); assert.match(resetBackupFailure.stdout, /no reset was attempted/i);
     const afterResetBackupFailure = readJson(setup.env.MCP_TEST_DOCKER_STATE);

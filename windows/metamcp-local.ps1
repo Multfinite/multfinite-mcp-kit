@@ -133,9 +133,9 @@ function Ensure-DesktopDocker([switch]$NoStart) {
         if (-not $startedDesktop) {
             $desktop = Find-Desktop
             if ($desktop -and -not (Get-Process -Name 'Docker Desktop' -ErrorAction SilentlyContinue)) {
-                Write-Host 'Starting Docker Desktop; complete its first-run/WSL setup if prompted.'
+                Write-KitInfo 'Starting Docker Desktop; complete its first-run/WSL setup if prompted.'
                 Start-Process -FilePath $desktop | Out-Null
-            } else { Write-Host 'Waiting for Docker Desktop and its local Linux engine...' }
+            } else { Write-KitInfo 'Waiting for Docker Desktop and its local Linux engine...' }
             $startedDesktop = $true
         }
         Start-Sleep -Seconds 2
@@ -221,7 +221,7 @@ function Initialize-MetaState {
         if (Test-Path -LiteralPath $clone) {
             $clone = Join-Path $BaseDir ('metamcp-kit-' + $id)
             if (Test-Path -LiteralPath $clone) { throw "The alternate MetaMCP clone path already exists; it was not modified: $clone" }
-            Write-Host "An existing metamcp directory was preserved; the kit will use $clone instead."
+            Write-KitInfo "An existing metamcp directory was preserved; the kit will use $clone instead."
         }
         $candidate = [ordered]@{ version = 1; instanceId = $id; project = 'mcpkit-win-' + $id; port = $port;
             backendPort = $backendPort; portsPending = $false; appImage = '';
@@ -329,7 +329,7 @@ function Ensure-MetaClone($State) {
     $scratch = Join-Path $PrivateDir ('metamcp-clone-' + (New-RandomHex 8))
     if (Test-Path -LiteralPath $scratch) { throw "Temporary clone path already exists: $scratch" }
     try {
-        Write-Host 'Cloning the official MetaMCP repository...'
+        Write-KitInfo 'Cloning the official MetaMCP repository...'
         $null = Invoke-Git @('clone', '--no-checkout', '--depth', '1', $Manifest.metamcp.repository, $scratch) 600
         $null = Invoke-Git @('-C', $scratch, 'fetch', '--depth', '1', 'origin', $Manifest.metamcp.revision) 600
         $null = Invoke-Git @('-C', $scratch, 'checkout', '--detach', $Manifest.metamcp.revision) 300
@@ -430,7 +430,7 @@ function Ensure-MetaImage($State) {
         (Invoke-Git @('-C', $State.cloneDir, 'status', '--porcelain', '--ignored', '--untracked-files=all'))) {
         throw "The MetaMCP clone has user changes or extra files. Nothing was built or removed: $($State.cloneDir)"
     }
-    Write-Host 'Building the cloned MetaMCP image (first run can take several minutes and download dependencies)...'
+    Write-KitInfo 'Building the cloned MetaMCP image (first run can take several minutes and download dependencies)...'
     $build = Invoke-Compose $State @('build', 'app') 3600
     Assert-DockerResult $build 'MetaMCP image build'
     if (-not (Test-OwnedDockerObject 'image' $image $State)) { throw 'The expected local MetaMCP image was not created.' }
@@ -439,11 +439,11 @@ function Wait-MetaMcp($State) {
     $timeout = 240
     if ($env:MCPKIT_METAMCP_START_TIMEOUT -match '^\d{1,3}$') { $timeout = [Math]::Max(1, [Math]::Min(600, [int]$env:MCPKIT_METAMCP_START_TIMEOUT)) }
     $deadline = [DateTime]::UtcNow.AddSeconds($timeout)
-    Write-Host 'Waiting for MetaMCP and its database to initialize...'
+    Write-KitInfo 'Waiting for MetaMCP and its database to initialize...'
     do {
         $health = Invoke-Docker @('--context', 'desktop-linux', 'exec', ($State.project + '-app'), 'sh', '-c',
             'curl --fail --silent --max-time 3 http://127.0.0.1:12008/health >/dev/null && curl --fail --silent --max-time 3 http://127.0.0.1:12009/health >/dev/null') '' 10
-        if ($health.code -eq 0) { return }
+        if ($health.code -eq 0) { Write-KitOk 'MetaMCP and its database are ready.'; return }
         Start-Sleep -Seconds 2
     } while ([DateTime]::UtcNow -lt $deadline)
     throw 'MetaMCP did not become ready. Check .\windows\run-local.ps1 logs metamcp; its database and containers were preserved.'
@@ -492,7 +492,15 @@ printf 'backup-ok\n'
         if ($ForReset) { throw 'Could not confirm the PostgreSQL backup; no reset was attempted.' }
         throw 'Could not confirm the PostgreSQL backup; no migration was attempted.'
     }
-    Write-Host "Database backup: PostgreSQL volume /mcpkit-backups/$name (contains secrets; keep private)."
+    Write-KitOk "Database backup: PostgreSQL volume /mcpkit-backups/$name (contains secrets; keep private)."
+}
+function Assert-MetaResetContract([string]$Sql) {
+    # Detect an older SQL file mixed with the new PowerShell runner before it
+    # can delete anything. This is a compatibility marker, not an integrity
+    # check; local modifications still need to be reviewed separately.
+    if ($Sql -cnotmatch '(?m)^-- MCPKIT_RESET_CONTRACT: short-names-v4\r?$') {
+        throw 'Reset not attempted: seed-local.sql is not the short-name reset version. Update all kit files together and inspect the current MetaMCP state and backup before retrying.'
+    }
 }
 function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '', [bool]$ResetAll = $false) {
     if ($ResetAll -and (-not $Force -or $RequestedOwner)) { throw 'Invalid reset request; no records were changed.' }
@@ -508,6 +516,7 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '', [bo
     $json = ConvertTo-Json -InputObject $bundle -Depth 10 -Compress
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
     $sql = Get-Content -LiteralPath (Join-Path $ScriptDir 'seed-local.sql') -Raw -Encoding UTF8
+    if ($ResetAll) { Assert-MetaResetContract $sql }
     $rawResult = ''
     $needsApply = $Force
     if (-not $Force) {
@@ -523,8 +532,8 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '', [bo
         }
         # Stopping (not recreating) clears both active sessions and prewarmed
         # idle servers, and prevents stale tool names during the DB change.
-        if ($ResetAll) { Write-Host 'Stopping the kit MetaMCP app for a database backup and explicit reset; clients will need to reconnect.' }
-        else { Write-Host 'Temporarily stopping the kit MetaMCP app for a database backup and server-name migration; clients will need to reconnect.' }
+        if ($ResetAll) { Write-KitInfo 'Stopping the kit MetaMCP app for a database backup and explicit reset; clients will need to reconnect.' }
+        else { Write-KitInfo 'Temporarily stopping the kit MetaMCP app for a database backup and server-name migration; clients will need to reconnect.' }
         $stop = Invoke-Docker @('--context', 'desktop-linux', 'stop', '--time', '20', ($State.project + '-app')) '' 180
         Assert-DockerResult $stop 'MetaMCP app stop before local seed'
         $resetAttempted = $false
@@ -536,13 +545,13 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '', [bo
             try { $rawResult = Invoke-MetaSeedQuery $State $sql $encoded $forceValue }
             catch {
                 if ($ResetAll -and $_.Exception.Message -notmatch '^Reset was (blocked|rolled back)') {
-                    Write-Host '[WARN] The reset result is uncertain. Inspect MetaMCP and the backup before running reset again.' -ForegroundColor Yellow
+                    Write-KitWarn 'The reset result is uncertain. Inspect MetaMCP and the backup before running reset again.'
                 }
                 throw
             }
             if ($ResetAll -and $rawResult.StartsWith('seeded|')) {
                 $resetCommitted = $true
-                Write-Host 'The reset transaction committed; do not run reset again if the app restart fails.'
+                Write-KitOk 'The reset transaction committed; do not run reset again if the app restart fails.'
             }
         } finally {
             # The same container and writable layer are reused, even if the
@@ -554,12 +563,12 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '', [bo
             } catch {
                 if ($resetAttempted) {
                     $status = if ($resetCommitted) { 'committed' } else { 'may have committed' }
-                    Write-Host "[WARN] The reset $status. Do not repeat it; run start and inspect MetaMCP first." -ForegroundColor Yellow
+                    Write-KitWarn "The reset $status. Do not repeat it; run start and inspect MetaMCP first."
                 }
                 throw
             }
         }
-        Write-Host 'MetaMCP app restarted without recreating its container. Reconnect MCP clients to refresh server and tool names.'
+        Write-KitOk 'MetaMCP app restarted without recreating its container. Reconnect MCP clients to refresh server and tool names.'
     }
     $parts = $rawResult -split '\|', 6
     if ($parts.Count -ne 6) {
@@ -603,34 +612,38 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '', [bo
             $State.additionalAdminEmails = @($State.additionalAdminEmails) + @($actualOwner)
             $State.authPending = $true
             $changed = $true
-            Write-Host 'Adding the selected existing account to the MetaMCP administrator allowlist; existing administrators are retained.'
+            Write-KitInfo 'Adding the selected existing account to the MetaMCP administrator allowlist; existing administrators are retained.'
         }
         if ($changed) { $null = Save-Json $MetaStateFile $State }
     } elseif ($parts[1]) { throw 'Unexpected MetaMCP account in registration result; existing state was not changed.' }
 
-    if ($parts[3]) { Write-Host "[WARN] Unauthenticated endpoint detected or previously blocked group: $($parts[3]). Seed adds no tools while open; existing mappings may already be exposed. Protect all endpoints and run seed again." -ForegroundColor Yellow }
-    if ($parts[4]) { Write-Host "[WARN] Some records could not be safely merged or linked: $($parts[4]). Conflicting records (including possible old duplicates) were preserved. Review them and run seed again." -ForegroundColor Yellow }
-    if ($parts[5]) { Write-Host "[WARN] Some removed, restricted or incompatible legacy mappings were not added to shared groups: $($parts[5]). Review them before explicitly running seed." -ForegroundColor Yellow }
+    if ($parts[3]) { Write-KitWarn "Unauthenticated endpoint detected or previously blocked group: $($parts[3]). Seed adds no tools while open; existing mappings may already be exposed. Protect all endpoints and run seed again." }
+    if ($parts[4]) { Write-KitWarn "Some records could not be safely merged or linked: $($parts[4]). Conflicting records (including possible old duplicates) were preserved. Review them and run seed again." }
+    if ($parts[5]) { Write-KitWarn "Some removed, restricted or incompatible legacy mappings were not added to shared groups: $($parts[5]). Review them before explicitly running seed." }
     if ($parts[0] -eq 'seeded' -and -not ($parts[3] -or $parts[4] -or $parts[5])) {
-        Write-Host 'Registered the 13 Windows servers in shared, API-key-protected groups.'
+        Write-KitOk 'Registered the 13 Windows servers in shared, API-key-protected groups.'
     } elseif ($parts[0] -eq 'seeded') {
-        Write-Host 'Shared Windows server groups were initialized; review the warnings above for skipped records.'
+        Write-KitWarn 'Shared Windows server groups were initialized; review the warnings above for skipped records.'
     } else {
-        Write-Host 'The local server configuration was already initialized; user edits and deletions were preserved.'
+        Write-KitOk 'The local server configuration was already initialized; user edits and deletions were preserved.'
     }
     return $parts[2]
 }
 function Show-MetaEndpoints($State, [string]$Groups) {
+    Write-KitHeader 'MCP endpoints'
     if (-not $Groups) {
-        Write-Host 'No usable shared MCP endpoint was found. Check the warnings and MetaMCP settings.'
+        Write-KitWarn 'No usable shared MCP endpoint was found. Check the warnings and MetaMCP settings.'
         return
     }
     $groupNames = @($Groups -split ',')
     foreach ($group in $groupNames) {
-        Write-Host "MCP endpoint ($group): http://localhost:$($State.port)/metamcp/$group/mcp"
+        Write-KitInfo "MCP endpoint ($group): http://localhost:$($State.port)/metamcp/$group/mcp"
+    }
+    if (@($groupNames | Where-Object { $_ -clike 'local-*' }).Count -gt 0) {
+        Write-KitWarn 'Legacy prefixed endpoints were preserved; start and seed do not rename them. Before any explicit reset, check the active kit files and make a separate backup.'
     }
     if ($groupNames.Count -lt 6) {
-        Write-Host '[WARN] One or more shared endpoints are missing, conflicting or open. Check MetaMCP settings before explicitly running seed.' -ForegroundColor Yellow
+        Write-KitWarn 'One or more shared endpoints are missing, conflicting or open. Check MetaMCP settings before explicitly running seed.'
     }
 }
 function Test-MetaBridge($State) {
@@ -662,7 +675,7 @@ process.stdin.on('end', () => {
     if ($result.code -ne 0 -or $result.stdout.Trim() -cne 'bridge-ok') {
         throw 'Docker Desktop cannot reach the loopback Windows gateway via host.docker.internal. Check Docker Desktop networking and retry; the gateway was not exposed to the LAN.'
     }
-    Write-Host 'Docker Desktop can reach the authenticated loopback Windows gateway.'
+    Write-KitOk 'Docker Desktop can reach the authenticated loopback Windows gateway.'
 }
 function Enter-MetaLock {
     $file = Join-Path $PrivateDir 'metamcp.lock'
@@ -684,13 +697,13 @@ function Save-MetaAppImage($State) {
     $probe = Invoke-Docker @('--context', 'desktop-linux', 'image', 'inspect', '--format', '{{.Id}}', $image)
     if ($probe.code -eq 0) { throw 'The generated MetaMCP backup image name already exists; nothing was overwritten.' }
     if ($probe.stderr -notmatch '(?i)(no such image|not found)') { Assert-DockerResult $probe 'backup image inspection' }
-    Write-Host 'Stopping the kit MetaMCP app and preserving its writable layer before applying configuration...'
+    Write-KitInfo 'Stopping the kit MetaMCP app and preserving its writable layer before applying configuration...'
     $stop = Invoke-Docker @('--context', 'desktop-linux', 'stop', '--time', '20', $app) '' 180
     Assert-DockerResult $stop 'MetaMCP app stop for port change'
     $commit = Invoke-Docker @('--context', 'desktop-linux', 'commit', '--change', ('LABEL com.multfinite.mcpkit.instance=' + $State.instanceId), $app, $image) '' 600
     Assert-DockerResult $commit 'MetaMCP app backup'
     if (-not (Test-OwnedDockerObject 'image' $image $State)) { throw 'The MetaMCP app backup could not be verified; the old container was kept.' }
-    Write-Host "Preserved app image: $image (local only; it may contain secrets)."
+    Write-KitOk "Preserved app image: $image (local only; it may contain secrets)."
     return $image
 }
 function Start-MetaApp($State) {
@@ -720,6 +733,7 @@ function Start-MetaApp($State) {
     Wait-MetaMcp $State
 }
 function Start-MetaMcp {
+    Write-KitHeader 'MetaMCP Fullstack'
     $lock = Enter-MetaLock
     try {
         Ensure-DesktopDocker
@@ -732,26 +746,27 @@ function Start-MetaMcp {
         Start-MetaApp $state
         $endpointGroups = Invoke-MetaSeed $state $false
         Test-MetaBridge $state
-        Write-Host "MetaMCP: http://localhost:$($state.port)"
+        Write-KitInfo "MetaMCP: http://localhost:$($state.port)"
         Show-MetaEndpoints $state $endpointGroups
-        if ($state.backendPort -gt 0) { Write-Host "MetaMCP backend (loopback only): http://localhost:$($state.backendPort)" }
-        Write-Host 'Sign in or register in MetaMCP. To close registration, use Settings > Authentication > Disable UI Registration.'
-        Write-Host 'Create an API key in the MetaMCP UI; new shared endpoints require it.'
+        if ($state.backendPort -gt 0) { Write-KitInfo "MetaMCP backend (loopback only): http://localhost:$($state.backendPort)" }
+        Write-KitInfo 'Sign in or register in MetaMCP. To close registration, use Settings > Authentication > Disable UI Registration.'
+        Write-KitInfo 'Create an API key in the MetaMCP UI; new shared endpoints require it.'
     } finally { Exit-MetaLock $lock }
 }
 function Show-MetaPorts {
+    Write-KitHeader 'MetaMCP ports'
     $state = Get-MetaState
     if (-not $state) {
-        Write-Host "New-install defaults: frontend $($Manifest.metamcp.frontendPort), backend $($Manifest.metamcp.backendPort)."
-        Write-Host 'Override before first install with MCPKIT_METAMCP_PORT and MCPKIT_METAMCP_BACKEND_PORT.'
+        Write-KitInfo "New-install defaults: frontend $($Manifest.metamcp.frontendPort), backend $($Manifest.metamcp.backendPort)."
+        Write-KitInfo 'Override before first install with MCPKIT_METAMCP_PORT and MCPKIT_METAMCP_BACKEND_PORT.'
         return
     }
-    Write-Host "Frontend / MCP endpoint (loopback): $($state.port)"
-    if ($state.backendPort -gt 0) { Write-Host "Backend (loopback): $($state.backendPort)" }
-    else { Write-Host 'Backend: not published on the Windows host.' }
-    if ($state.portsPending) { Write-Host 'The change is pending; run start to retry it.' }
-    Write-Host "Managed port state: $MetaStateFile"
-    Write-Host 'Change it with: run-local.ps1 set-ports -WebPort <port> -BackendPort <port-or-0>'
+    Write-KitInfo "Frontend / MCP endpoint (loopback): $($state.port)"
+    if ($state.backendPort -gt 0) { Write-KitInfo "Backend (loopback): $($state.backendPort)" }
+    else { Write-KitInfo 'Backend: not published on the Windows host.' }
+    if ($state.portsPending) { Write-KitWarn 'The change is pending; run start to retry it.' }
+    Write-KitInfo "Managed port state: $MetaStateFile"
+    Write-KitInfo 'Change it with: run-local.ps1 set-ports -WebPort <port> -BackendPort <port-or-0>'
 }
 function Set-MetaPorts([int]$FrontendPort, [int]$BackendPort) {
     if ($FrontendPort -lt 1 -or $FrontendPort -gt 65535 -or $BackendPort -lt 0 -or $BackendPort -gt 65535 -or
@@ -778,15 +793,16 @@ function Set-MetaPorts([int]$FrontendPort, [int]$BackendPort) {
             # and the database are never edited by a port change.
             Test-MetaCompose $state
             $null = Save-Json $MetaStateFile $state
-            Write-Host "Saved MetaMCP host ports: frontend $FrontendPort, backend $BackendPort (0 = unpublished)."
+            Write-KitOk "Saved MetaMCP host ports: frontend $FrontendPort, backend $BackendPort (0 = unpublished)."
         } elseif ($state.portsPending) {
-            Write-Host 'The requested port change is already pending; retrying it.'
-        } else { Write-Host 'The requested MetaMCP ports are already configured.' }
+            Write-KitInfo 'The requested port change is already pending; retrying it.'
+        } else { Write-KitOk 'The requested MetaMCP ports are already configured.' }
     } finally { Exit-MetaLock $lock }
 }
 function Stop-MetaMcp {
+    Write-KitHeader 'Stopping MetaMCP'
     $state = Get-MetaState
-    if (-not $state) { Write-Host 'No kit-managed local MetaMCP has been created.'; return }
+    if (-not $state) { Write-KitInfo 'No kit-managed local MetaMCP has been created.'; return }
     $lock = Enter-MetaLock
     try {
         # Never launch a stopped Docker Desktop just to stop containers, and
@@ -801,10 +817,11 @@ function Stop-MetaMcp {
             $stop = Invoke-Docker (@('--context', 'desktop-linux', 'stop', '--time', '20') + $containers) '' 180
             Assert-DockerResult $stop 'MetaMCP stop'
         }
-        Write-Host 'Kit MetaMCP containers stopped; their volumes, writable layers, and settings were kept.'
+        Write-KitOk 'Kit MetaMCP containers stopped; their volumes, writable layers, and settings were kept.'
     } finally { Exit-MetaLock $lock }
 }
 function Show-MetaStatus {
+    Write-KitHeader 'MetaMCP status'
     $state = Get-MetaState
     if (-not $state) { throw 'Local MetaMCP has not been created. Run start.' }
     Ensure-DesktopDocker -NoStart
@@ -815,7 +832,7 @@ function Show-MetaStatus {
     Assert-DockerResult $result 'MetaMCP status'
     Write-Host $result.stdout.TrimEnd()
     Test-MetaBridge $state
-    Write-Host "MetaMCP: http://localhost:$($state.port)"
+    Write-KitInfo "MetaMCP: http://localhost:$($state.port)"
 }
 function Show-MetaCredentials {
     $state = Get-MetaState
@@ -834,6 +851,7 @@ function Show-MetaCredentials {
     Write-Host 'Keep these private. If the password was changed in MetaMCP, use the current password instead.'
 }
 function Show-MetaLogs {
+    Write-KitHeader 'MetaMCP logs'
     $state = Get-MetaState
     if (-not $state) { throw 'Local MetaMCP has not been created.' }
     Ensure-DesktopDocker -NoStart
@@ -844,6 +862,7 @@ function Show-MetaLogs {
     if ($result.stderr) { Write-Host $result.stderr.TrimEnd() }
 }
 function Enable-MetaSignup {
+    Write-KitHeader 'MetaMCP registration'
     # This changes only the UI-signup flag, and only on an explicit command.
     # It is useful when an older kit version already closed registration.
     $lock = Enter-MetaLock
@@ -870,11 +889,12 @@ SELECT 'signup-open';
         $result = Invoke-Docker @('--context', 'desktop-linux', 'exec', '-i', ($state.project + '-app'), 'sh', '-c', $script) $sql 120
         Assert-DockerResult $result 'enable UI registration' $false
         if ($result.stdout.Trim() -cne 'signup-open') { throw 'Could not confirm that UI registration was enabled.' }
-        Write-Host "UI registration is enabled at http://localhost:$($state.port). Register, then turn it off yourself in MetaMCP Settings."
-        Write-Host 'SSO registration and existing accounts were not changed.'
+        Write-KitOk "UI registration is enabled at http://localhost:$($state.port). Register, then turn it off yourself in MetaMCP Settings."
+        Write-KitInfo 'SSO registration and existing accounts were not changed.'
     } finally { Exit-MetaLock $lock }
 }
 function Repair-MetaSeed([string]$RequestedOwner = '') {
+    Write-KitHeader 'Registering Windows servers in MetaMCP'
     $lock = Enter-MetaLock
     $needsApply = $false
     try {
@@ -901,15 +921,21 @@ function Repair-MetaSeed([string]$RequestedOwner = '') {
 function Reset-MetaRecords {
     # This command is intentionally separate from start/seed. It applies to
     # the dedicated Windows MetaMCP database, including manually added rows.
+    Write-KitHeader 'Reset Windows MetaMCP records'
     $initialState = Get-MetaState
     if (-not $initialState) { throw 'Local MetaMCP has not been created. No reset was attempted.' }
-    Write-Host "WARNING: reset ALL servers, namespaces and endpoints in Windows MetaMCP project $($initialState.project), including manually created records." -ForegroundColor Yellow
-    Write-Host 'Their tool settings, mappings and server OAuth sessions will be deleted; historical audit links to those records will be cleared.' -ForegroundColor Yellow
-    Write-Host 'User accounts, MetaMCP API keys, native server files, other databases and Docker volumes are not deleted.'
-    Write-Host 'A secret-bearing PostgreSQL dump will be made inside the same database volume; make a separate secure backup first.'
+    Write-KitInfo "Kit scripts: $ScriptDir"
+    $seedPath = Join-Path $ScriptDir 'seed-local.sql'
+    if (-not (Test-Path -LiteralPath $seedPath -PathType Leaf)) { throw "Reset not attempted: seed-local.sql is missing: $seedPath" }
+    Assert-MetaResetContract (Get-Content -LiteralPath $seedPath -Raw -Encoding UTF8)
+    Write-KitWarn "Reset ALL servers, namespaces and endpoints in Windows MetaMCP project $($initialState.project), including manually created records."
+    Write-KitWarn 'Their tool settings, mappings and server OAuth sessions will be deleted; historical audit links to those records will be cleared.'
+    Write-KitInfo 'User accounts, MetaMCP API keys, native server files, other databases and Docker volumes are not deleted.'
+    Write-KitWarn 'A secret-bearing PostgreSQL dump will be made inside the same database volume; make a separate secure backup first.'
+    Write-KitInfo 'The new protected endpoints will be named system, files, code, web, data and memory.'
     $confirmation = Read-Host 'Type DELETE ALL LOCAL RECORDS to continue'
     if ($confirmation -cne 'DELETE ALL LOCAL RECORDS') {
-        Write-Host 'Reset cancelled; no records were changed.'
+        Write-KitInfo 'Reset cancelled; no records were changed.'
         return
     }
     $lock = Enter-MetaLock
@@ -930,9 +956,9 @@ function Reset-MetaRecords {
         # when the stopped app is restarted after the reset.
         Start-MetaApp $state
         $endpointGroups = Invoke-MetaSeed $state $true '' $true
-        Write-Host 'Windows MetaMCP records were reset once and the 13 default short-name servers and six protected groups were created.'
+        Write-KitOk 'Windows MetaMCP records were reset once and the 13 default short-name servers and six protected groups were created.'
         Show-MetaEndpoints $state $endpointGroups
         try { Test-MetaBridge $state }
-        catch { Write-Host "[WARN] Reset already completed, but gateway connectivity could not be verified: $($_.Exception.Message)" -ForegroundColor Yellow }
+        catch { Write-KitWarn "Reset already completed, but gateway connectivity could not be verified: $($_.Exception.Message)" }
     } finally { Exit-MetaLock $lock }
 }

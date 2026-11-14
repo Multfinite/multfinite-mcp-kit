@@ -121,10 +121,10 @@ function Initialize-Configuration {
         dbhubDsn = if ($legacy.DBHUB_DSN) { $legacy.DBHUB_DSN } else { '' }
     }
     $created = Save-Json $SettingsFile $settings -CreateOnly
-    Write-Host "$(if ($created) { 'Created' } else { 'Preserved' }) $SettingsFile"
+    Write-KitOk "$(if ($created) { 'Created' } else { 'Preserved' }) $SettingsFile"
     $created = Save-Json $SecretsFile $secrets -CreateOnly
-    Write-Host "$(if ($created) { 'Created' } else { 'Preserved' }) $SecretsFile"
-    if (Test-Path -LiteralPath (Join-Path $ConfigDir 'mcp-local.json')) { Write-Host 'The legacy mcp-local.json and .env are not modified.' }
+    Write-KitOk "$(if ($created) { 'Created' } else { 'Preserved' }) $SecretsFile"
+    if (Test-Path -LiteralPath (Join-Path $ConfigDir 'mcp-local.json')) { Write-KitInfo 'The legacy mcp-local.json and .env are not modified.' }
 }
 function Test-Settings($Settings, $Secrets) {
     if ($Settings.version -ne 1) { throw 'Unsupported local settings version.' }
@@ -239,13 +239,22 @@ function Show-Status($Status) {
     $counts = @{ ready = 0; waiting = 0; starting = 0; error = 0 }
     foreach ($item in @($Status.servers)) {
         $detail = if ($item.detail) { ": $($item.detail)" } else { '' }
-        Write-Host ('{0,-9} {1}{2}' -f $item.status, $item.id, $detail)
+        $line = '{0,-9} {1}{2}' -f $item.status, $item.id, $detail
+        switch ($item.status) {
+            'ready'    { Write-KitOk $line }
+            'waiting'  { Write-KitWarn $line }
+            'starting' { Write-KitInfo $line }
+            'error'    { Write-KitError $line }
+            default    { Write-KitInfo $line }
+        }
         if ($counts.ContainsKey([string]$item.status)) { $counts[[string]$item.status]++ }
     }
-    Write-Host "Ready: $($counts.ready); waiting for configuration: $($counts.waiting); starting: $($counts.starting); errors: $($counts.error)."
+    $summary = "Ready: $($counts.ready); waiting for configuration: $($counts.waiting); starting: $($counts.starting); errors: $($counts.error)."
+    if ($counts.error -or $counts.waiting -or $counts.starting) { Write-KitWarn $summary } else { Write-KitOk $summary }
     return $counts
 }
 function Start-Gateway {
+    Write-KitHeader 'Windows LOCAL MCP servers'
     $config = Get-Configuration
     $settings = $config.settings
     if (-not (Test-Path -LiteralPath $Node -PathType Leaf)) { throw 'The kit Node runtime is missing. First run install-local.ps1.' }
@@ -258,7 +267,7 @@ function Start-Gateway {
     try {
         $current = Get-RunningState
         if ($current) {
-            Write-Host 'Gateway is already running; settings are unchanged until restart.'
+            Write-KitInfo 'Gateway is already running; settings are unchanged until restart.'
             $counts = Show-Status $current.status
             if ($counts.error -or $counts.starting) { throw 'Some servers failed or are still starting. See status and logs.' }
             return
@@ -321,7 +330,7 @@ function Start-Gateway {
             $status = Invoke-Control $state 'status'
         }
         $scheme = if ($settings.tlsCertFile) { 'https' } else { 'http' }
-        Write-Host "Gateway listening on $scheme`://$($settings.listenHost):$($settings.port)"
+        Write-KitOk "Gateway listening on $scheme`://$($settings.listenHost):$($settings.port)"
         $counts = Show-Status $status
         if ($counts.error -or $counts.starting) { throw 'Some servers failed or are still starting. See the individual logs and rerun installation if packages are missing.' }
     } finally {
@@ -330,20 +339,22 @@ function Start-Gateway {
     }
 }
 function Stop-Gateway {
+    Write-KitHeader 'Stopping Windows gateway'
     $current = Get-RunningState
-    if (-not $current) { Write-Host 'Gateway is not running.'; return }
+    if (-not $current) { Write-KitInfo 'Gateway is not running.'; return }
     $null = Invoke-Control $current.state 'stop'
     for ($i = 0; $i -lt 60; $i++) {
         Start-Sleep -Milliseconds 250
         if (-not (Test-ProcessAlive $current.state.pid)) {
             Remove-StateIfMatching $current.state.instanceId
-            Write-Host 'Gateway and its child servers stopped; data and configuration were kept.'
+            Write-KitOk 'Gateway and its child servers stopped; data and configuration were kept.'
             return
         }
     }
     throw 'Shutdown was not confirmed. Inspect logs gateway; no unrelated process was killed.'
 }
 function Get-GatewayStatus {
+    Write-KitHeader 'Windows gateway status'
     $current = Get-RunningState
     if (-not $current) { throw 'Gateway is not running.' }
     $counts = Show-Status $current.status
@@ -364,7 +375,7 @@ function Show-Logs([string]$Name) {
     if (-not $Name) { foreach ($id in $Manifest.servers) { $files += (Join-Path $Logs "$id.log") } }
     foreach ($file in $files) {
         if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { continue }
-        Write-Host "`n=== $(Split-Path -Leaf $file) ==="
+        Write-KitHeader "Logs: $(Split-Path -Leaf $file)"
         Get-Content -LiteralPath $file -Encoding UTF8 -Tail 100
     }
 }
@@ -377,7 +388,7 @@ function Start-LocalStack {
     $problems = New-Object 'System.Collections.Generic.List[string]'
     try { Start-Gateway } catch {
         $message = "Windows MCP gateway: $($_.Exception.Message)"
-        Write-Host "[WARN] $message" -ForegroundColor Yellow
+        Write-KitWarn $message
         $problems.Add($message)
     }
     # An individual native server may be broken while the gateway and the
@@ -385,7 +396,7 @@ function Start-LocalStack {
     # the partial failure rather than hiding it or leaving Docker unconfigured.
     try { Start-MetaMcp } catch {
         $message = "Local MetaMCP: $($_.Exception.Message)"
-        Write-Host "[WARN] $message" -ForegroundColor Yellow
+        Write-KitWarn $message
         $problems.Add($message)
     }
     if ($problems.Count -gt 0) { throw ($problems -join '; ') }
@@ -431,6 +442,6 @@ try {
     }
     exit 0
 } catch {
-    Write-Host "ERROR: $($_.Exception.Message)" -ForegroundColor Red
+    Write-KitError $_.Exception.Message
     exit 1
 }

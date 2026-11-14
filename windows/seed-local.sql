@@ -1,3 +1,6 @@
+-- MCPKIT_RESET_CONTRACT: short-names-v4
+-- Keep this marker only while reset-all verifies the six exact short names
+-- before COMMIT. The Windows runner uses it to reject older mixed-in SQL.
 -- The bundle is base64 JSON on stdin, never interpolated into SQL source.
 -- Public means shared inside MetaMCP (user_id IS NULL), not unauthenticated.
 -- The caller stops the kit app and backs up PostgreSQL before an applying run.

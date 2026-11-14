@@ -27,10 +27,10 @@ $Manifest = Get-Content -LiteralPath (Join-Path $ScriptDir 'manifest.json') -Raw
 $Failures = New-Object 'System.Collections.Generic.List[string]'
 . (Join-Path $ScriptDir 'local-common.ps1')
 
-function Step([string]$Message) { Write-Host "`n== $Message ==" -ForegroundColor Cyan }
-function Ok([string]$Message) { Write-Host "[OK] $Message" -ForegroundColor Green }
-function Note([string]$Message) { Write-Host "[WARN] $Message" -ForegroundColor Yellow }
-function Fail([string]$Message) { Write-Host "[ERROR] $Message" -ForegroundColor Red; $Failures.Add($Message) }
+function Step([string]$Message) { Write-KitHeader $Message }
+function Ok([string]$Message) { Write-KitOk $Message }
+function Note([string]$Message) { Write-KitWarn $Message }
+function Fail([string]$Message) { Write-KitError $Message; $Failures.Add($Message) }
 function Refresh-Path {
     $machine = [Environment]::GetEnvironmentVariable('Path', 'Machine')
     $user = [Environment]::GetEnvironmentVariable('Path', 'User')
@@ -125,7 +125,7 @@ function Ensure-VisualCpp {
     if (Find-VisualCpp) { Ok 'Visual C++ build tools found'; return }
     $install = $InstallBuildTools.IsPresent
     if (-not $NonInteractive -and -not $install) {
-        Write-Host 'simple-files-vectorstore needs Visual C++ Build Tools (multi-GB download and possibly UAC).' -ForegroundColor Yellow
+        Write-KitWarn 'simple-files-vectorstore needs Visual C++ Build Tools (multi-GB download and possibly UAC).'
         $answer = Read-Host 'Install the Visual Studio 2022 C++ workload now? (Y/n)'
         $install = $answer -notmatch '^[Nn]'
     }
@@ -378,14 +378,15 @@ Step 'Starting LOCAL servers and Docker Desktop MetaMCP'
 try { Invoke-Runner 'start' }
 catch { Fail "LOCAL stack: $($_.Exception.Message)" }
 
-Write-Host "`nSettings: $BaseDir\config\local-settings.json"
-Write-Host "Secrets:  $PrivateDir\secrets.json (keep private)"
-Write-Host 'MetaMCP: register in the UI and create an API key. Shared server groups are set up automatically. Disable signup yourself in MetaMCP Settings.'
-Write-Host 'Commands: .\windows\run-local.ps1 status | logs | restart | stop | ports'
-Write-Host 'Change existing MetaMCP ports: .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009'
+Write-KitHeader 'Windows LOCAL configuration'
+Write-KitInfo "Settings: $BaseDir\config\local-settings.json"
+Write-KitInfo "Secrets:  $PrivateDir\secrets.json (keep private)"
+Write-KitInfo 'MetaMCP: register in the UI and create an API key. Shared server groups are set up automatically. Disable signup yourself in MetaMCP Settings.'
+Write-KitInfo 'Commands: .\windows\run-local.ps1 status | logs | restart | stop | ports'
+Write-KitInfo 'Change existing MetaMCP ports: .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009'
 Note 'Obsidian requires its Local REST API plugin and key; the server waits until configured.'
 if ($Failures.Count -gt 0) {
-    Write-Host "`nInstallation is incomplete. Fix the errors above and rerun this script; existing configuration and data are preserved." -ForegroundColor Red
+    Write-KitError 'Installation is incomplete. Fix the errors above and rerun this script; existing configuration and data are preserved.'
     exit 1
 }
 Ok 'Installation completed. Open local MetaMCP and check server-specific prerequisites as described above.'
