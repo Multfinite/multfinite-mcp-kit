@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory=$true, Position=0)][ValidateSet('start','stop','status','logs','remove')][string]$Command,
+    [Parameter(Mandatory=$true, Position=0)][ValidateSet('start','stop','status','logs','check-env','apply','remove')][string]$Command,
     [Parameter(Mandatory=$true, Position=1)][string]$Directory,
     [switch]$DeleteVolumes
 )

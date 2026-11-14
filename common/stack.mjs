@@ -41,6 +41,15 @@ function validOrigin(value) {
   if (u.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) fail('Use HTTPS for a non-loopback APP_URL. Configure the reverse proxy separately.');
   return u.origin;
 }
+function parseEnvOrigin(raw) {
+  // Do not interpret shell syntax, Compose interpolation, comments or escapes.
+  // Accept a literal URL with optional matching single or double quotes.
+  if (typeof raw !== 'string' || raw !== raw.trim()) fail('APP_URL in the private .env must be a literal origin without surrounding spaces.');
+  let value = raw;
+  if ((raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('"') && raw.endsWith('"'))) value = raw.slice(1, -1);
+  if (!value || /[\s'"\\$#`,]/.test(value)) fail('APP_URL in the private .env must be a literal origin without interpolation or comments.');
+  return validOrigin(value);
+}
 function cleanEnv(extra = {}) {
   const env = { ...process.env };
   for (const name of Object.keys(env)) {
@@ -84,15 +93,18 @@ function originState(base) {
       (s.type === 'meta' && validOrigin(s.appUrl) !== s.appUrl)) fail('Invalid or relocated kit state; no Docker resource was changed.');
   return s;
 }
-function readEnv(base, type) {
+function readEnv(base, type, { ignoreAppUrl = false } = {}) {
   const file = path.join(base, '.mcpkit', '.env');
   if (!fs.existsSync(file)) fail(`Missing private credentials: ${file}. Restore from backup; secrets are not regenerated.`);
   const values = {};
   for (const line of fs.readFileSync(file, 'utf8').split(/\r?\n/)) {
     const match = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line);
     if (match) {
+      if (type === 'meta' && ignoreAppUrl && match[1] === 'APP_URL') continue;
       if (Object.hasOwn(values, match[1])) fail(`Duplicate key in private env: ${match[1]}`);
       values[match[1]] = match[2];
+    } else if (type === 'meta' && !ignoreAppUrl && /^\s*(?:export\s+)?APP_URL(?:\s*[:=]|\s*$)/.test(line)) {
+      fail('Write APP_URL in the private .env as APP_URL=... without export or spaces around the key.');
     }
   }
   const required = type === 'meta' ? ['POSTGRES_PASSWORD', 'BETTER_AUTH_SECRET'] : ['MCPKIT_GATEWAY_KEY', 'MCPKIT_CONTROL_KEY', 'NEO4J_PASSWORD'];
@@ -102,7 +114,14 @@ function readEnv(base, type) {
     }
   }
   if (type === 'global' && values.MCPKIT_GATEWAY_KEY === values.MCPKIT_CONTROL_KEY) fail('Gateway and control credentials must differ.');
+  if (type === 'meta' && !ignoreAppUrl && Object.hasOwn(values, 'APP_URL')) parseEnvOrigin(values.APP_URL);
   return values;
+}
+function configuredMetaOrigin(state) {
+  const values = readEnv(state.base, 'meta');
+  // Old installations did not have APP_URL in .env. Preserve their initial
+  // origin unless the user explicitly adds the new configuration entry.
+  return Object.hasOwn(values, 'APP_URL') ? parseEnvOrigin(values.APP_URL) : state.appUrl;
 }
 function initialize(type, opts) {
   const base = path.resolve(opts.dir || '');
@@ -119,13 +138,13 @@ function initialize(type, opts) {
   }
   if (existing.length) fail(`Directory is not empty and has no matching kit state; nothing was overwritten: ${base}`);
   const port = validPort(opts.port); // An explicit port is mandatory for every new instance.
-  const appUrl = type === 'meta' ? validOrigin(opts.appUrl || `http://localhost:${port}`) : '';
+  const appUrl = type === 'meta' ? parseEnvOrigin(opts.appUrl || `http://localhost:${port}`) : '';
   const id = crypto.randomBytes(8).toString('hex');
   const state = { version: 1, type, id, project: `mcpkit-${type}-${id}`, base, port, ...(type === 'meta' ? { appUrl, revision } : {}) };
   const priv = path.join(base, '.mcpkit');
   fs.mkdirSync(priv, { mode: 0o700 });
   const env = type === 'meta'
-    ? `POSTGRES_PASSWORD=${random()}\nBETTER_AUTH_SECRET=${random()}\n# Configure an admin allowlist only after those accounts exist.\nMETAMCP_ADMIN_EMAILS=\n# APP_URL is always trusted; add only other origins you explicitly trust.\nEXTRA_TRUSTED_ORIGINS=\n`
+    ? `POSTGRES_PASSWORD=${random()}\nBETTER_AUTH_SECRET=${random()}\n# Public origin; edit this and run apply to change an existing container.\nAPP_URL='${appUrl}'\n# Configure an admin allowlist only after those accounts exist.\nMETAMCP_ADMIN_EMAILS=\n# APP_URL is always trusted; add only other origins you explicitly trust.\nEXTRA_TRUSTED_ORIGINS=\n`
     : `MCPKIT_GATEWAY_KEY=${random()}\nMCPKIT_CONTROL_KEY=${random()}\nNEO4J_PASSWORD=${random()}\n# Edit these values, then run apply. Keep this file private.\nLLM_API_KEY=\nLLM_API_ENDPOINT=https://api.openai.com/v1\nLLM_API_MODEL=gpt-4o-mini\nLLM_API_PROVIDER=openai\nEMBEDDING_MODEL=text-embedding-3-small\nEMBEDDING_DIMENSIONS=1536\nCONTEXT7_API_KEY=\n`;
   privateWrite(path.join(priv, '.env'), env);
   if (type === 'global') {
@@ -144,7 +163,7 @@ function initialize(type, opts) {
   console.log(`Created ${type} state at ${base}. Docker project: ${state.project}.`);
   return state;
 }
-function config(state) {
+function config(state, { metaOriginOverride } = {}) {
   const priv = path.join(state.base, '.mcpkit');
   const common = {
     MCPKIT_INSTANCE: state.id,
@@ -153,7 +172,7 @@ function config(state) {
     MCPKIT_IMAGE: `${state.project}-${state.type === 'meta' ? 'metamcp' : 'gateway'}:1`,
   };
   if (state.type === 'meta') {
-    Object.assign(common, { MCPKIT_SOURCE: path.join(state.base, 'metamcp'), MCPKIT_APP_URL: state.appUrl });
+    Object.assign(common, { MCPKIT_SOURCE: path.join(state.base, 'metamcp'), MCPKIT_APP_URL: metaOriginOverride ?? configuredMetaOrigin(state) });
   } else {
     Object.assign(common, { MCPKIT_BUILD_DIR: path.join(priv, 'build'), MCPKIT_NODE_BUILD_DIR: path.join(priv, 'node-build'), MCPKIT_NODE_IMAGE: `${state.project}-node:1` });
   }
@@ -297,6 +316,20 @@ function ensureImages(ctx, state) {
     checkLabel(built, state, 'image', image);
   }
 }
+async function waitMetaHealth(state) {
+  const target = `http://127.0.0.1:${state.port}/health`;
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    try {
+      const r = await fetch(target, { signal: AbortSignal.timeout(Math.min(2000, Math.max(1, deadline - Date.now()))), redirect: 'error' });
+      if (r.ok) return;
+      await r.body?.cancel();
+    } catch { /* still starting */ }
+    const remaining = deadline - Date.now();
+    if (remaining > 0) await delay(Math.min(1000, remaining));
+  }
+  fail('MetaMCP did not pass the local health check within 120 seconds. Inspect status and logs locally before retrying.');
+}
 async function start(ctx, state) {
   readEnv(state.base, state.type);
   checkResources(ctx, state);
@@ -305,15 +338,13 @@ async function start(ctx, state) {
   checkResources(ctx, state);
   compose(ctx, state, ['up', '-d', '--no-recreate', '--no-build']);
   if (state.type === 'meta') {
-    const target = `http://127.0.0.1:${state.port}/health`;
-    let ready = false;
-    for (let i = 0; i < 120; i++) {
-      try { const r = await fetch(target, { signal: AbortSignal.timeout(2000), redirect: 'error' }); if (r.ok) { ready = true; break; } } catch { /* still starting */ }
-      await delay(1000);
-    }
-    if (!ready) fail('MetaMCP did not become healthy within 120 seconds. Containers and data were kept; inspect logs.');
-    console.log(`MetaMCP passed its local health check on port ${state.port}. Use its configured origin: ${state.appUrl}`);
-    if (state.appUrl !== `http://localhost:${state.port}`) console.log('For an external origin, configure its HTTPS reverse proxy before signing in.');
+    await waitMetaHealth(state);
+    const id = requireRunningMetaApp(ctx, state);
+    const currentOrigin = containerEnvironment(ctx, id).APP_URL;
+    if (typeof currentOrigin !== 'string' || validOrigin(currentOrigin) !== currentOrigin) fail('The running app has an unexpected APP_URL; review its configuration.');
+    console.log(`MetaMCP passed its local health check on port ${state.port}. Current app origin: ${currentOrigin}`);
+    if (currentOrigin !== configuredMetaOrigin(state)) console.warn('APP_URL in the private .env differs from the running container; use apply after reviewing its warnings.');
+    if (currentOrigin !== `http://localhost:${state.port}`) console.log('For an external origin, configure its HTTPS reverse proxy before signing in.');
     console.log('Create your own user and API key in the UI. Close signup yourself; an empty admin allowlist treats every signed-in user as an admin.');
   } else {
     console.log(`GLOBAL gateway is bound to 127.0.0.1:${state.port}. Servers may still be starting or waiting for credentials.`);
@@ -325,42 +356,66 @@ async function confirm(message, expected) {
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try { return (await rl.question(`${message}\nType ${expected}: `)) === expected; } finally { rl.close(); }
 }
-function stoppedMetaService(ctx, state, service) {
+function ownedMetaService(ctx, state, service) {
   const result = run('docker', ['--context', ctx, 'container', 'ls', '-aq', '--no-trunc',
     '--filter', `label=com.docker.compose.project=${state.project}`], { capture: true });
   const ids = result.stdout.trim().split(/\s+/).filter(Boolean);
   const found = [];
   for (const id of ids) {
-    if (!/^[a-f0-9]{12,64}$/.test(id)) fail('Unexpected Docker container ID; recovery was not performed.');
+    if (!/^[a-f0-9]{12,64}$/.test(id)) fail('Unexpected Docker container ID; inspect the project state.');
     const labels = inspect(ctx, 'container', id);
-    if (!labels) fail('A container disappeared during recovery; no file was changed.');
+    if (!labels) fail('A container disappeared during inspection; inspect the project state.');
     checkLabel(labels, state, 'container', id);
     if (labels['com.docker.compose.service'] === service &&
         String(labels['com.docker.compose.oneoff'] || '').toLowerCase() !== 'true') found.push(id);
   }
-  if (found.length !== 1) fail(`Expected exactly one owned ${service} container; no file was changed.`);
-  const running = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.State.Running}}', found[0]], { capture: true }).stdout.trim();
-  if (running !== 'false') fail(`Stop the selected MetaMCP ${service} container before recovery; no file was changed.`);
+  if (found.length !== 1) fail(`Expected exactly one owned ${service} container; inspect the project state.`);
   return found[0];
 }
-function containerEnvironment(ctx, id) {
-  const result = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Config.Env}}', id], { capture: true });
+function stoppedMetaService(ctx, state, service) {
+  const id = ownedMetaService(ctx, state, service);
+  const running = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.State.Running}}', id], { capture: true }).stdout.trim();
+  if (running !== 'false') fail(`Stop the selected MetaMCP ${service} container before recovery; no file was changed.`);
+  return id;
+}
+function dockerEnvironment(text, description) {
   let entries;
-  try { entries = JSON.parse(result.stdout.trim()); } catch { fail('Could not read container configuration; no file was changed.'); }
-  if (!Array.isArray(entries)) fail('Unexpected container configuration; no file was changed.');
+  try { entries = JSON.parse(text.trim()); } catch { fail(`Could not read ${description} configuration.`); }
+  if (entries === null && description === 'image') entries = [];
+  if (!Array.isArray(entries)) fail(`Unexpected ${description} configuration.`);
   const values = Object.create(null);
   for (const entry of entries) {
-    if (typeof entry !== 'string' || !entry.includes('=')) fail('Unexpected container environment; no file was changed.');
+    if (typeof entry !== 'string' || !entry.includes('=')) fail(`Unexpected ${description} environment.`);
     const index = entry.indexOf('=');
     const key = entry.slice(0, index);
-    if (!key || Object.hasOwn(values, key)) fail('Ambiguous container environment; no file was changed.');
+    if (!key || Object.hasOwn(values, key)) fail(`Ambiguous ${description} environment.`);
     values[key] = entry.slice(index + 1);
   }
   return values;
 }
-function metaRecoverySnapshot(ctx, state) {
-  const appId = stoppedMetaService(ctx, state, 'app');
-  const postgresId = stoppedMetaService(ctx, state, 'postgres');
+function containerEnvironment(ctx, id) {
+  const result = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Config.Env}}', id], { capture: true });
+  return dockerEnvironment(result.stdout, 'container');
+}
+function requireRunningMetaApp(ctx, state, expectedId = null) {
+  // The host health endpoint alone could be served by a different process.
+  const id = ownedMetaService(ctx, state, 'app');
+  if (expectedId && id !== expectedId) fail('The MetaMCP app container changed during the health check; inspect the project state.');
+  const running = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.State.Running}}', id], { capture: true }).stdout.trim();
+  const result = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .NetworkSettings.Ports}}', id], { capture: true });
+  let ports;
+  try { ports = JSON.parse(result.stdout); } catch { fail('Cannot inspect active app port bindings.'); }
+  const published = ports && typeof ports === 'object' && !Array.isArray(ports) ? ports['12008/tcp'] : null;
+  if (running !== 'true' || !Array.isArray(published) || published.length !== 1 ||
+      published[0]?.HostIp !== '127.0.0.1' || published[0]?.HostPort !== String(state.port)) {
+    fail('The owned MetaMCP app is not running on its expected loopback port; inspect the project state.');
+  }
+  return id;
+}
+function metaContainerSnapshot(ctx, state, { stopped = false } = {}) {
+  const service = stopped ? stoppedMetaService : ownedMetaService;
+  const appId = service(ctx, state, 'app');
+  const postgresId = service(ctx, state, 'postgres');
   const app = containerEnvironment(ctx, appId);
   const postgres = containerEnvironment(ctx, postgresId);
   const password = postgres.POSTGRES_PASSWORD;
@@ -371,10 +426,13 @@ function metaRecoverySnapshot(ctx, state) {
       app.DATABASE_URL !== `postgresql://metamcp_user:${password}@postgres:5432/metamcp_db`) {
     fail('Container database credentials or configuration do not match the expected kit format; no file was changed.');
   }
-  if (app.APP_URL !== state.appUrl || app.NEXT_PUBLIC_APP_URL !== state.appUrl ||
+  const appUrl = app.APP_URL;
+  let usableAppUrl = false;
+  try { usableAppUrl = parseEnvOrigin(appUrl) === appUrl; } catch { /* reject an unexpected container URL below */ }
+  if (!usableAppUrl || app.NEXT_PUBLIC_APP_URL !== appUrl ||
       typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
-      !app.EXTRA_TRUSTED_ORIGINS.startsWith(`${state.appUrl},`)) {
-    fail('Container MetaMCP settings differ from the saved kit state; no file was changed.');
+      !app.EXTRA_TRUSTED_ORIGINS.startsWith(`${appUrl},`)) {
+    fail('Container MetaMCP URL or admin settings are unexpected; inspect the project state.');
   }
   const mountsResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', postgresId], { capture: true });
   let mounts;
@@ -388,8 +446,41 @@ function metaRecoverySnapshot(ctx, state) {
   if (!labels) fail('The PostgreSQL volume was not found; no file was changed.');
   checkLabel(labels, state, 'volume', volume);
   if (labels['com.docker.compose.volume'] !== 'postgres_data') fail('Unexpected PostgreSQL volume identity; no file was changed.');
-  return { appId, postgresId, password, secret, admins: app.METAMCP_ADMIN_EMAILS,
-    extraOrigins: app.EXTRA_TRUSTED_ORIGINS.slice(state.appUrl.length + 1) };
+  return { appId, postgresId, password, secret, appUrl, admins: app.METAMCP_ADMIN_EMAILS,
+    extraOrigins: app.EXTRA_TRUSTED_ORIGINS.slice(appUrl.length + 1) };
+}
+function checkMetaEnv(ctx, state) {
+  if (state.type !== 'meta') fail('check-env is only available for an independent MetaMCP.');
+  const envFile = path.join(state.base, '.mcpkit', '.env');
+  const stateFile = path.join(state.base, '.mcpkit', 'state.json');
+  const original = privateRegularFile(envFile);
+  const originalState = privateRegularFile(stateFile);
+  if (!original || !originalState) fail('The kit state or private .env is missing; no files or containers were changed.');
+  let savedState;
+  try { savedState = JSON.parse(originalState.toString('utf8')); } catch { fail('Cannot read the kit state; no files or containers were changed.'); }
+  if (JSON.stringify(savedState) !== JSON.stringify(state)) fail('The kit state changed during inspection; no files or containers were changed.');
+  // Check credentials even when the proposed APP_URL is absent or invalid.
+  const values = readEnv(state.base, 'meta', { ignoreAppUrl: true });
+  const snapshot = metaContainerSnapshot(ctx, state);
+  const rendered = renderedMetaConfig(ctx, state, state.appUrl);
+  const app = renderedRuntimeEnvironment(rendered, 'app');
+  const postgres = renderedRuntimeEnvironment(rendered, 'postgres');
+  if (snapshot.password !== values.POSTGRES_PASSWORD || snapshot.secret !== values.BETTER_AUTH_SECRET ||
+      app?.POSTGRES_PASSWORD !== snapshot.password || postgres?.POSTGRES_PASSWORD !== snapshot.password ||
+      app?.BETTER_AUTH_SECRET !== snapshot.secret) {
+    fail('The private .env, rendered Compose credentials, or existing container configurations differ. No files or containers were changed. Review them locally without generating new secrets.');
+  }
+  const current = metaContainerSnapshot(ctx, state);
+  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
+    if (current[key] !== snapshot[key]) fail('Container configuration changed during inspection; no files or containers were changed by this command.');
+  }
+  const checked = privateRegularFile(envFile);
+  const checkedState = privateRegularFile(stateFile);
+  if (!checked || !checked.equals(original) || !checkedState || !checkedState.equals(originalState)) {
+    fail('The kit state or private .env changed during inspection; no files or containers were changed by this command.');
+  }
+  console.log('The private .env and rendered Compose credentials match the existing app and PostgreSQL container configurations. No files or containers were changed.');
+  console.log('This does not prove the current database password, the historical auth secret, database integrity, or application readiness.');
 }
 function safeDotenvLiteral(value) {
   if (typeof value !== 'string' || /[\x00-\x1f\x7f'\\]/.test(value)) {
@@ -400,7 +491,7 @@ function safeDotenvLiteral(value) {
 function privateRegularFile(file) {
   let item;
   try { item = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  if (!item.isFile() || item.isSymbolicLink() || item.size > 1024 * 1024) fail('The existing private .env is not a regular file or is too large; it was not changed.');
+  if (!item.isFile() || item.isSymbolicLink() || item.size > 1024 * 1024) fail('A private configuration file is not a regular file or is too large; it was not changed.');
   return fs.readFileSync(file);
 }
 async function recoverMetaEnv(ctx, state) {
@@ -419,9 +510,10 @@ async function recoverMetaEnv(ctx, state) {
   if (JSON.stringify(savedState) !== JSON.stringify(state)) fail('The kit state changed during recovery; no file was changed.');
   const file = path.join(priv, '.env');
   const current = privateRegularFile(file);
-  const snapshot = metaRecoverySnapshot(ctx, state);
+  const snapshot = metaContainerSnapshot(ctx, state, { stopped: true });
   const recovered = `POSTGRES_PASSWORD=${snapshot.password}\nBETTER_AUTH_SECRET=${snapshot.secret}\n` +
-    `METAMCP_ADMIN_EMAILS=${safeDotenvLiteral(snapshot.admins)}\nEXTRA_TRUSTED_ORIGINS=${safeDotenvLiteral(snapshot.extraOrigins)}\n`;
+    `APP_URL=${safeDotenvLiteral(snapshot.appUrl)}\nMETAMCP_ADMIN_EMAILS=${safeDotenvLiteral(snapshot.admins)}\n` +
+    `EXTRA_TRUSTED_ORIGINS=${safeDotenvLiteral(snapshot.extraOrigins)}\n`;
   if (current) {
     // Never replace a nonempty credential we cannot identify as the same
     // literal. PostgreSQL can have non-kit passwords and dotenv comments or
@@ -446,8 +538,8 @@ async function recoverMetaEnv(ctx, state) {
     'Only MetaMCP settings from the containers will be restored; other or unapplied settings remain in the backup.\n' +
     'Container values may not be the current DB password or historical auth secret (e.g. after SQL changes or recreation with a different .env). Stop if unsure.';
   if (!(await confirm(message, `RECOVER ${state.project}`))) { console.log('Cancelled; no file was changed.'); return; }
-  const rechecked = metaRecoverySnapshot(ctx, state);
-  for (const key of ['appId', 'postgresId', 'password', 'secret', 'admins', 'extraOrigins']) {
+  const rechecked = metaContainerSnapshot(ctx, state, { stopped: true });
+  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
     if (rechecked[key] !== snapshot[key]) fail('Container configuration changed during recovery; no file was changed.');
   }
   const checkedState = fs.lstatSync(stateFile);
@@ -474,6 +566,223 @@ async function recoverMetaEnv(ctx, state) {
     tempCreated = false;
   } finally { if (tempCreated) { try { fs.unlinkSync(temp); } catch { /* left for inspection */ } } }
   console.log('MetaMCP credentials recovered from the verified containers. Containers and volumes were not changed.');
+}
+function renderedMetaConfig(ctx, state, metaOriginOverride) {
+  // Compose is the authority for dotenv quoting/interpolation. Capture its
+  // complete rendering privately: it contains passwords and must not be logged.
+  const result = run('docker', composeArgs(ctx, state, ['config', '--format', 'json']), {
+    capture: true, allowFailure: true, env: cleanEnv(config(state, { metaOriginOverride })),
+  });
+  if (result.status !== 0) fail('Docker Compose could not read the private configuration. Review it locally; no container was changed.');
+  try { return JSON.parse(result.stdout); } catch { fail('Docker Compose did not return a usable JSON configuration; no container was changed.'); }
+}
+function renderedRuntimeEnvironment(rendered, service) {
+  const environment = rendered?.services?.[service]?.environment;
+  if (!environment || typeof environment !== 'object' || Array.isArray(environment)) return null;
+  const values = Object.create(null);
+  for (const [key, value] of Object.entries(environment)) {
+    if (typeof value !== 'string') return null;
+    // Compose's config output escapes each literal dollar as $$ even in JSON,
+    // so undo that serialization escape to obtain the actual runtime value.
+    if (value.replaceAll('$$', '').includes('$')) return null;
+    values[key] = value.replaceAll('$$', '$');
+  }
+  return values;
+}
+function renderedMetaSettings(ctx, state, envValues) {
+  const rendered = renderedMetaConfig(ctx, state);
+  const app = renderedRuntimeEnvironment(rendered, 'app');
+  const postgres = renderedRuntimeEnvironment(rendered, 'postgres');
+  const appUrl = configuredMetaOrigin(state);
+  if (!app || !postgres || app.APP_URL !== appUrl || app.NEXT_PUBLIC_APP_URL !== appUrl ||
+      app.POSTGRES_PASSWORD !== envValues.POSTGRES_PASSWORD || postgres.POSTGRES_PASSWORD !== envValues.POSTGRES_PASSWORD ||
+      app.BETTER_AUTH_SECRET !== envValues.BETTER_AUTH_SECRET ||
+      typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
+      !app.EXTRA_TRUSTED_ORIGINS.startsWith(`${appUrl},`)) {
+    fail('Rendered MetaMCP settings or credentials do not match the private configuration; no container was changed.');
+  }
+  const admins = app.METAMCP_ADMIN_EMAILS;
+  const emails = admins.split(',').map((value) => value.trim()).filter(Boolean);
+  if ((admins.trim() && !emails.length) || emails.some((value) => !/^[^\s@\[\]<>:'"]+@[^\s@\[\]<>:'"]+$/.test(value))) {
+    fail('METAMCP_ADMIN_EMAILS must be a comma-separated list of plain email addresses; no container was changed.');
+  }
+  const extraOrigins = app.EXTRA_TRUSTED_ORIGINS.slice(appUrl.length + 1);
+  for (const value of extraOrigins.split(',').map((item) => item.trim()).filter(Boolean)) {
+    let u;
+    try { u = new URL(value); } catch { fail('EXTRA_TRUSTED_ORIGINS must contain literal origins, not Markdown links; no container was changed.'); }
+    if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || u.pathname !== '/' || u.search || u.hash || u.origin !== value) {
+      fail('EXTRA_TRUSTED_ORIGINS must contain literal origins without paths, credentials or trailing slashes; no container was changed.');
+    }
+  }
+  return { appUrl, admins, extraOrigins, appEnv: app };
+}
+function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false } = {}) {
+  const outcome = after ? 'The app was recreated; inspect it before retrying.' : 'No container was changed.';
+  checkResources(ctx, state);
+  const appRunning = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.State.Running}}', snapshot.appId], { capture: true }).stdout.trim();
+  const appHealth = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', snapshot.appId], { capture: true }).stdout.trim();
+  const pgRunning = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.State.Running}}', snapshot.postgresId], { capture: true }).stdout.trim();
+  const pgHealth = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', snapshot.postgresId], { capture: true }).stdout.trim();
+  if (appRunning !== 'true' || (!after && appHealth !== 'healthy') || pgRunning !== 'true' || pgHealth !== 'healthy') {
+    fail(`The app or PostgreSQL is not in the expected running/healthy state. ${outcome}`);
+  }
+  const image = config(state).MCPKIT_IMAGE;
+  const labels = inspect(ctx, 'image', image);
+  if (!labels) fail(`The existing MetaMCP image was not found. ${outcome}`);
+  checkLabel(labels, state, 'image', image);
+  const appImage = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.Image}}', snapshot.appId], { capture: true }).stdout.trim();
+  const taggedImage = run('docker', ['--context', ctx, 'image', 'inspect', '--format', '{{.Id}}', image], { capture: true }).stdout.trim();
+  if (!/^sha256:[a-f0-9]{64}$/.test(appImage) || appImage !== taggedImage) fail(`The kit image tag no longer identifies the running app image. ${outcome}`);
+  const imageResult = run('docker', ['--context', ctx, 'image', 'inspect', '--format', '{{json .Config.Env}}', image], { capture: true });
+  const imageEnv = dockerEnvironment(imageResult.stdout, 'image');
+  const appEnv = containerEnvironment(ctx, snapshot.appId);
+  // Compose does not override these image defaults. A manually customized
+  // command, entrypoint, user, or working directory could be lost on recreate.
+  const runtimeFormat = '{{json .Config.Cmd}}\n{{json .Config.Entrypoint}}\n{{json .Config.User}}\n{{json .Config.WorkingDir}}';
+  const imageRuntime = run('docker', ['--context', ctx, 'image', 'inspect', '--format', runtimeFormat, image], { capture: true }).stdout;
+  const appRuntime = run('docker', ['--context', ctx, 'container', 'inspect', '--format', runtimeFormat, snapshot.appId], { capture: true }).stdout;
+  if (imageRuntime !== appRuntime) fail(`The app has customized execution settings; review them locally before recreation. ${outcome}`);
+  const editable = new Set(['APP_URL', 'NEXT_PUBLIC_APP_URL', 'METAMCP_ADMIN_EMAILS', 'EXTRA_TRUSTED_ORIGINS']);
+  for (const [key, value] of Object.entries(planned.appEnv)) {
+    if (!editable.has(key) && appEnv[key] !== value) fail(`The app has different non-URL settings; review them locally before recreation. ${outcome}`);
+  }
+  for (const [key, value] of Object.entries(appEnv)) {
+    if (!Object.hasOwn(planned.appEnv, key) && imageEnv[key] !== value) fail(`The app has extra environment settings; review them locally before recreation. ${outcome}`);
+  }
+  const portsResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .HostConfig.PortBindings}}', snapshot.appId], { capture: true });
+  let ports;
+  try { ports = JSON.parse(portsResult.stdout); } catch { fail(`Cannot inspect app port bindings. ${outcome}`); }
+  const published = ports && typeof ports === 'object' && !Array.isArray(ports) ? ports['12008/tcp'] : null;
+  if (!ports || Object.keys(ports).length !== 1 || !Array.isArray(published) || published.length !== 1 ||
+      published[0]?.HostIp !== '127.0.0.1' || published[0]?.HostPort !== String(state.port)) {
+    fail(`The app has unexpected port bindings; review them before recreation. ${outcome}`);
+  }
+  const mountResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', snapshot.appId], { capture: true });
+  let mounts;
+  try { mounts = JSON.parse(mountResult.stdout); } catch { fail(`Cannot inspect the app mounts. ${outcome}`); }
+  const tmpfsResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .HostConfig.Tmpfs}}\n{{json .HostConfig.Mounts}}', snapshot.appId], { capture: true });
+  let tmpfs, hostMounts;
+  try { [tmpfs, hostMounts] = tmpfsResult.stdout.trim().split('\n').map((line) => JSON.parse(line)); }
+  catch { fail(`Cannot inspect additional app mounts. ${outcome}`); }
+  if ((tmpfs !== null && (typeof tmpfs !== 'object' || Array.isArray(tmpfs) || Object.keys(tmpfs).length)) ||
+      (hostMounts !== null && (!Array.isArray(hostMounts) || hostMounts.some((item) => !['bind', 'volume'].includes(item?.Type))))) {
+    fail(`The app has unexpected temporary or unsupported mounts; review and back them up before recreation. ${outcome}`);
+  }
+  const uvVolume = `${state.project}_uv_cache`;
+  if (!Array.isArray(mounts) || mounts.length !== 1 || mounts[0]?.Type !== 'volume' || mounts[0].RW !== true ||
+      mounts[0].Destination !== '/home/nextjs/.cache/uv' || mounts[0].Name !== uvVolume) {
+    fail(`The app has unexpected mounts; review and back them up before recreation. ${outcome}`);
+  }
+  const uvLabels = inspect(ctx, 'volume', uvVolume);
+  if (!uvLabels) fail(`The app cache volume was not found. ${outcome}`);
+  checkLabel(uvLabels, state, 'volume', uvVolume);
+  if (uvLabels['com.docker.compose.volume'] !== 'uv_cache') fail(`Unexpected cache volume identity. ${outcome}`);
+  const hostsResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .HostConfig.ExtraHosts}}', snapshot.appId], { capture: true });
+  let hosts;
+  try { hosts = JSON.parse(hostsResult.stdout); } catch { fail(`Cannot inspect app host mappings. ${outcome}`); }
+  const expectedHosts = process.platform === 'linux' ? ['host.docker.internal:host-gateway'] : [];
+  const actualHosts = hosts === null ? [] : hosts;
+  if (!Array.isArray(actualHosts) || actualHosts.length !== expectedHosts.length ||
+      actualHosts.some((host, index) => typeof host !== 'string' || host.replace('=', ':') !== expectedHosts[index])) {
+    fail(`The app has unexpected host mappings; review them before recreation. ${outcome}`);
+  }
+  const networkResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .NetworkSettings.Networks}}', snapshot.appId], { capture: true });
+  let networks;
+  try { networks = JSON.parse(networkResult.stdout); } catch { fail(`Cannot inspect app networks. ${outcome}`); }
+  const names = networks && typeof networks === 'object' && !Array.isArray(networks) ? Object.keys(networks) : [];
+  if (names.length !== 1 || names[0] !== `${state.project}_default`) {
+    fail(`The app has extra or unexpected networks. Back up the connection details and explicitly unlink/relink them before applying. ${outcome}`);
+  }
+}
+async function applyMetaConfig(ctx, state) {
+  const priv = path.join(state.base, '.mcpkit');
+  for (const dir of [state.base, priv]) {
+    const item = fs.lstatSync(dir);
+    if (!item.isDirectory() || item.isSymbolicLink()) fail('The MetaMCP directory and private directory must not be links; no container was changed.');
+  }
+  const stateFile = path.join(priv, 'state.json');
+  const envFile = path.join(priv, '.env');
+  const stateBytes = privateRegularFile(stateFile);
+  const envBytes = privateRegularFile(envFile);
+  if (!stateBytes || !envBytes) fail('The kit state or private .env is missing; no container was changed.');
+  const unchanged = (file, bytes) => { const current = privateRegularFile(file); return current !== null && current.equals(bytes); };
+  let savedState;
+  try { savedState = JSON.parse(stateBytes.toString('utf8')); } catch { fail('Cannot read the kit state; no container was changed.'); }
+  if (JSON.stringify(savedState) !== JSON.stringify(state)) fail('The kit state changed during preflight; no container was changed.');
+  const values = readEnv(state.base, 'meta');
+  const before = metaContainerSnapshot(ctx, state);
+  if (before.password !== values.POSTGRES_PASSWORD || before.secret !== values.BETTER_AUTH_SECRET) {
+    fail('The .env credentials differ from the existing containers. Restore the correct values before applying; no container was changed.');
+  }
+  const planned = renderedMetaSettings(ctx, state, values);
+  if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during preflight; no container was changed.');
+  if (!Object.hasOwn(values, 'APP_URL') && before.appUrl !== state.appUrl) {
+    fail('The running app origin differs from the saved initial origin. Explicitly set APP_URL in the private .env before applying; no container was changed.');
+  }
+  if (!Object.hasOwn(values, 'METAMCP_ADMIN_EMAILS') && before.admins.trim() && !planned.admins.trim()) {
+    fail('The existing admin allowlist would be cleared because METAMCP_ADMIN_EMAILS is missing. Set it explicitly after review; no container was changed.');
+  }
+  if (!Object.hasOwn(values, 'EXTRA_TRUSTED_ORIGINS') && before.extraOrigins.trim() && !planned.extraOrigins.trim()) {
+    fail('Existing extra trusted origins would be cleared because EXTRA_TRUSTED_ORIGINS is missing. Set it explicitly after review; no container was changed.');
+  }
+  if (['appUrl', 'admins', 'extraOrigins'].every((key) => before[key] === planned[key])) {
+    const current = metaContainerSnapshot(ctx, state);
+    for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
+      if (current[key] !== before[key]) fail('Container configuration changed during inspection; no container was changed by this command.');
+    }
+    if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during inspection; no container was changed.');
+    console.log('Requested URL and admin/trusted-origin settings already match the app container; no container was recreated. Check status separately.');
+    return;
+  }
+  checkMetaApplyResources(ctx, state, before, planned);
+  const count = (text) => text.split(',').map((value) => value.trim()).filter(Boolean).length;
+  const message = `Apply MetaMCP configuration for ${state.project}?\n` +
+    `Requested primary origin: ${planned.appUrl}\n` +
+    `Admin allowlist: ${count(planned.admins)} address(es)${planned.admins === before.admins ? ' (unchanged)' : ' (changed)'}.\n` +
+    `Additional trusted origins: ${count(planned.extraOrigins)}${planned.extraOrigins === before.extraOrigins ? ' (unchanged)' : ' (changed)'}.\n` +
+    'Only the app container will be recreated; PostgreSQL and named volumes are not intentionally recreated or removed.\n' +
+    'The app may run database migrations on startup. Back up the database and any files in the app container writable layer first; that layer will be lost.\n' +
+    'Ensure the listed admin accounts already exist and disable public registration before exposing this service.\n' +
+    (planned.admins.trim() ? '' : 'WARNING: an empty admin list makes every signed-in user an admin.\n') +
+    'Do not run another start, stop, apply, or edit the .env at the same time.';
+  if (!(await confirm(message, `APPLY ${state.project}`))) { console.log('Cancelled; no container was changed.'); process.exitCode = 1; return; }
+  if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during confirmation; no container was changed.');
+  const rechecked = metaContainerSnapshot(ctx, state);
+  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
+    if (rechecked[key] !== before[key]) fail('Container configuration changed during confirmation; no container was changed.');
+  }
+  const finalPlan = renderedMetaSettings(ctx, state, values);
+  checkMetaApplyResources(ctx, state, rechecked, finalPlan);
+  for (const key of ['appUrl', 'admins', 'extraOrigins']) {
+    if (finalPlan[key] !== planned[key]) fail('Rendered settings changed during confirmation; no container was changed.');
+  }
+  if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during preflight; no container was changed.');
+  try { compose(ctx, state, ['up', '-d', '--no-deps', '--force-recreate', '--no-build', 'app']); }
+  catch (error) {
+    console.error('App recreation may have started or partially completed. PostgreSQL and named volumes were not targeted. Check status before retrying.');
+    throw error;
+  }
+  console.log('Compose reported app recreation complete. PostgreSQL and named volumes were not targeted for recreation or removal.');
+  let after;
+  try {
+    after = metaContainerSnapshot(ctx, state);
+    if (after.appId === before.appId || after.postgresId !== before.postgresId || after.password !== before.password || after.secret !== before.secret ||
+        after.appUrl !== planned.appUrl || after.admins !== planned.admins || after.extraOrigins !== planned.extraOrigins) {
+      fail('The resulting app configuration or PostgreSQL identity is unexpected.');
+    }
+    await waitMetaHealth(state);
+    requireRunningMetaApp(ctx, state, after.appId);
+    const current = metaContainerSnapshot(ctx, state);
+    for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
+      if (current[key] !== after[key]) fail('Container configuration changed during the health check.');
+    }
+    checkMetaApplyResources(ctx, state, current, finalPlan, { after: true });
+  } catch (error) {
+    console.error('App recreation may have completed, but a post-check failed. Inspect status and logs locally before retrying.');
+    throw error;
+  }
+  console.log(`Applied MetaMCP origin and admin/trusted-origin settings. Current app origin: ${after.appUrl}`);
+  console.log('Verify the HTTPS proxy, authentication and administrator permissions separately; the health check alone does not verify them.');
 }
 // Gateway diagnostics run inside the verified kit container. The control key
 // never appears in command arguments or is sent to an unrelated host port.
@@ -566,7 +875,7 @@ function connectLocalProjects(ctx, globalState, metaDir, detach) {
 
 try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'recover-env'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|recover-env} --dir DIR [--port PORT] [--app-url URL] [--delete-volumes] [--meta-dir DIR] [--server ID]');
+  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'check-env', 'recover-env'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|check-env|recover-env} --dir DIR [--port PORT] [--app-url URL] [--delete-volumes] [--meta-dir DIR] [--server ID]');
   const opts = parseArgs(argv);
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
   if (opts.metaDir && !['link', 'unlink'].includes(action)) fail('--meta-dir is only valid for link/unlink.');
@@ -583,18 +892,21 @@ try {
   let envError = null;
   if (action === 'status') {
     try { readEnv(state.base, state.type); } catch (error) { envError = error; }
-  } else if (!['stop', 'recover-env'].includes(action)) readEnv(state.base, state.type);
+  } else if (!['stop', 'check-env', 'recover-env'].includes(action)) readEnv(state.base, state.type);
   const ctx = dockerContext();
   if (isInit || action === 'start') await start(ctx, state);
   else if (action === 'stop') stopOwnedContainers(ctx, state);
+  else if (action === 'check-env') checkMetaEnv(ctx, state);
   else if (action === 'recover-env') await recoverMetaEnv(ctx, state);
   else if (action === 'link' || action === 'unlink') connectLocalProjects(ctx, state, opts.metaDir, action === 'unlink');
   else if (action === 'apply') {
-    if (state.type !== 'global') fail('apply is only for GLOBAL services.');
-    checkResources(ctx, state);
-    ensureImages(ctx, state);
-    console.log('Recreating only the kit gateway, Graphiti and Cognee containers to apply configuration. Named volumes are preserved.');
-    compose(ctx, state, ['up', '-d', '--no-deps', '--force-recreate', '--no-build', 'gateway', 'graphiti', 'cognee']);
+    if (state.type === 'meta') await applyMetaConfig(ctx, state);
+    else {
+      checkResources(ctx, state);
+      ensureImages(ctx, state);
+      console.log('Recreating only the kit gateway, Graphiti and Cognee containers to apply configuration. Named volumes are preserved.');
+      compose(ctx, state, ['up', '-d', '--no-deps', '--force-recreate', '--no-build', 'gateway', 'graphiti', 'cognee']);
+    }
   } else if (action === 'remove') {
     const expected = `${opts.deleteVolumes ? 'DELETE' : 'REMOVE'} ${state.project}`;
     const warning = opts.deleteVolumes

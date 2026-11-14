@@ -17,6 +17,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: metamcp_db
       DATABASE_URL: postgresql://metamcp_user:${POSTGRES_PASSWORD}@postgres:5432/metamcp_db
+      # MCPKIT_APP_URL is the validated private APP_URL, or the initial origin
+      # saved in state.json for installations created before APP_URL existed.
       APP_URL: ${MCPKIT_APP_URL}
       NEXT_PUBLIC_APP_URL: ${MCPKIT_APP_URL}
       # Better Auth checks the explicit trustedOrigins array on POST. The
