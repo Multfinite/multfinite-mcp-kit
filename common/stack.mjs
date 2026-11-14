@@ -168,8 +168,14 @@ function inspect(ctx, kind, name) {
   const format = kind === 'container' || kind === 'image' ? '{{json .Config.Labels}}' : '{{json .Labels}}';
   const result = run('docker', ['--context', ctx, kind, 'inspect', '--format', format, name], { capture: true, allowFailure: true });
   if (result.status !== 0) {
-    if (/no such (?:container|image|network|volume|object)/i.test(result.stderr || '')) return null;
-    fail(`Cannot inspect ${kind} ${name}: ${(result.stderr || '').trim().slice(-500)}`);
+    const error = (result.stderr || '').trim();
+    // Docker Engine also reports a missing network as "network NAME not
+    // found" rather than "No such network". Match the requested kind and
+    // exact name so unrelated daemon/permission errors still fail closed.
+    const namedMissing = `Error response from daemon: ${kind} ${name} not found`;
+    if (/no such (?:container|image|network|volume|object)/i.test(error) ||
+        error.toLowerCase() === namedMissing.toLowerCase()) return null;
+    fail(`Cannot inspect ${kind} ${name}: ${error.slice(-500)}`);
   }
   try { return JSON.parse(result.stdout.trim()) || {}; } catch { fail(`Invalid labels on ${kind} ${name}.`); }
 }
