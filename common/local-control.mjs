@@ -129,8 +129,7 @@ function requireSettled(status) {
   }
 }
 async function start() {
-  const [major, minor] = process.versions.node.split('.').map(Number);
-  if (major < 22 || (major === 22 && minor < 12)) fail('Node.js 22.12 or newer is required to run the LOCAL packages.');
+  if (Number(process.versions.node.split('.')[0]) < 24) fail('Node.js 24 or newer is required to run the LOCAL packages.');
   const { settings } = getConfig();
   const lockPath = path.join(priv, 'start.lock');
   let lock;

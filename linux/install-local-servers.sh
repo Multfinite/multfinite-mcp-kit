@@ -6,9 +6,11 @@ dir="${1:-$HOME/mcp-kit/local}"
 port="${2:-13001}"
 [ "$#" -le 2 ] || { echo "Usage: $0 [DIRECTORY] [GATEWAY_PORT]" >&2; exit 2; }
 for cmd in node npm python3 git; do
-    command -v "$cmd" >/dev/null || { echo "Missing $cmd. Install it first; Node.js >=22.12 and Python >=3.11,<3.15 are required." >&2; exit 1; }
+    command -v "$cmd" >/dev/null || { echo "Missing $cmd. Install it first; Node.js >=24 and Python >=3.11,<3.15 are required." >&2; exit 1; }
 done
-node -e 'const [a,b]=process.versions.node.split(".").map(Number); if(a<22 || (a===22 && b<12)) { console.error("Node.js >=22.12 is required by the LOCAL packages."); process.exit(1); }'
+# The pinned filesystem server requires Node 24, not just Node 22. Check
+# before initializing or modifying any installation directory.
+node -e 'if(Number(process.versions.node.split(".")[0])<24) { console.error("Node.js >=24 is required by the LOCAL packages."); process.exit(1); }'
 python3 -c 'import sys; sys.exit(0 if (3,11) <= sys.version_info < (3,15) else "Python >=3.11 and <3.15 is required by the LOCAL packages")'
 dir="$(node -e 'console.log(require("path").resolve(process.argv[1]))' "$dir")"
 node "$HERE/../common/local-control.mjs" init "$dir" "$port"

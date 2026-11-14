@@ -264,7 +264,7 @@ function Start-Gateway {
     $lockFile = Join-Path $PrivateDir 'start.lock'
     try { $lock = [IO.File]::Open($lockFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
     catch [IO.IOException] {
-        if (Test-Path -LiteralPath $lockFile) { throw "Another start may be in progress. If it crashed, inspect and remove $lockFile before retrying." }
+        if (Test-Path -LiteralPath $lockFile) { throw "Another gateway lifecycle action may be in progress. If it crashed, inspect and remove $lockFile before retrying." }
         throw
     }
     try {
@@ -343,18 +343,32 @@ function Start-Gateway {
 }
 function Stop-Gateway {
     Write-KitHeader 'Stopping Windows gateway'
-    $current = Get-RunningState
-    if (-not $current) { Write-KitInfo 'Gateway is not running.'; return }
-    $null = Invoke-Control $current.state 'stop'
-    for ($i = 0; $i -lt 60; $i++) {
-        Start-Sleep -Milliseconds 250
-        if (-not (Test-ProcessAlive $current.state.pid)) {
-            Remove-StateIfMatching $current.state.instanceId
-            Write-KitOk 'Gateway and its child servers stopped; data and configuration were kept.'
-            return
-        }
+    if (-not (Test-Path -LiteralPath $PrivateDir -PathType Container)) { Write-KitInfo 'Gateway is not running.'; return }
+    # Serialize the state-changing part of stop with an acquired start lock,
+    # rather than reporting an in-progress launch as already stopped.
+    $lockFile = Join-Path $PrivateDir 'start.lock'
+    try { $lock = [IO.File]::Open($lockFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
+    catch [IO.IOException] {
+        if (Test-Path -LiteralPath $lockFile) { throw "Another gateway lifecycle action may be in progress. If it crashed, inspect and remove $lockFile before retrying." }
+        throw
     }
-    throw 'Shutdown was not confirmed. Inspect logs gateway; no unrelated process was killed.'
+    try {
+        $current = Get-RunningState
+        if (-not $current) { Write-KitInfo 'Gateway is not running.'; return }
+        $null = Invoke-Control $current.state 'stop'
+        for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 250
+            if (-not (Test-ProcessAlive $current.state.pid)) {
+                Remove-StateIfMatching $current.state.instanceId
+                Write-KitOk 'Gateway and its child servers stopped; data and configuration were kept.'
+                return
+            }
+        }
+        throw 'Shutdown was not confirmed. Inspect logs gateway; no unrelated process was killed.'
+    } finally {
+        $lock.Dispose()
+        Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+    }
 }
 function Get-GatewayStatus {
     Write-KitHeader 'Windows gateway status'
