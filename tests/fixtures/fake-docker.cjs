@@ -154,8 +154,9 @@ async function main() {
       const mode = text.match(/\\set local_force '(true|false|skip-only|reset-all)'/)?.[1];
       if (!mode || !command.some((arg) => arg.endsWith('-postgres'))) fail('invalid local seed mode or container');
       const previous = state.sharedSeed;
-      if (mode === 'skip-only' && previous?.version !== 3) { console.log('needs-apply|||||'); return; }
-      const result = previous?.version === 3 && !['true', 'reset-all'].includes(mode) ? 'skipped' : 'seeded';
+      const initialized = [3, 4].includes(previous?.version);
+      if (mode === 'skip-only' && !initialized) { console.log('needs-apply|||||'); return; }
+      const result = initialized && !['true', 'reset-all'].includes(mode) ? 'skipped' : 'seeded';
       if (result === 'seeded') {
         if (state.running || !state.databaseBackups?.length) fail('app must be stopped and PostgreSQL backed up before applying seed');
         if (mode === 'reset-all') {
@@ -165,10 +166,11 @@ async function main() {
           state.seedRecords = {};
           state.manualRecords = [];
         }
-        state.sharedSeed = { serverCount: 13, owner: null, version: 3,
+        const version = mode === 'reset-all' || !previous || previous.version === 4 ? 4 : 3;
+        state.sharedSeed = { serverCount: 13, owner: null, version,
           serverNames: ['desktop-commander', 'everything-search', 'filesystem', 'windows-mcp', 'git', 'codegraph',
             'codebase-memory-mcp', 'serena', 'playwright', 'dbhub', 'simple-files-vectorstore', 'markitdown', 'obsidian'],
-          groups: ['code', 'data', 'files', 'memory', 'system', 'web'].map((suffix) => `${base}-${suffix}`) };
+          groups: ['code', 'data', 'files', 'memory', 'system', 'web'].map((suffix) => version === 4 ? suffix : `${base}-${suffix}`) };
         for (const legacy of Object.values(state.seedRecords || {})) {
           legacy.owner = null; legacy.serverCount = 0; legacy.endpointPublic = true;
         }

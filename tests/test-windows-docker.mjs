@@ -87,7 +87,7 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     assert.ok(firstDocker.sharedSeed.serverNames.includes('filesystem'));
     assert.ok(firstDocker.sharedSeed.serverNames.every((name) => !name.startsWith('winpub-')));
     for (const suffix of ['system', 'files', 'code', 'web', 'data', 'memory']) {
-      assert.match(first.stdout, new RegExp(`http://localhost:12080/metamcp/local-${settings.hostId}-${suffix}/mcp`));
+      assert.match(first.stdout, new RegExp(`http://localhost:12080/metamcp/${suffix}/mcp`));
     }
     assert.match(first.stdout, /Docker Desktop can reach the authenticated loopback/);
     assert.match(first.stdout, /MetaMCP: http:\/\/localhost:12080/);
@@ -186,14 +186,14 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).signupDisabled, true);
     // Partial seed diagnostics must not hide the other usable groups.
     const withWarnings = readJson(setup.env.MCP_TEST_DOCKER_STATE);
-    withWarnings.seedWarnings = { blocked: `local-${settings.hostId}-web`, conflicts: 'server:git', deferred: 'obsidian' };
+    withWarnings.seedWarnings = { blocked: 'web', conflicts: 'server:git', deferred: 'obsidian' };
     writeJson(setup.env.MCP_TEST_DOCKER_STATE, withWarnings);
     const warningResult = invoke(env, setup.runner, 'seed'); success(warningResult);
     assert.match(warningResult.stdout, /unauthenticated endpoint/i);
     assert.match(warningResult.stdout, /could not be safely merged or linked/);
     assert.match(warningResult.stdout, /legacy mappings were not added/);
-    assert.match(warningResult.stdout, new RegExp(`local-${settings.hostId}-code/mcp`));
-    assert.doesNotMatch(warningResult.stdout, new RegExp(`local-${settings.hostId}-web/mcp`));
+    assert.match(warningResult.stdout, /metamcp\/code\/mcp/);
+    assert.doesNotMatch(warningResult.stdout, /metamcp\/web\/mcp/);
     const afterWarnings = readJson(setup.env.MCP_TEST_DOCKER_STATE);
     delete afterWarnings.seedWarnings; writeJson(setup.env.MCP_TEST_DOCKER_STATE, afterWarnings);
 

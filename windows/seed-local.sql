@@ -24,9 +24,13 @@ DECLARE
     base_url text;
     marker text;
     v2_marker text;
+    v3_marker text;
+    v4_marker text;
     legacy_prefix text := 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_V1:';
     v2_exists boolean;
-    v3_exists boolean;
+    initialized boolean;
+    short_names boolean;
+    group_prefix text;
     legacy_markers integer;
     legacy_owners integer;
     owner_row record;
@@ -110,23 +114,32 @@ BEGIN
     base_name := 'local-' || host_id;
     -- Never send the gateway key to an arbitrary URL.
     base_url := 'http://host.docker.internal:' || port_text;
-    marker := 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V3:' || host_id;
     v2_marker := 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V2:' || host_id;
+    v3_marker := 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V3:' || host_id;
+    v4_marker := 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V4:' || host_id;
     PERFORM pg_advisory_xact_lock(hashtext('multfinite-mcp-kit:local-docker-seed-v1'));
     v2_exists := EXISTS (SELECT 1 FROM config WHERE id = v2_marker);
-    v3_exists := EXISTS (SELECT 1 FROM config WHERE id = marker);
+    -- Fresh installations and the explicitly confirmed reset use short group
+    -- names. Older installations keep their existing names until reset: an
+    -- ordinary start must not silently rename or delete their endpoints.
+    short_names := reset_all OR EXISTS (SELECT 1 FROM config WHERE id = v4_marker)
+        OR NOT (v2_exists OR EXISTS (SELECT 1 FROM config WHERE id = v3_marker)
+            OR EXISTS (SELECT 1 FROM config c WHERE starts_with(c.id, legacy_prefix)
+                       AND right(c.id, length(host_id) + 1) = ':' || host_id));
+    marker := CASE WHEN short_names THEN v4_marker ELSE v3_marker END;
+    group_prefix := CASE WHEN short_names THEN '' ELSE base_name || '-' END;
+    initialized := EXISTS (SELECT 1 FROM config WHERE id = marker);
 
-    -- V2 stored the UUIDs of the namespaces it created. Import those on the
-    -- first V3 run; names alone are not proof that a namespace is kit-owned.
+    -- Import recorded UUIDs rather than adopting a namespace by name alone.
     BEGIN
-        SELECT c.value::jsonb INTO diagnostics FROM config c WHERE c.id = CASE WHEN v3_exists THEN marker ELSE v2_marker END;
+        SELECT c.value::jsonb INTO diagnostics FROM config c WHERE c.id = CASE WHEN initialized THEN marker ELSE v2_marker END;
         IF jsonb_typeof(diagnostics->'namespaces') = 'object' THEN known_namespaces := diagnostics->'namespaces'; END IF;
         IF jsonb_typeof(diagnostics->'servers') = 'object' THEN known_servers := diagnostics->'servers'; END IF;
         IF jsonb_typeof(diagnostics->'legacyNamespaces') = 'object' THEN known_legacy := diagnostics->'legacyNamespaces'; END IF;
     EXCEPTION WHEN invalid_text_representation THEN NULL;
     END;
 
-    IF NOT forced AND v3_exists THEN
+    IF NOT forced AND initialized THEN
         PERFORM set_config('mcpkit.local_result', 'skipped', false);
         IF jsonb_typeof(diagnostics) = 'object' THEN
             IF COALESCE(diagnostics->>'blocked', '') ~ '^[a-z0-9_,:-]*$' THEN
@@ -202,9 +215,10 @@ BEGIN
             -- other host IDs in this dedicated database. Other config stays.
             DELETE FROM config WHERE starts_with(id, 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_V1:')
                 OR starts_with(id, 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V2:')
-                OR starts_with(id, 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V3:');
+                OR starts_with(id, 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V3:')
+                OR starts_with(id, 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_PUBLIC_V4:');
             v2_exists := false;
-            v3_exists := false;
+            initialized := false;
             known_namespaces := '{}'::jsonb;
             known_servers := '{}'::jsonb;
             known_legacy := '{}'::jsonb;
@@ -454,7 +468,7 @@ BEGIN
             ('memory', 'Notes and document memory', ARRAY['simple-files-vectorstore', 'obsidian']::text[])
         ) AS defaults(suffix, description, servers)
         LOOP
-            group_name := base_name || '-' || group_spec.suffix;
+            group_name := group_prefix || group_spec.suffix;
             SELECT count(*), min(n.uuid::text)::uuid INTO namespace_matches, namespace_id
             FROM namespaces n WHERE n.name = group_name AND n.user_id IS NULL;
             IF namespace_matches > 1 OR EXISTS (SELECT 1 FROM namespaces n WHERE n.name = group_name AND n.user_id IS NOT NULL) THEN
@@ -620,8 +634,11 @@ BEGIN
             OR EXISTS (SELECT 1 FROM mcpkit_chosen c JOIN mcp_servers s ON s.uuid = c.server_uuid
                        WHERE s.name <> c.id OR s.user_id IS NOT NULL OR NOT c.default_connection)
             OR (SELECT count(*) FROM namespaces) <> 6
+            OR (SELECT count(DISTINCT n.name) FROM namespaces n WHERE n.user_id IS NULL
+                AND n.name IN ('system', 'files', 'code', 'web', 'data', 'memory')) <> 6
             OR (SELECT count(*) FROM endpoints) <> 6
-            OR (SELECT count(*) FROM endpoints e WHERE e.user_id IS NULL AND e.enable_api_key_auth AND NOT e.enable_oauth) <> 6
+            OR (SELECT count(*) FROM endpoints e WHERE e.name IN ('system', 'files', 'code', 'web', 'data', 'memory')
+                AND e.user_id IS NULL AND e.enable_api_key_auth AND NOT e.enable_oauth) <> 6
             OR (SELECT count(*) FROM namespace_server_mappings WHERE status = 'ACTIVE') <> 13
             OR (SELECT count(*) FROM namespace_server_mappings) <> 13
             OR EXISTS (SELECT 1 FROM tools)
@@ -648,17 +665,17 @@ BEGIN
         SELECT unnest(string_to_array(current_setting('mcpkit.local_blocked'), ',')) AS name
         UNION ALL
         SELECT n.name FROM namespaces n JOIN endpoints e ON e.namespace_uuid = n.uuid
-        WHERE n.user_id IS NULL AND n.name IN (base_name || '-system', base_name || '-files', base_name || '-code',
-                                               base_name || '-web', base_name || '-data', base_name || '-memory')
+        WHERE n.user_id IS NULL AND n.name IN (group_prefix || 'system', group_prefix || 'files', group_prefix || 'code',
+                                               group_prefix || 'web', group_prefix || 'data', group_prefix || 'memory')
           AND NOT e.enable_api_key_auth AND NOT e.enable_oauth
     ) b WHERE b.name <> '';
     PERFORM set_config('mcpkit.local_blocked', COALESCE(current_blocked, ''), false);
     SELECT string_agg(e.name, ',' ORDER BY e.name) INTO available_groups
     FROM endpoints e JOIN namespaces n ON n.uuid = e.namespace_uuid
-    WHERE e.name IN (base_name || '-system', base_name || '-files', base_name || '-code',
-                     base_name || '-web', base_name || '-data', base_name || '-memory')
+    WHERE e.name IN (group_prefix || 'system', group_prefix || 'files', group_prefix || 'code',
+                     group_prefix || 'web', group_prefix || 'data', group_prefix || 'memory')
       AND n.name = e.name AND n.user_id IS NULL AND e.user_id IS NULL
-      AND n.uuid::text = known_namespaces->>substr(n.name, length(base_name) + 2)
+      AND n.uuid::text = known_namespaces->>substr(n.name, length(group_prefix) + 1)
       AND (e.enable_api_key_auth OR e.enable_oauth)
       AND NOT EXISTS (SELECT 1 FROM namespaces other WHERE other.name = n.name AND other.uuid <> n.uuid)
       AND NOT EXISTS (SELECT 1 FROM endpoints open_endpoint WHERE open_endpoint.namespace_uuid = n.uuid

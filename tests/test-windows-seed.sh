@@ -24,8 +24,9 @@ run_seed() {
 }
 base='local-workstation-abc123'
 public="winpub-$(query "SELECT substr(md5('workstation-abc123'),1,8)")"
-groups="$base-code,$base-data,$base-files,$base-memory,$base-system,$base-web"
-without_code="$base-data,$base-files,$base-memory,$base-system,$base-web"
+groups="code,data,files,memory,system,web"
+legacy_groups="$base-code,$base-data,$base-files,$base-memory,$base-system,$base-web"
+without_code="data,files,memory,system,web"
 # The V1 and V2 layouts below reproduce their names, connections and markers.
 specs="('desktop-commander','Desktop Commander','desktop','system'),
 ('everything-search','Everything Search','everything','files'),
@@ -73,7 +74,7 @@ assert_eq '0' "$(query 'SELECT count(*) FROM mcp_servers')" 'preflight makes no 
 assert_eq "seeded||$groups|||" "$(run_seed)" 'fresh public seed without an account'
 assert_eq '0|13|6|6|13|true' "$(query "SELECT (SELECT count(*) FROM users)||'|'||(SELECT count(*) FROM mcp_servers WHERE user_id IS NULL)||'|'||(SELECT count(*) FROM namespaces WHERE user_id IS NULL)||'|'||(SELECT count(*) FROM endpoints WHERE user_id IS NULL AND enable_api_key_auth AND NOT enable_oauth)||'|'||(SELECT count(*) FROM namespace_server_mappings)||'|'||(SELECT value FROM config WHERE id='DISABLE_SIGNUP')")" '13 shared servers and six protected groups; signup unchanged'
 assert_eq 'codebase-memory-mcp,codegraph,dbhub,desktop-commander,everything-search,filesystem,git,markitdown,obsidian,playwright,serena,simple-files-vectorstore,windows-mcp' "$(query 'SELECT string_agg(name,chr(44) ORDER BY name) FROM mcp_servers')" 'official short names only'
-assert_eq 'code:4,data:1,files:3,memory:2,system:2,web:1' "$(query "SELECT string_agg(suffix || ':' || cnt, ',' ORDER BY suffix) FROM (SELECT substr(n.name, length('$base') + 2) suffix, count(*) cnt FROM namespaces n JOIN namespace_server_mappings m ON n.uuid=m.namespace_uuid GROUP BY n.name) x")" 'each server is mapped to its intended group'
+assert_eq 'code:4,data:1,files:3,memory:2,system:2,web:1' "$(query "SELECT string_agg(suffix || ':' || cnt, ',' ORDER BY suffix) FROM (SELECT n.name suffix, count(*) cnt FROM namespaces n JOIN namespace_server_mappings m ON n.uuid=m.namespace_uuid GROUP BY n.name) x")" 'each server is mapped to its intended group'
 assert_eq "skipped||$groups|||" "$(run_seed '' skip-only)" 'ordinary restart is read-only'
 assert_eq 'missing|||||' "$(run_seed nobody@example.com true)" 'unknown explicit account does not create a user'
 query "INSERT INTO users(id,email) VALUES ('alice','alice@example.com'),('bob','bob@example.com');" >/dev/null
@@ -84,22 +85,23 @@ assert_eq 'ambiguous|||||' "$(run_seed alice@example.com true)" 'case-insensitiv
 
 # Repeats preserve deletions, user edits and disabled mappings. Explicit repair
 # restores missing defaults without overwriting edited connections or statuses.
-query "DELETE FROM endpoints WHERE name='$base-code'; DELETE FROM mcp_servers WHERE name='playwright' AND user_id IS NULL;
+query "DELETE FROM endpoints WHERE name='code'; DELETE FROM mcp_servers WHERE name='playwright' AND user_id IS NULL;
  UPDATE namespace_server_mappings SET status='INACTIVE' WHERE mcp_server_uuid=(SELECT uuid FROM mcp_servers WHERE name='filesystem');
  UPDATE mcp_servers SET url='http://example.com/custom' WHERE name='dbhub';" >/dev/null
 assert_eq "skipped||$without_code|||" "$(run_seed '' skip-only)" 'automatic repeat preserves deletions'
-assert_eq '0|0|INACTIVE|http://example.com/custom' "$(query "SELECT (SELECT count(*) FROM endpoints WHERE name='$base-code')||'|'||(SELECT count(*) FROM mcp_servers WHERE name='playwright')||'|'||(SELECT m.status FROM namespace_server_mappings m JOIN mcp_servers s ON m.mcp_server_uuid=s.uuid WHERE s.name='filesystem')||'|'||(SELECT url FROM mcp_servers WHERE name='dbhub')")" 'deleted and customized records are untouched'
+assert_eq '0|0|INACTIVE|http://example.com/custom' "$(query "SELECT (SELECT count(*) FROM endpoints WHERE name='code')||'|'||(SELECT count(*) FROM mcp_servers WHERE name='playwright')||'|'||(SELECT m.status FROM namespace_server_mappings m JOIN mcp_servers s ON m.mcp_server_uuid=s.uuid WHERE s.name='filesystem')||'|'||(SELECT url FROM mcp_servers WHERE name='dbhub')")" 'deleted and customized records are untouched'
 assert_eq "seeded||$groups|||" "$(run_seed '' true)" 'explicit repair restores only missing defaults'
-assert_eq '1|1|INACTIVE|http://example.com/custom' "$(query "SELECT (SELECT count(*) FROM endpoints WHERE name='$base-code')||'|'||(SELECT count(*) FROM mcp_servers WHERE name='playwright')||'|'||(SELECT m.status FROM namespace_server_mappings m JOIN mcp_servers s ON m.mcp_server_uuid=s.uuid WHERE s.name='filesystem')||'|'||(SELECT url FROM mcp_servers WHERE name='dbhub')")" 'repair preserves edits and inactive mapping'
-query "UPDATE endpoints SET enable_api_key_auth=false WHERE name='$base-memory';" >/dev/null
-assert_has "$(run_seed '' skip-only)" "|$base-memory|" 'a subsequently opened endpoint is reported'
-query "DELETE FROM namespaces WHERE name='$base-code'; INSERT INTO namespaces(name,user_id) VALUES ('$base-code',NULL);
- INSERT INTO endpoints(name,namespace_uuid,enable_api_key_auth,user_id) SELECT 'foreign-code',uuid,true,NULL FROM namespaces WHERE name='$base-code';" >/dev/null
-assert_has "$(run_seed '' true)" "namespace:$base-code" 'replacement namespace is not adopted'
-assert_eq 0 "$(query "SELECT count(*) FROM namespace_server_mappings m JOIN namespaces n ON n.uuid=m.namespace_uuid WHERE n.name='$base-code'")" 'no tools are added to a foreign namespace'
+assert_eq '1|1|INACTIVE|http://example.com/custom' "$(query "SELECT (SELECT count(*) FROM endpoints WHERE name='code')||'|'||(SELECT count(*) FROM mcp_servers WHERE name='playwright')||'|'||(SELECT m.status FROM namespace_server_mappings m JOIN mcp_servers s ON m.mcp_server_uuid=s.uuid WHERE s.name='filesystem')||'|'||(SELECT url FROM mcp_servers WHERE name='dbhub')")" 'repair preserves edits and inactive mapping'
+query "UPDATE endpoints SET enable_api_key_auth=false WHERE name='memory';" >/dev/null
+assert_has "$(run_seed '' skip-only)" "|memory|" 'a subsequently opened endpoint is reported'
+query "DELETE FROM namespaces WHERE name='code'; INSERT INTO namespaces(name,user_id) VALUES ('code',NULL);
+ INSERT INTO endpoints(name,namespace_uuid,enable_api_key_auth,user_id) SELECT 'foreign-code',uuid,true,NULL FROM namespaces WHERE name='code';" >/dev/null
+assert_has "$(run_seed '' true)" "namespace:code" 'replacement namespace is not adopted'
+assert_eq 0 "$(query "SELECT count(*) FROM namespace_server_mappings m JOIN namespaces n ON n.uuid=m.namespace_uuid WHERE n.name='code'")" 'no tools are added to a foreign namespace'
 
 # An actual V1-shaped installation is promoted in place. The old endpoint and
 # server UUIDs survive; disabled server/tool statuses and overrides are copied.
+groups="$legacy_groups"
 reset_db
 setup_legacy alice alice@example.com "$base"
 old_filesystem="$(query "SELECT uuid FROM mcp_servers WHERE name='$base-filesystem'")"
@@ -233,13 +235,13 @@ assert_eq "seeded||$groups|||" "$(run_seed '' true)" 'after resolving overrides,
 # Existing open or foreign namespaces are not used, even on explicit repair.
 reset_db
 query "INSERT INTO users(id,email) VALUES ('bob','bob@example.com');
- INSERT INTO namespaces(name,user_id) VALUES ('$base-files','bob'),('$base-web',NULL),('other','bob');
- INSERT INTO endpoints(name,namespace_uuid,enable_api_key_auth,user_id) SELECT 'open-web',uuid,false,NULL FROM namespaces WHERE name='$base-web';
- INSERT INTO endpoints(name,namespace_uuid,enable_api_key_auth,user_id) SELECT '$base-data',uuid,true,'bob' FROM namespaces WHERE name='other';
+ INSERT INTO namespaces(name,user_id) VALUES ('files','bob'),('web',NULL),('other','bob');
+ INSERT INTO endpoints(name,namespace_uuid,enable_api_key_auth,user_id) SELECT 'open-web',uuid,false,NULL FROM namespaces WHERE name='web';
+ INSERT INTO endpoints(name,namespace_uuid,enable_api_key_auth,user_id) SELECT 'data',uuid,true,'bob' FROM namespaces WHERE name='other';
  INSERT INTO mcp_servers(name,type,command,user_id) VALUES ('git','STDIO','foreign-one',NULL),('git','STDIO','foreign-two',NULL),('serena','STDIO','custom','bob');" >/dev/null
 conflicted="$(run_seed)"
-assert_has "$conflicted" "|$base-web|" 'open namespace is reported'
-for problem in "namespace:$base-files" "endpoint:$base-data" 'server:git' 'server:serena'; do assert_has "$conflicted" "$problem" 'foreign name is reported'; done
-assert_eq '0|0|2|1' "$(query "SELECT (SELECT count(*) FROM endpoints WHERE name='$base-web')||'|'||(SELECT count(*) FROM namespace_server_mappings m JOIN namespaces n ON n.uuid=m.namespace_uuid WHERE n.name='$base-web')||'|'||(SELECT count(*) FROM mcp_servers WHERE name='git')||'|'||(SELECT count(*) FROM mcp_servers WHERE name='serena' AND user_id='bob')")" 'foreign/open records remain intact'
+assert_has "$conflicted" "|web|" 'open namespace is reported'
+for problem in "namespace:files" "endpoint:data" 'server:git' 'server:serena'; do assert_has "$conflicted" "$problem" 'foreign name is reported'; done
+assert_eq '0|0|2|1' "$(query "SELECT (SELECT count(*) FROM endpoints WHERE name='web')||'|'||(SELECT count(*) FROM namespace_server_mappings m JOIN namespaces n ON n.uuid=m.namespace_uuid WHERE n.name='web')||'|'||(SELECT count(*) FROM mcp_servers WHERE name='git')||'|'||(SELECT count(*) FROM mcp_servers WHERE name='serena' AND user_id='bob')")" 'foreign/open records remain intact'
 
 echo 'Windows local short-name migration scenarios passed.'

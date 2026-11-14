@@ -137,22 +137,22 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 Для **новой полной установки** используйте `.\windows\install-local.ps1`. Установщик применяет WinGet для недостающих Git, Docker Desktop, Node, Everything и, с согласия, C++ Build Tools; ставит все 13 серверов в изолированные каталоги, Everything SDK и Chromium. `-NonInteractive -InstallBuildTools` запускает полную установку без вопросов; `-SkipEverything` / `-SkipBrowserDownload` явно пропускают эти компоненты.
 
-При запуске автоматически создаются 13 **общих/public** MCP-серверов с короткими именами и шесть тематических public namespace и endpoints. Учётная запись для создания этих записей не требуется. `<hostId>` берётся из `config\local-settings.json` и входит только в имена групп, не серверов; актуальные адреса выводит `start` или `seed`.
+При первой установке создаются 13 **общих/public** MCP-серверов с короткими именами и шесть тематических public namespaces и endpoints тоже без префиксов. Учётная запись для создания этих записей не требуется; актуальные адреса выводит `start` или `seed`.
 
 | Namespace и endpoint | Точные имена серверов в MetaMCP |
 | --- | --- |
-| `local-<hostId>-system` | `desktop-commander`, `windows-mcp` |
-| `local-<hostId>-files` | `everything-search`, `filesystem`, `markitdown` |
-| `local-<hostId>-code` | `git`, `codegraph`, `codebase-memory-mcp`, `serena` |
-| `local-<hostId>-web` | `playwright` |
-| `local-<hostId>-data` | `dbhub` |
-| `local-<hostId>-memory` | `simple-files-vectorstore`, `obsidian` |
+| `system` | `desktop-commander`, `windows-mcp` |
+| `files` | `everything-search`, `filesystem`, `markitdown` |
+| `code` | `git`, `codegraph`, `codebase-memory-mcp`, `serena` |
+| `web` | `playwright` |
+| `data` | `dbhub` |
+| `memory` | `simple-files-vectorstore`, `obsidian` |
 
 После первого запуска новой установки:
 
 1. Откройте `http://localhost:13008` и **самостоятельно зарегистрируйтесь**. Скрипт не создаёт учётную запись и не выбирает пароль.
 2. В MetaMCP откройте **Настройки → Настройки авторизации** и включите **«Отключить регистрацию через форму»**. При необходимости отдельно отключите регистрацию через SSO. Скрипт не изменяет эти настройки при перезапуске.
-3. В **API Keys** создайте личный ключ и передайте его MCP-клиенту в `Authorization: Bearer <ключ>` (или `X-API-Key: <ключ>`). Выберите только нужную группу, например `http://localhost:13008/metamcp/local-<hostId>-code/mcp`; для SSE замените `/mcp` на `/sse`. Ключ шлюза Windows — отдельный секрет.
+3. В **API Keys** создайте личный ключ и передайте его MCP-клиенту в `Authorization: Bearer <ключ>` (или `X-API-Key: <ключ>`). Выберите только нужную группу, например `http://localhost:13008/metamcp/code/mcp`; для SSE замените `/mcp` на `/sse`. Ключ шлюза Windows — отдельный секрет.
 
 **Public в MetaMCP** означает, что записи видны всем его пользователям, а не анонимный доступ или публикацию в интернет. Новые endpoints требуют API key и по умолчанию доступны только на loopback. Любой действующий ключ MetaMCP, имеющий доступ к public endpoint, позволяет вызывать его инструменты, в том числе управлять файлами и рабочим столом: доверяйте всем владельцам ключей и храните ключи приватно.
 
@@ -189,7 +189,7 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 #### Разовый полный сброс записей Windows MetaMCP
 
-Если сохранение старых записей не нужно, можно **явно** сбросить их и создать чистый набор из 13 серверов и шести защищённых групп. Это удалит **все** серверы, namespaces и endpoints в отдельной базе Windows LOCAL MetaMCP, включая добавленные вручную, а также их tool settings, mappings и OAuth-сессии серверов. Строки аудита останутся, но ссылки на удалённые серверы и namespaces будут очищены. Учётные записи, API-ключи MetaMCP, состояние регистрации, файлы и данные Windows-серверов, другие базы и Docker volumes не удаляются. Linux GLOBAL не затрагивается.
+Если сохранение старых записей не нужно, можно **явно** сбросить их и создать чистый набор из 13 серверов и шести защищённых групп с короткими именами. На прежней установке старые имена `local-<hostId>-...` остаются до этого явного сброса: обычный `start` не переименовывает и не удаляет их. Сброс удалит **все** серверы, namespaces и endpoints в отдельной базе Windows LOCAL MetaMCP, включая добавленные вручную, а также их tool settings, mappings и OAuth-сессии серверов. Строки аудита останутся, но ссылки на удалённые серверы и namespaces будут очищены. Учётные записи, API-ключи MetaMCP, состояние регистрации, файлы и данные Windows-серверов, другие базы и Docker volumes не удаляются. Linux GLOBAL не затрагивается.
 
 Сначала сохраните отдельную защищённую резервную копию базы. Затем в корне репозитория выполните:
 

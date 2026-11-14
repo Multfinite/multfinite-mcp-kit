@@ -578,10 +578,11 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '', [bo
         default     { throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.' }
     }
     $baseGroup = 'local-' + $settings.hostId
-    $allowedGroups = foreach ($suffix in @('system', 'files', 'code', 'web', 'data', 'memory')) { $baseGroup + '-' + $suffix }
+    $shortGroups = @('system', 'files', 'code', 'web', 'data', 'memory')
+    $allowedGroups = $shortGroups + @(foreach ($suffix in $shortGroups) { $baseGroup + '-' + $suffix })
     if ($parts[2]) {
         foreach ($group in @($parts[2] -split ',')) {
-            if ($allowedGroups -cnotcontains $group) {
+            if ($allowedGroups -cnotcontains $group -or ($ResetAll -and $shortGroups -cnotcontains $group)) {
                 if ($ResetAll) { throw 'The reset may have committed, but its endpoint names are unexpected. Inspect MetaMCP before retrying.' }
                 throw 'Unexpected local MetaMCP endpoint name; existing state was not changed.'
             }
