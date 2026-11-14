@@ -1,13 +1,29 @@
+# Multfinite MCP Kit
+
+Комплект содержит два независимых варианта: **GLOBAL на Linux** и **LOCAL на Windows**. Каждый управляет собственным MetaMCP; Windows-установщик не подключает серверы к Linux автоматически. Настройки, данные и ключи этих установок не взаимозаменяемы. Для ручной межмашинной регистрации есть [отдельный низкоуровневый регистратор](docs/configuration.md#linux-низкоуровневая-регистрация-windows-шлюза), но защищённое соединение необходимо настроить самостоятельно.
+
+Для новой копии перейдите в каталог, где хотите разместить проект, и, если Git уже установлен, выполните:
+
+```sh
+git clone https://github.com/Multfinite/multfinite-mcp-kit.git
+cd multfinite-mcp-kit
+```
+
+Если Git ещё не установлен, можно скачать архив через GitHub (**Code → Download ZIP**) и распаковать его; Windows-установщик при необходимости попробует установить Git через WinGet. Остальные команды выполняются из корня полученной копии на соответствующем компьютере.
 
 ## Конфигурация
 
 Подробный справочник по Linux `.env`, Windows JSON-настройкам, переменным Compose и их применению: [docs/configuration.md](docs/configuration.md).
 
-## The idea
+Для отдельной сетевой схемы Windows, WSL 2 и гостевой Windows-ВМ см. [настройку Hyper-V и WSL](docs/wsl-hyperv-network.md). Она необязательна для локальной установки комплекта; подключение WSL к внутреннему коммутатору зависит от версии и не гарантируется.
 
-### Structure
+<a id="the-idea"></a>
+## Концепция
 
-├── 🌐 Global \
+<a id="structure"></a>
+### Состав
+
+├── 🌐 GLOBAL (Linux) \
 │ ├── [sequentialthinking](https://github.com/modelcontextprotocol/servers/tree/main/src/sequentialthinking)  
 │ ├── [graphiti](https://github.com/getzep/graphiti)  
 │ ├── [cognee](https://github.com/topoteretes/cognee)  
@@ -20,7 +36,7 @@
 │ ├── [mcp-compass](https://github.com/liuyoshio/mcp-compass)  
 │ └── [gdrive](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive)  
 │  
-├── 💻 LOCAL \
+├── 💻 LOCAL (Windows) \
 │ ├── [DesktopCommanderMCP](https://github.com/wonderwhy-er/DesktopCommanderMCP)  
 │ ├── [mcp-everything-search](https://github.com/mamertofabian/mcp-everything-search)  
 │ ├── [filesystem-mcp](https://github.com/j0hanz/filesystem-mcp)  
@@ -29,65 +45,82 @@
 │ ├── [codegraph](https://github.com/colbymchenry/codegraph)  
 │ ├── [codebase-memory-mcp](https://github.com/DeusData/codebase-memory-mcp)  
 │ ├── [serena](https://github.com/oraios/serena)  
-│ ├── [playwright-mcp](https://github.com/mcp/microsoft/playwright-mcp)  
-│ ├── [dbhub](https://github.com/mcp/bytebase/dbhub)  
+│ ├── [playwright-mcp](https://github.com/microsoft/playwright-mcp)<br>
+│ ├── [dbhub](https://github.com/bytebase/dbhub)<br>
 │ ├── [simple-files-vectorstore](https://github.com/lishenxydlgzs/simple-files-vectorstore)  
-│ ├── [markitdown](https://github.com/mcp/microsoft/markitdown)  
-│ └── [mcp-obsidian](https://github.com/MarkusPfundstein/mcp-obsidian)  
-│  
-└── 💻 LOCAL (the same as above)\
-&nbsp;&nbsp;&nbsp;&nbsp;├── ...\
-&nbsp;&nbsp;&nbsp;&nbsp;└── ...
+│ ├── [markitdown](https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp)<br>
+│ └── [mcp-obsidian](https://github.com/MarkusPfundstein/mcp-obsidian)
 
 ### MetaMCP
 
-For a public URL, set `APP_URL=https://mcp.example.com` in `~/mcp-global/config/.env`. Every `bash linux/run-global.sh start` syncs it (and `NEXT_PUBLIC_APP_URL`) to MetaMCP's Compose `.env`, which injects them into the container environment; the script checks the running app's environment and recreates only the app if it is stale. To apply immediately without waiting for the next start, run `bash linux/run-global.sh apply-metamcp-config`. Save any manual files in the app container's writable layer before a recreation. A public URL also requires DNS, TLS/reverse proxy or reachable port, and suitable firewall rules. See [the complete configuration reference](docs/configuration.md).
+Для публичного адреса задайте `APP_URL=https://mcp.example.com` в `~/mcp-global/config/.env`. При каждом `bash linux/run-global.sh start` адрес синхронизируется вместе с `NEXT_PUBLIC_APP_URL` в файл `.env` MetaMCP, который читает Compose и передаёт в окружение контейнера; скрипт проверяет окружение работающего приложения и при необходимости пересоздаёт только его. Чтобы применить изменение сразу, не дожидаясь следующего запуска, выполните `bash linux/run-global.sh apply-metamcp-config`. Перед пересозданием сохраните файлы, созданные вручную в записываемом слое контейнера приложения. Для внешнего доступа также нужны DNS, доступный порт, TLS (обычно через обратный прокси) и подходящие правила брандмауэра; не передавайте учётные данные по незащищённой сети. См. [полный справочник конфигурации](docs/configuration.md).
 
-## Installation and run
+<a id="installation-and-run"></a>
+## Установка и запуск
 
-### Global on Linux
+<a id="global-on-linux"></a>
+### GLOBAL на Linux
 
-Requirements: Debian/Ubuntu (or WSL), `sudo`, internet access, and Docker with the Compose plugin accessible without `sudo`. If the Docker executable is absent, the installer adds the official Docker Engine/Compose packages and, if necessary, appends the current user to the `docker` group. That group grants administrator-equivalent privileges; a new login may be required. Existing Docker installations, APT repositories and keyrings are not replaced, and a stopped/inaccessible daemon or missing Compose plugin is reported rather than reinstalled. The first install pulls Graphiti and Cognee images and builds a small Node image; Cognee is large and can require several gigabytes of disk and significant time.
+Требуются Debian/Ubuntu (в том числе в WSL), `sudo`, доступ в интернет и Docker с подключаемым модулем Compose, доступный без `sudo`. Если исполняемого файла Docker нет, установщик добавляет официальные пакеты Docker Engine/Compose и при необходимости добавляет текущего пользователя в группу `docker`. Эта группа даёт права, эквивалентные администраторским; может потребоваться новый вход. Существующие установки Docker, APT-репозитории и связки ключей не заменяются; если демон остановлен или недоступен либо модуль Compose отсутствует, установщик сообщит об этом, а не переустановит Docker. При первой установке загружаются образы Graphiti и Cognee и собирается небольшой образ Node; Cognee большой и может потребовать нескольких гигабайт на диске и значительного времени.
+
+Linux-установщик выполняет неглубокое клонирование **ветки по умолчанию** исходного MetaMCP без закрепления ревизии, только если отсутствует `~/mcp-global/metamcp/.git`. Существующий клон используется без загрузки изменений; установщик также пытается выполнить `docker compose pull`. Поэтому фактические файлы MetaMCP и версии образов в разных установках могут отличаться. Перед изменением существующей установки см. раздел [обновления и восстановления](#обновление-и-восстановление).
 
 ```sh
 bash linux/install-global.sh
 ```
 
-The installer leaves an existing Docker installation alone. If Docker is newly installed and your user is added to the `docker` group, membership takes effect in a new session; if Docker remains inaccessible, restart the session (on WSL, use `wsl.exe --shutdown`) and rerun the installer. It does not invoke an interactive `newgrp` shell. The installer then starts Neo4j, Qdrant and MetaMCP, waits for its migrations, and registers **all 11 servers in the Global list** as shared servers. New namespaces and endpoints are organized as follows:
+Установщик не изменяет существующую установку Docker. Если Docker установлен впервые и пользователь добавлен в группу `docker`, членство вступит в силу в новом сеансе; если Docker остаётся недоступен, перезапустите сеанс (для WSL используйте `wsl.exe --shutdown`) и повторите установку. Интерактивная оболочка `newgrp` не запускается. Далее установщик запускает Neo4j, Qdrant и MetaMCP, ждёт миграций MetaMCP и пытается зарегистрировать **11 серверов из списка GLOBAL** как общие серверы, а также прежние записи Neo4j, Qdrant и Playwright. Из-за существующих записей или конфликтов регистрация может быть пропущена или выполнена частично; зарегистрированный сервер не обязательно готов к работе. При новой установке без конфликтов создаются группы:
 
-| Namespace | Servers | Protected endpoint name |
+> Linux-установщик и управляющий скрипт используют фиксированные имена контейнеров `neo4j-mcp` и `qdrant-mcp`. Они запускают существующий контейнер с таким именем без проверки его принадлежности и конфигурации; `stop` и `restart` также останавливают контейнеры с этими именами. До установки и использования команд проверьте отсутствие конфликтов имён. Настройка удалённых адресов БД не препятствует созданию и запуску этих локальных контейнеров.
+
+| Пространство имён | Серверы | Имя защищённой конечной точки |
 | --- | --- | --- |
 | `global-reasoning` | `sequentialthinking`, `mcp-compass` | `global-reasoning` |
 | `global-memory` | `graphiti`, `cognee`, `memory-bank-mcp` | `global-memory` |
 | `global-web` | `context7`, `duckduckgo`, `fetch` | `global-web` |
 | `global-integrations` | `github-mcp-server`, `io-draw`, `gdrive` | `global-integrations` |
-| `global` (legacy) | `neo4j-global`, `qdrant-global`, `fetch`, `playwright` | `global-sse` |
+| `global` (прежняя группа) | `neo4j-global`, `qdrant-global`, `fetch`, `playwright` | `global-sse` |
 
-`io-draw` is the README's `io.draw`: MetaMCP does not permit dots in server names. The legacy group is retained for compatibility, and `fetch` is shared between the legacy and web groups. On a fresh installation, open MetaMCP at `http://localhost:12008`, create an account and an API key. For each endpoint above, use either:
+`io-draw` соответствует `io.draw` из списка выше: MetaMCP не допускает точки в именах серверов. Прежняя группа сохранена для совместимости, а `fetch` используется и в ней, и в группе `global-web`. После новой установки со стандартным URL откройте MetaMCP по адресу `http://localhost:12008`, создайте учётную запись, если регистрация включена, и создайте API-ключ. Для каждой конечной точки из таблицы используйте один из адресов, подставив её имя вместо `<endpoint-name>`:
 
 - Streamable HTTP: `http://localhost:12008/metamcp/<endpoint-name>/mcp`
 - SSE: `http://localhost:12008/metamcp/<endpoint-name>/sse`
 
-Use your configured `APP_URL` instead of `http://localhost:12008` if it differs. Newly created endpoints require an API key: configure your MCP client to send `Authorization: Bearer <API key>` (or `X-API-Key: <API key>`). Keep the key private. Refresh an already-open UI to see the records.
+Если настроенный `APP_URL` отличается, используйте его вместо `http://localhost:12008`. Новые конечные точки требуют API-ключ: настройте MCP-клиент на передачу `Authorization: Bearer <API key>` (или `X-API-Key: <API key>`), подставив ключ вместо `<API key>`. Храните ключ в секрете. Чтобы увидеть записи, обновите уже открытый интерфейс. У существующих конечных точек настройки аутентификации могут отличаться; проверьте каждую, а не предполагайте, что она защищена.
 
-The seed is transactional and **additive**: existing server settings, disabled mappings, private resources, endpoints, `.env` files and Compose overrides are not overwritten. An existing public server with the same name is reused *as configured*, not replaced by the default. A private server is never linked to a shared namespace. If an endpoint name already belongs to a different namespace or user, it is left alone and a warning is shown. If **any** existing endpoint of a target namespace has neither API-key nor OAuth authentication, that namespace gets no new mappings or endpoint; protect its existing endpoints and explicitly run `seed` below. Other groups are still registered.
+В отличие от Windows LOCAL, Linux-установщик оставляет механизм первоначальной настройки MetaMCP — bootstrap — включённым или выключенным согласно клонированному `example.env`. При перезапуске bootstrap может повторно применить настройки регистрации. Проверьте действующие `BOOTSTRAP_*`, закройте ненужную регистрацию через интерфейс и SSO и настройте администраторов до открытия доступа к сервису. Если `METAMCP_ADMIN_EMAILS` пуст, исходный MetaMCP считает администратором каждого вошедшего пользователя. Проверьте фактическую привязку портов Compose и правила брандмауэра: `APP_URL` не настраивает ограничения доступа, DNS, HTTPS или обратный прокси.
 
-Automatic seeding runs once per version per MetaMCP database; subsequent starts preserve intentional deletions. An installation initialized by the earlier four-server seed is upgraded once to the new groups without restoring its deleted legacy records, changing `global-sse`, or re-exposing a removed/disabled `fetch` mapping through `global-web`. To explicitly add missing defaults again after fixing conflicts, without overwriting existing settings or enabling inactive mappings:
+Первоначальная регистрация `seed` выполняется в транзакции и **только добавляет записи**: существующие настройки серверов, отключённые сопоставления, приватные ресурсы, конечные точки, файлы `.env` и переопределения Compose не перезаписываются. Существующий общий сервер с таким же именем используется *с его текущими настройками*, а не заменяется сервером по умолчанию. Приватный сервер никогда не подключается к общему пространству имён. Если имя конечной точки уже принадлежит другому пространству имён или пользователю, запись сохраняется и выводится предупреждение. Если **хотя бы одна** существующая конечная точка целевого пространства не защищена ни API-ключом, ни OAuth, новые сопоставления и конечная точка в нём не создаются; защитите существующие конечные точки и явно выполните `seed` ниже. Остальные группы регистрируются.
+
+Автоматический `seed` выполняется один раз для каждой версии в каждой базе MetaMCP; последующие запуски сохраняют намеренные удаления и после создания маркера не перепроверяют конечные точки на появившиеся небезопасные настройки. Установка, инициализированная прежним набором из четырёх серверов, один раз обновляется до новых групп, не восстанавливая удалённые прежние записи, не изменяя `global-sse` и не открывая повторно удалённое или отключённое сопоставление `fetch` через `global-web`. Чтобы после устранения конфликтов явно добавить недостающие записи по умолчанию, не перезаписывая существующие настройки и не включая отключённые сопоставления, выполните:
 
 ```sh
 bash linux/run-global.sh seed
 ```
 
-`start`, `stop`, `restart`, `status`, `logs`, `services-logs`, `apply-services`, and `apply-metamcp-config` are available as `bash linux/run-global.sh <command>`. Normal starts do not recreate an existing MetaMCP container or sidecar unless a public URL changed; then only the app is recreated to apply its new environment. Starts also check the MetaMCP `uv` cache volume and repair its ownership if an older container left it unwritable, without running the app as root. Once the kit sidecars and their Docker networks are ready, `start` clears stale `Error Status` flags only for the kit's shared default servers, allowing older MetaMCP images to retry connections after a transient startup failure. `stop`/`restart` stop rather than remove containers. `apply-services` deliberately recreates only Graphiti/Cognee. Back up any manual files in the app's writable layer before applying a changed public URL. `METAMCP_START_TIMEOUT` controls the readiness wait in seconds (default 180).
+Используйте `bash linux/run-global.sh <command>`, подставив команду из таблицы:
 
-#### Server prerequisites and credentials
+| Команда | Действие |
+| --- | --- |
+| `start` (по умолчанию) | Запускает существующие контейнеры хранилищ с фиксированными именами, MetaMCP и вспомогательные сервисы; ждёт готовности MetaMCP и при необходимости выполняет автоматический `seed`. |
+| `seed` | После проверки явно добавляет недостающие записи по умолчанию; существующие настройки и отключённые сопоставления сохраняются. |
+| `stop` / `restart` | Останавливает либо останавливает и снова запускает вспомогательные сервисы, MetaMCP и два контейнера хранилищ с фиксированными именами. Контейнеры и тома не удаляются. |
+| `status` | Показывает подходящие контейнеры Docker; готовность инструментов не проверяется. |
+| `logs` / `services-logs` | Показывают журнал приложения или журналы всех вспомогательных сервисов с отслеживанием новых строк; выход — Ctrl+C. |
+| `apply-services` | Для применения конфигурации пересоздаёт только Graphiti и Cognee; именованные тома сохраняются. |
+| `apply-metamcp-config` | Применяет непустой публичный URL; при необходимости пересоздаёт только приложение MetaMCP. |
 
-The installer creates `~/mcp-global/config/.env` only if it does not exist; edit it using shell-compatible quoting and keep it private. To set a different initial Neo4j password or provider keys before the first install, create this file with the desired variables beforehand; omitted variables use the defaults. Changes to an already registered server must be made in the MetaMCP UI; rerunning `seed` does not overwrite it.
+При обычном запуске приложение и вспомогательные сервисы используют `--no-recreate`, кроме случаев, когда ожидается изменение URL приложения или его запущенное окружение устарело. Перед возможным пересозданием сохраните файлы, созданные вручную в записываемом слое приложения. При запуске также проверяются права на том кэша MetaMCP `uv` и при необходимости исправляется владелец; приложение не запускается от root. После подключения сетей вспомогательных сервисов `start` сбрасывает `Error Status` у **общих записей с определёнными именами по умолчанию**, в том числе у существовавших ранее записей с такими именами; точный список приведён в [справочнике](docs/configuration.md). `METAMCP_START_TIMEOUT` задаёт время ожидания готовности в секундах (по умолчанию 180).
 
-- **Graphiti and Cognee:** configure APIs with a consistent `SERVICE_API_*` naming pattern. Global LLM defaults are `LLM_API_ENDPOINT`, `LLM_API_KEY`, `LLM_API_MODEL`, and `LLM_API_PROVIDER`; per-consumer settings override them when non-empty: `GRAPHITI_API_ENDPOINT` / `GRAPHITI_API_KEY` / `GRAPHITI_API_MODEL`, and `COGNEE_LLM_API_ENDPOINT` / `COGNEE_LLM_API_KEY` / `COGNEE_LLM_API_MODEL` / `COGNEE_LLM_API_PROVIDER`. Cognee embeddings have their own `COGNEE_EMBEDDING_API_ENDPOINT`, `COGNEE_EMBEDDING_API_KEY`, `COGNEE_EMBEDDING_API_MODEL`, and `COGNEE_EMBEDDING_API_PROVIDER`; the model is specific to embeddings. For example, set `LLM_API_ENDPOINT=https://llm-gateway.example/v1` and `LLM_API_KEY='shared-provider-key'`, then override just `GRAPHITI_API_KEY='graphiti-specific-key'` if Graphiti uses a separate credential. Old service-specific names remain accepted as aliases; the old shared `OPENAI_API_KEY` is ignored. Then run `bash linux/run-global.sh apply-services`. If a required key is absent, the sidecar waits instead of serving tools. Graphiti's `GRAPHITI_EMBEDDER_MODEL` and `GRAPHITI_GROUP_ID` (default `multfinite-mcp-kit-global`) remain additional service parameters; `NEO4J_URI`, `NEO4J_USER`/`NEO4J_USERNAME`, `NEO4J_PASSWORD`, and optionally `NEO4J_DATABASE` (default `neo4j`) configure its database. Graphiti's tools can modify or delete graph data: use a separate existing database/instance to isolate it. Cognee supports its own provider settings and embedding dimensions; use provider-supported models and matching dimensions. `apply-services` recreates **only** the two kit-owned Graphiti/Cognee containers, keeping data volumes; back up manual files in their writable layers first. It does not edit MetaMCP records.
-- **GitHub:** the official remote GitHub MCP server at `https://api.githubcopilot.com/mcp/` needs a suitable GitHub token and service access. If `GITHUB_PERSONAL_ACCESS_TOKEN` is set before the first seed it is stored as the server's bearer token; otherwise add it to `github-mcp-server` in the MetaMCP UI after installation. Grant only the permissions needed.
-- **Context7:** works without a key subject to its limits. `CONTEXT7_API_KEY` is optional; set it before first seed or add it to the server's environment in the UI later.
-- **Google Drive:** requires a Google OAuth client and a separate browser authorization, not `GOOGLE_APPLICATION_CREDENTIALS`. Follow the [upstream setup](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive) to enable the Drive API and create a Desktop OAuth client. On a machine with Node.js/npm and a browser, obtain the server's token file (choose your actual OAuth-client JSON path):
+<a id="server-prerequisites-and-credentials"></a>
+#### Требования и учётные данные серверов
+
+Установщик создаёт `~/mcp-global/config/.env`, только если файла нет; редактируйте его с соблюдением синтаксиса кавычек оболочки и храните в секрете. Чтобы до первой установки задать другой начальный пароль Neo4j или ключи провайдеров, заранее создайте этот файл с нужными переменными; для пропущенных переменных используются значения по умолчанию. Изменения уже зарегистрированного сервера нужно вносить через интерфейс MetaMCP; повторный `seed` его не перезаписывает.
+
+- **Graphiti и Cognee:** настройте API по единой схеме имён `SERVICE_API_*`. Глобальные значения LLM по умолчанию — `LLM_API_ENDPOINT`, `LLM_API_KEY`, `LLM_API_MODEL` и `LLM_API_PROVIDER`; непустые настройки конкретного сервиса имеют приоритет: `GRAPHITI_API_ENDPOINT` / `GRAPHITI_API_KEY` / `GRAPHITI_API_MODEL` и `COGNEE_LLM_API_ENDPOINT` / `COGNEE_LLM_API_KEY` / `COGNEE_LLM_API_MODEL` / `COGNEE_LLM_API_PROVIDER`. Для эмбеддингов Cognee предусмотрены отдельные `COGNEE_EMBEDDING_API_ENDPOINT`, `COGNEE_EMBEDDING_API_KEY`, `COGNEE_EMBEDDING_API_MODEL` и `COGNEE_EMBEDDING_API_PROVIDER`; модель у них своя. Например, задайте `LLM_API_ENDPOINT=https://llm-gateway.example/v1` и `LLM_API_KEY='shared-provider-key'`, затем переопределите только `GRAPHITI_API_KEY='graphiti-specific-key'`, если для Graphiti нужен отдельный ключ. Прежние имена настроек сервисов по-прежнему принимаются как алиасы; старый общий `OPENAI_API_KEY` игнорируется. Создаваемый файл задаёт `COGNEE_EMBEDDING_API_PROVIDER=openai`, поэтому очистите или измените его, если эмбеддинги должны наследовать другого глобального провайдера. Затем выполните `bash linux/run-global.sh apply-services`. Graphiti ожидает настройки, если его действующий API-ключ пуст; Cognee ожидает отсутствующий ключ только при соответствующем провайдере `openai`. Другим провайдерам могут потребоваться свои учётные данные. Дополнительные параметры Graphiti — `GRAPHITI_EMBEDDER_MODEL` и `GRAPHITI_GROUP_ID` (по умолчанию `multfinite-mcp-kit-global`); БД настраивается через `NEO4J_URI`, `NEO4J_USER`/`NEO4J_USERNAME`, `NEO4J_PASSWORD` и необязательный `NEO4J_DATABASE` (по умолчанию `neo4j`). Инструменты Graphiti могут изменять и удалять данные графа: для изоляции используйте отдельную существующую БД или экземпляр. Cognee поддерживает собственные настройки провайдеров и размерности эмбеддингов; выбирайте поддерживаемые провайдером модели и соответствующие размерности. `apply-services` пересоздаёт **только** два контейнера Graphiti/Cognee, принадлежащие комплекту, сохраняя тома данных; сначала сохраните ручные файлы из их записываемых слоёв. Записи MetaMCP эта команда не меняет.
+- **GitHub:** официальному удалённому серверу GitHub MCP по адресу `https://api.githubcopilot.com/mcp/` нужны подходящий токен GitHub и доступ к сервису. Если `GITHUB_PERSONAL_ACCESS_TOKEN` задан до первого `seed`, он сохраняется как токен Bearer сервера; иначе добавьте его в `github-mcp-server` через интерфейс MetaMCP после установки. Выдавайте только необходимые права.
+- **Context7:** работает без ключа в пределах своих ограничений. `CONTEXT7_API_KEY` необязателен; задайте его до первого `seed` или позже добавьте в окружение сервера через интерфейс.
+- **Google Drive:** требуется OAuth-клиент Google и отдельная авторизация в браузере, а не `GOOGLE_APPLICATION_CREDENTIALS`. По [инструкции исходного проекта](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive) включите Drive API и создайте OAuth-клиент типа Desktop. На компьютере с Node.js/npm и браузером получите файл токена сервера, указав фактический путь к JSON-файлу OAuth-клиента:
 
   ```sh
   (
@@ -99,47 +132,55 @@ The installer creates `~/mcp-global/config/.env` only if it does not exist; edit
   )
   ```
 
-  Transfer that token file securely to the Linux Docker host if necessary. With the stack running, copy it into the persistent volume and fix ownership **before** publishing it to the waiting server:
+  При необходимости передайте файл токена на Linux-хост Docker по защищённому каналу. При работающем стеке скопируйте его в постоянный том и исправьте владельца **до** передачи ожидающему серверу:
 
   ```sh
-  # On the Docker host, point this to the transferred token file.
+  # На хосте Docker укажите путь к переданному файлу токена.
   GDRIVE_CREDENTIALS_PATH="$HOME/.gdrive-server-credentials.json"
   container=$(docker ps -q --filter label=com.docker.compose.project=multfinite-mcp-kit-global \
       --filter label=com.docker.compose.service=mcpkit-gdrive)
-  test -n "$container" || { echo 'Start the global stack first'; exit 1; }
+  test -n "$container" || { echo 'Сначала запустите глобальный стек'; exit 1; }
   docker cp "$GDRIVE_CREDENTIALS_PATH" "$container:/mcpkit/gdrive/credentials.import.json"
   docker exec -u 0 "$container" sh -c 'chown node:node /mcpkit/gdrive/credentials.import.json && chmod 600 /mcpkit/gdrive/credentials.import.json && mv -f /mcpkit/gdrive/credentials.import.json /mcpkit/gdrive/credentials.json'
   docker restart "$container"
   ```
 
-  The upstream GDrive server is archived and may require reauthorization when its credentials expire. The same Google account and stored memory are shared by clients of these shared endpoints; they are not per-user sandboxes.
+  Исходный сервер GDrive архивирован и может потребовать повторной авторизации при истечении срока учётных данных. Клиенты этих общих конечных точек используют одну учётную запись Google и общее хранилище данных; это не изолированные среды отдельных пользователей.
 
-The remaining README servers use their official packages: Sequential Thinking is pinned to a Node 20-compatible version; DuckDuckGo includes its browser-TLS fallback; draw.io runs headlessly and returns links. GitHub uses the official remote service. Packages run by `npx`/`uvx` and models may download on first use. Qdrant's FastEmbed model may download; the legacy Playwright server additionally needs Chromium and system libraries inside the MetaMCP container or a separately configured browser. External services, credentials, rates and network access determine actual tool availability. Check `services-logs`, MetaMCP logs and its UI; after fixing a failed server, reconnect/reset its error state in the UI if needed.
+Остальные серверы из списка используют официальные пакеты: Sequential Thinking закреплён на версии, совместимой с Node 20; DuckDuckGo включает резервный механизм браузерного TLS; draw.io работает без графического интерфейса и возвращает ссылки. GitHub использует официальный удалённый сервис. Пакеты, запускаемые через `npx`/`uvx`, и модели могут загружаться при первом использовании. Модель FastEmbed Qdrant также может загружаться; прежнему серверу Playwright дополнительно нужны Chromium и системные библиотеки внутри контейнера MetaMCP либо отдельно настроенный браузер. Фактическая доступность инструментов зависит от внешних сервисов, учётных данных, лимитов и сети. Проверяйте `services-logs`, журналы и интерфейс MetaMCP; после исправления ошибки сервера при необходимости переподключите его или сбросьте состояние ошибки в интерфейсе.
 
-#### Persistence and security
+<a id="persistence-and-security"></a>
+#### Хранение данных и безопасность
 
-Graphiti uses the configured Neo4j database (the installer-managed default persists under `~/mcp-global/data/neo4j`). Cognee's system and data files, Memory Bank files and the GDrive token each use named Docker volumes (`multfinite-mcp-kit-global-cognee-system`, `-cognee-data`, `-memory-data`, `-gdrive-data`). Stop/restart and `apply-services` do not remove those volumes. Back them up alongside MetaMCP's PostgreSQL volume and the kit configuration.
+Graphiti использует настроенную БД Neo4j (каталог по умолчанию, управляемый установщиком, — `~/mcp-global/data/neo4j`). Системные файлы и данные Cognee, файлы Memory Bank и токен GDrive хранятся в именованных томах Docker (`multfinite-mcp-kit-global-cognee-system`, `-cognee-data`, `-memory-data`, `-gdrive-data`). Остановка, перезапуск и `apply-services` эти тома не удаляют. Создавайте их резервные копии вместе с томом PostgreSQL MetaMCP и конфигурацией комплекта.
 
-The four local sidecars are launched in a separate kit-owned Compose project, each on its own Docker network, with **no published host ports**. The app is attached to those networks without rewriting its Compose files or recreating it. The raw sidecar HTTP services themselves do not enforce MetaMCP API-key authentication: Docker/host administrators and any container attached to a sidecar network can bypass MetaMCP. Restrict Docker access, do not attach untrusted containers, and firewall the host. The installer also publishes Neo4j and Qdrant ports on the host; Qdrant has no authentication by default and Neo4j's default password is `mcp-neo4j-pass`. Set a strong `NEO4J_PASSWORD` before creating a new Neo4j container, restrict network access, and secure the MetaMCP UI/endpoints before exposing them. Existing database containers, credentials and volumes are not reconfigured.
+Четыре локальных вспомогательных сервиса запускаются в отдельном Compose-проекте комплекта, каждый в собственной сети Docker, **без публикации портов хоста**. Приложение подключается к этим сетям без перезаписи его Compose-файлов и пересоздания. Сами HTTP-сервисы не проверяют API-ключи MetaMCP: администраторы Docker/хоста и любой контейнер в сети сервиса могут обойти MetaMCP. Ограничьте доступ к Docker, не подключайте недоверенные контейнеры и настройте брандмауэр хоста. Установщик также публикует порты Neo4j и Qdrant на хосте; у Qdrant по умолчанию нет аутентификации, а пароль Neo4j по умолчанию — `mcp-neo4j-pass`. До создания нового контейнера Neo4j задайте надёжный `NEO4J_PASSWORD`, ограничьте сетевой доступ и защитите интерфейс и конечные точки MetaMCP перед их публикацией. Существующие контейнеры БД, учётные данные и тома не перенастраиваются.
 
 ### LOCAL на Windows
 
-Нужны Windows 10/11 x64, PowerShell 5.1+, интерактивный вход и **Docker Desktop с Linux containers**. Отдельный Linux-сервер, SSH, VPN и настройка сетевых адресов не нужны. MetaMCP клонируется из официального репозитория и собирается в отдельный Docker-проект на этом же компьютере; первый build может занять несколько минут и загрузить зависимости.
+Нужны Windows 10/11 x64, 64-битный PowerShell 5.1+, интерактивный вход и **Docker Desktop с контейнерами Linux и Compose 2.24.4 или новее**. Для отсутствующих системных компонентов могут понадобиться WinGet, UAC, WSL 2 или перезагрузка. Отдельный Linux-сервер, SSH, VPN и настройка сетевых адресов не нужны. MetaMCP клонируется на закреплённую в `windows/manifest.json` ревизию и собирается в отдельный Docker-проект на этом же компьютере; первая сборка может занять несколько минут и загрузить зависимости.
 
-Если Windows-серверы **уже установлены**, из корня обновлённого репозитория выполните:
+Если текущий Windows LOCAL **уже установлен** и содержит `config\local-settings.json`, `config\private\secrets.json` и необходимые пакеты среды выполнения, из корня обновлённого репозитория выполните:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
 .\windows\install-local.ps1 -MetaMcpOnly
 ```
 
-Этот вариант не переустанавливает npm/Python-серверы и не удаляет их данные. Если Docker Desktop отсутствует, скрипт попытается установить его через WinGet; могут понадобиться UAC, настройка WSL 2 или перезагрузка. Откройте Docker Desktop и повторите команду, если установка попросила перезапуск.
+Этот вариант проверяет Git и Docker, запускает существующий шлюз и локальный MetaMCP, но не переустанавливает npm/Python-серверы. Только старых `config\.env` или `config\mcp-local.json` для `-MetaMcpOnly` недостаточно. Если необходимые файлы или пакеты отсутствуют, используйте полную установку. Откройте Docker Desktop и повторите команду, если установка попросила перезапуск.
 
-Для **новой полной установки** используйте `.\windows\install-local.ps1`. Установщик применяет WinGet для недостающих Git, Docker Desktop, Node, Everything и, с согласия, C++ Build Tools; ставит все 13 серверов в изолированные каталоги, Everything SDK и Chromium. `-NonInteractive -InstallBuildTools` запускает полную установку без вопросов; `-SkipEverything` / `-SkipBrowserDownload` явно пропускают эти компоненты.
+Для **новой полной установки**:
 
-При первой установке создаются 13 **общих/public** MCP-серверов с короткими именами и шесть тематических public namespaces и endpoints тоже без префиксов. Учётная запись для создания этих записей не требуется; актуальные адреса выводит `start` или `seed`.
+```powershell
+Set-ExecutionPolicy -Scope Process Bypass
+.\windows\install-local.ps1
+```
 
-| Namespace и endpoint | Точные имена серверов в MetaMCP |
+Установщик использует WinGet для недостающих Git, Docker Desktop, Node, Everything и, с согласия, C++ Build Tools; устанавливает 13 серверов и изолированные пакеты среды выполнения, Everything SDK и Chromium. `-NonInteractive` пропускает вопрос о C++ Build Tools, а `-InstallBuildTools` явно разрешает их установку; вместе они не исключают системные запросы UAC или настройки Docker/WSL. `-SkipEverything` пропускает установку Everything и SDK, `-SkipBrowserDownload` — загрузку Chromium; соответствующие серверы могут быть недоступны. Подробнее о параметрах и версиях — в [справочнике](docs/configuration.md#windows-local-настройки-и-секреты).
+
+При первой успешной установке без конфликтов создаются 13 **общих (public)** MCP-серверов с короткими именами и шесть тематических общих пространств имён и конечных точек, тоже без префиксов. Учётная запись для создания этих записей не требуется; `start` или `seed` выводит доступные адреса. При предупреждениях проверьте фактические записи и авторизацию в интерфейсе.
+
+| Пространство имён и конечная точка | Точные имена серверов в MetaMCP |
 | --- | --- |
 | `system` | `desktop-commander`, `windows-mcp` |
 | `files` | `everything-search`, `filesystem`, `markitdown` |
@@ -150,25 +191,31 @@ Set-ExecutionPolicy -Scope Process Bypass
 
 После первого запуска новой установки:
 
-1. Откройте `http://localhost:13008` и **самостоятельно зарегистрируйтесь**. Скрипт не создаёт учётную запись и не выбирает пароль.
+1. Откройте `http://localhost:13008` (или адрес, выведенный скриптом при изменённом порте) и **самостоятельно зарегистрируйтесь**. Скрипт не создаёт учётную запись и не выбирает пароль.
 2. В MetaMCP откройте **Настройки → Настройки авторизации** и включите **«Отключить регистрацию через форму»**. При необходимости отдельно отключите регистрацию через SSO. Скрипт не изменяет эти настройки при перезапуске.
-3. В **API Keys** создайте личный ключ и передайте его MCP-клиенту в `Authorization: Bearer <ключ>` (или `X-API-Key: <ключ>`). Выберите только нужную группу, например `http://localhost:13008/metamcp/code/mcp`; для SSE замените `/mcp` на `/sse`. Ключ шлюза Windows — отдельный секрет.
+3. В разделе **Ключи API (API Keys)** создайте личный ключ и передайте его MCP-клиенту в `Authorization: Bearer <ключ>` (или `X-API-Key: <ключ>`). Укажите адрес нужной группы, например при стандартном порте `http://localhost:13008/metamcp/code/mcp`; для SSE замените `/mcp` на `/sse`. Ключ шлюза Windows — отдельный секрет.
 
-**Public в MetaMCP** означает, что записи видны всем его пользователям, а не анонимный доступ или публикацию в интернет. Новые endpoints требуют API key и по умолчанию доступны только на loopback. Любой действующий ключ MetaMCP, имеющий доступ к public endpoint, позволяет вызывать его инструменты, в том числе управлять файлами и рабочим столом: доверяйте всем владельцам ключей и храните ключи приватно.
+**Общие записи (public) в MetaMCP** видны всем его пользователям; это не означает анонимный доступ или публикацию в интернет. Новые конечные точки требуют API-ключ и по умолчанию доступны только на адресе обратной связи (loopback). В закреплённой версии MetaMCP любой действующий личный или общий API-ключ может пройти авторизацию на любой общей конечной точке с включённой проверкой API-ключа, в том числе на остальных группах. Выбор одного URL в клиенте **не ограничивает** владельца ключа этой группой. Доступные инструменты могут управлять файлами и рабочим столом: выдавайте ключи только доверенным клиентам и храните их приватно.
 
-Другие команды:
+Основные команды:
 
 ```powershell
-.\windows\run-local.ps1 status
+.\windows\run-local.ps1 start                  # полный стек; команда по умолчанию
+.\windows\run-local.ps1 status                 # шлюз и MetaMCP
 .\windows\run-local.ps1 logs codebase-memory-mcp
+.\windows\run-local.ps1 logs gateway
 .\windows\run-local.ps1 logs metamcp
 .\windows\run-local.ps1 restart
 .\windows\run-local.ps1 stop
 ```
 
-Новая установка использует upstream-режим одного пользователя: пока не задан список администраторов, **любой вошедший пользователь является администратором**. UI и backend доступны только на loopback, но их могут открыть другие пользователи этого компьютера; закройте регистрацию сразу после создания нужных учётных записей.
+Для управления только нативными серверами доступны `gateway-start`, `gateway-stop`, `gateway-restart` и `gateway-status`: они не запускают и не останавливают MetaMCP и не регистрируют серверы в его БД. Полный список, включая `init`, `seed`, `credentials`, `enable-signup`, `ports` и `set-ports`, приведён в [справочнике](docs/configuration.md#команды-windows-local). `reset-metamcp-records` — отдельная разрушительная операция, описанная ниже.
+
+Новая установка использует режим одного пользователя исходного MetaMCP: пока не задан список администраторов, **любой вошедший пользователь является администратором**. Интерфейс и серверная часть доступны только на loopback, но их могут открыть другие пользователи этого компьютера; закройте регистрацию сразу после создания нужных учётных записей.
 
 #### Если MetaMCP уже был установлен прежней версией
+
+Перед первым `start` после обновления сохраните независимую копию. Миграция может сделать ранее приватные серверы комплекта и совместимые пространства имён и конечные точки **общими для пользователей MetaMCP**: это изменение видимости и доступа, даже когда конечная точка остаётся защищённой. Проверьте, кому можно доверять доступ к инструментам.
 
 Обновите файлы комплекта и выполните из корня репозитория:
 
@@ -177,19 +224,19 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\windows\run-local.ps1 enable-signup  # только если регистрация уже закрыта и нужно создать новую учётную запись
 ```
 
-Если старый app ещё использует bootstrap, первый `start` отключит его, пересоздав только app-контейнер и сначала сохранив его записываемый слой в локальный образ. База, учётные записи, их настройки, volumes и приватный `metamcp.env` сохраняются; состояние регистрации не меняется. `enable-signup` **явно включает только регистрацию через форму**. После регистрации самостоятельно отключите её в настройках MetaMCP.
+Если старое приложение ещё использует bootstrap, первый `start` отключит его, пересоздав только контейнер приложения и сначала сохранив его записываемый слой в локальный образ. База, учётные записи, их настройки, тома и приватный `metamcp.env` сохраняются; состояние регистрации не меняется. `enable-signup` **явно включает только регистрацию через форму**. После регистрации самостоятельно отключите её в настройках MetaMCP.
 
-`start` автоматически переводит прежние серверы V1 и уже созданные записи V2 на короткие имена — например, строго `filesystem`. Совместимые дубликаты объединяются, а не оставляются рядом: по возможности сохраняются прежние UUID, подключения, tool mappings, ограничения, OAuth-сессия и ссылки аудита. Старый endpoint сохраняет свой URL и UUID; если это безопасно, его namespace и сам endpoint также становятся public, сохраняя аутентификацию. При создании новых групп ограничения старого namespace по возможности копируются; уже существующие настройки групп V2 не перезаписываются.
+При необходимости `start` пытается безопасно перевести прежние серверы V1 и записи V2 на короткие имена — например, `filesystem`. Совместимые дубликаты объединяются; при конфликтах они могут остаться. По возможности сохраняются прежние UUID, подключения, сопоставления инструментов, ограничения, OAuth-сессия и ссылки аудита. Старая конечная точка сохраняет свои URL и UUID; если это безопасно, её пространство имён и сама конечная точка также становятся общими, сохраняя аутентификацию. При создании новых групп ограничения старого пространства имён по возможности копируются; уже существующие настройки групп V2 не перезаписываются.
 
-Перед применением скрипт временно останавливает **только app**, сохраняет `pg_dump` в каталоге `mcpkit-backups` PostgreSQL volume и запускает тот же контейнер без пересоздания, чтобы сбросить активные и заранее созданные MCP-сессии. Дамп содержит секреты и находится в том же volume, поэтому это не замена отдельной резервной копии: сохраните её в защищённом месте. При ошибке резервного копирования миграция не выполняется. Повторный обычный `start` без изменений миграцию и дамп не повторяет; явный `seed` создаёт новый дамп. Остальные containers и volumes не удаляются.
+Перед применением скрипт временно останавливает **только приложение**, сохраняет `pg_dump` в каталоге `mcpkit-backups` тома PostgreSQL и запускает тот же контейнер без пересоздания, чтобы сбросить активные и заранее созданные MCP-сессии. Дамп содержит секреты и находится в том же томе, поэтому это не замена отдельной резервной копии: сохраните её в защищённом месте. При ошибке резервного копирования миграция не выполняется. Повторный обычный `start` без изменений миграцию и дамп не повторяет; явный `seed` создаёт новый дамп. Остальные контейнеры и тома не удаляются.
 
-**После миграции переподключите MCP-клиенты.** URL старого endpoint остаётся прежним, но имена инструментов включают имя сервера и меняются, например на `filesystem__...`: при необходимости обновите allowlist и сохранённые вызовы клиентов.
+**После миграции переподключите MCP-клиенты.** URL старой конечной точки остаётся прежним, но имена инструментов включают имя сервера и меняются, например на `filesystem__...`: при необходимости обновите список разрешённых инструментов и сохранённые вызовы клиентов.
 
-Если записи отличаются по подключению, tool schema или несовместимым ограничениям, содержат несколько OAuth-сессий, принадлежат чужой конфигурации или ссылаются на неизвестные расширения БД, скрипт не удаляет их вслепую: он выводит предупреждение, и такие дубликаты могут временно остаться. Проверьте и согласуйте настройки в MetaMCP, сохраните нужные данные и после устранения конфликта запустите `.\windows\run-local.ps1 seed`. Открытый endpoint необходимо защитить: существующие mappings уже могут быть доступны без ключа. Намеренно удалённые записи V1/V2 автоматом не восстанавливаются; явный `seed` после проверки может снова добавить удалённые defaults, но не переписывает отключённые mappings. Несовместимые настройки или чужие/заменённые namespace автоматически не захватываются даже при `seed`.
+Если записи отличаются по подключению, схеме инструментов или несовместимым ограничениям, содержат несколько OAuth-сессий, принадлежат чужой конфигурации или ссылаются на неизвестные расширения БД, скрипт не удаляет их вслепую: он выводит предупреждение, и такие дубликаты могут временно остаться. Проверьте и согласуйте настройки в MetaMCP, сохраните нужные данные и после устранения конфликта запустите `.\windows\run-local.ps1 seed`. Открытую конечную точку необходимо защитить: существующие сопоставления уже могут быть доступны без ключа. Намеренно удалённые записи V1/V2 автоматически не восстанавливаются; явный `seed` после проверки может снова добавить удалённые записи по умолчанию, но не переписывает отключённые сопоставления. Несовместимые настройки или чужие/заменённые пространства имён автоматически не захватываются даже при `seed`.
 
 #### Разовый полный сброс записей Windows MetaMCP
 
-Если сохранение старых записей не нужно, можно **явно** сбросить их и создать чистый набор из 13 серверов и шести защищённых групп с короткими именами. На прежней установке старые имена `local-<hostId>-...` остаются до этого явного сброса: обычный `start` не переименовывает и не удаляет их. Сброс удалит **все** серверы, namespaces и endpoints в отдельной базе Windows LOCAL MetaMCP, включая добавленные вручную, а также их tool settings, mappings и OAuth-сессии серверов. Строки аудита останутся, но ссылки на удалённые серверы и namespaces будут очищены. Учётные записи, API-ключи MetaMCP, состояние регистрации, файлы и данные Windows-серверов, другие базы и Docker volumes не удаляются. Linux GLOBAL не затрагивается.
+Если сохранение старых записей не нужно, можно **явно** сбросить их и создать чистый набор из 13 серверов и шести защищённых групп с короткими именами. На прежней установке старые имена `local-<hostId>-...` остаются до этого явного сброса: обычный `start` не переименовывает и не удаляет их. Сброс удалит **все** серверы, пространства имён и конечные точки в отдельной базе Windows LOCAL MetaMCP, включая добавленные вручную, а также их настройки инструментов, сопоставления и OAuth-сессии серверов. Строки аудита останутся, но ссылки на удалённые серверы и пространства имён будут очищены. Учётные записи, API-ключи MetaMCP, состояние регистрации, файлы и данные Windows-серверов, другие базы и тома Docker не удаляются. Linux GLOBAL не затрагивается.
 
 Сначала сохраните отдельную защищённую резервную копию базы. Затем в корне репозитория выполните:
 
@@ -197,9 +244,9 @@ Set-ExecutionPolicy -Scope Process Bypass
 .\windows\run-local.ps1 reset-metamcp-records
 ```
 
-Команда покажет целевой локальный Docker-проект и попросит ввести `DELETE ALL LOCAL RECORDS`; любой другой ответ отменит операцию. Она остановит app, сделает содержащий секреты `pg_dump` внутри PostgreSQL volume и удалит старые записи вместе с созданием новых в одной транзакции. Внутренний дамп **не заменяет независимую копию volume**. Неизвестные внешние ссылки или триггеры БД блокируют сброс. Если старому app нужно отключить bootstrap, команда сначала сохранит его слой в локальный образ и применит конфигурацию, не запуская отдельную миграцию записей.
+Команда покажет целевой локальный Docker-проект и попросит ввести `DELETE ALL LOCAL RECORDS`; любой другой ответ отменит операцию. Она остановит приложение, сделает содержащий секреты `pg_dump` внутри тома PostgreSQL и удалит старые записи вместе с созданием новых в одной транзакции. Внутренний дамп **не заменяет независимую копию тома**. Неизвестные внешние ссылки или триггеры БД блокируют сброс. Если старому приложению нужно отключить bootstrap, команда сначала сохранит его слой в локальный образ и применит конфигурацию, не запуская отдельную миграцию записей.
 
-Обычные `start` и `seed` полный сброс не выполняют. После успешного сброса `start` только проверяет маркер и сохраняет последующие ручные изменения; повторный запуск самой команды с подтверждением снова удалит записи. UUID будут новыми, старые адреса endpoints могут перестать существовать — переподключите клиентов. Если связь прервалась после SQL или app не перезапустился, сброс мог уже завершиться: **не повторяйте его вслепую**, выполните `start` и проверьте MetaMCP и backup.
+Обычные `start` и `seed` полный сброс не выполняют. После успешного сброса автоматическая регистрация при `start` проверяет маркер и сохраняет последующие ручные изменения; повторный запуск самой команды сброса с подтверждением снова удалит записи. UUID будут новыми, старые адреса конечных точек могут перестать существовать — переподключите клиентов. Если связь прервалась после SQL или приложение не перезапустилось, сброс мог уже завершиться: **не повторяйте его вслепую**, выполните `start` и проверьте MetaMCP и резервную копию.
 
 Если после сброса всё ещё показаны имена с префиксом, **не повторяйте сброс сразу**. В том же каталоге, из которого запускали команду, проверьте версию и файлы без изменения базы:
 
@@ -212,15 +259,15 @@ Select-String -Path .\windows\seed-local.sql -Pattern 'MCPKIT_RESET_CONTRACT|sho
 Select-String -Path .\windows\metamcp-local.ps1 -Pattern '\$shortGroups =|\$ResetAll -and \$shortGroups'
 ```
 
-Сверьте HEAD и изменения файлов с актуальной версией комплекта и проверьте реальные namespaces/endpoints в UI MetaMCP; если есть локальные изменения, сохраните их перед обновлением всех файлов вместе. Новая команда сброса показывает каталог скриптов и отказывает до удаления, если в нём лежит старый `seed-local.sql` без метки совместимости. Сама метка не проверяет локальные правки. Уже выполненный сброс не отменяется обновлением кода; решение о повторном отдельном сбросе принимайте только после проверки состояния и резервной копии.
+Сверьте HEAD и изменения файлов с актуальной версией комплекта и проверьте реальные пространства имён и конечные точки в интерфейсе MetaMCP; если есть локальные изменения, сохраните их перед обновлением всех файлов вместе. Новый управляющий скрипт показывает каталог скриптов и отказывает до удаления, если `seed-local.sql` не содержит метку `MCPKIT_RESET_CONTRACT: short-names-v4`. Это только проверка совместимости, а не целостности локальных правок; старый скрипт такой проверки не делает. Уже выполненный сброс не отменяется обновлением кода; решение о повторном отдельном сбросе принимайте только после проверки состояния и резервной копии.
 
-Если на старой установке сохранён список администраторов и новой учётной записи нужны права администратора, выполните `.\windows\run-local.ps1 seed -OwnerEmail 'ваш-email'` **после проверки предупреждений**: команда также является явным `seed` и добавляет отсутствующие public-записи. Она добавит существующую учётную запись к прежним администраторам; для применения может ещё раз пересоздаться только app с предварительным сохранением слоя. Для обычного использования public endpoints выбирать владельца не нужно, даже при нескольких учётных записях.
+Если на старой установке сохранён список администраторов и новой учётной записи нужны права администратора, выполните `.\windows\run-local.ps1 seed -OwnerEmail 'ваш-email'` **после проверки предупреждений**: команда также является явным `seed` и добавляет отсутствующие общие записи. Она добавит существующую учётную запись к прежним администраторам; для применения может ещё раз пересоздаться только приложение с предварительным сохранением слоя. Для обычного использования общих конечных точек выбирать владельца не нужно, даже при нескольких учётных записях.
 
-Команда `credentials` сохранена **только для доступа к старой автоматически созданной учётной записи** и показывает её исходный пароль, если он ещё не был изменён. Новой учётной записи или пароля она не создаёт; не отправляйте её вывод никому.
+Команда `credentials` сохранена **только для доступа к распознаваемой старой автоматически созданной учётной записи** и показывает её исходный пароль. Если пароль уже изменён, показанное значение не актуально. Новой учётной записи или пароля команда не создаёт; не отправляйте её вывод никому.
 
 #### Порты MetaMCP
 
-Для новой установки порты Windows по умолчанию — **13008** (интерфейс и MCP endpoint) и **13009** (прямой доступ к backend). Оба публикуются только на `127.0.0.1`. Backend не нужен для обычного доступа: frontend проксирует запросы к нему. Внутри контейнера upstream по-прежнему использует 12008/12009; это не занимает эти порты Windows.
+Для новой установки порты Windows по умолчанию — **13008** (интерфейс и конечные точки MCP) и **13009** (прямой доступ к серверной части). Оба публикуются только на `127.0.0.1`. На старой установке сохраняется прежний порт интерфейса, а если в старом состоянии ещё нет `backendPort`, серверная часть остаётся неопубликованной (`0`). Прямой доступ к серверной части не нужен для обычного подключения: интерфейс проксирует запросы к ней. Внутри контейнера исходное приложение по-прежнему использует 12008/12009; это не занимает эти порты Windows.
 
 Для **уже установленного** MetaMCP задайте порты и запустите приложение без переустановки серверов:
 
@@ -229,19 +276,29 @@ Select-String -Path .\windows\metamcp-local.ps1 -Pattern '\$shortGroups =|\$Rese
 .\windows\run-local.ps1 ports
 ```
 
-Для отключения прямого доступа к backend укажите `-BackendPort 0`. Для новой установки можно до первого запуска задать `$env:MCPKIT_METAMCP_PORT` и `$env:MCPKIT_METAMCP_BACKEND_PORT`; после создания установки используйте `set-ports`, а не редактирование внутренних файлов. Команда сохраняет порт в `config\private\metamcp-state.json` и применяет его к `APP_URL`; значения портов, оставшиеся в `metamcp.env` после первоначальной установки, не определяют действующие порты.
+Для отключения прямого доступа к серверной части укажите `-BackendPort 0`. Для новой установки можно до первого запуска задать `$env:MCPKIT_METAMCP_PORT` и `$env:MCPKIT_METAMCP_BACKEND_PORT`; после создания установки используйте `set-ports`, а не редактирование внутренних файлов. Например, для новой установки с интерфейсом на 14008 и без опубликованной серверной части:
 
-Изменение портов, применение ручной регистрации к старой установке или добавление администратора останавливает и пересоздаёт **только** контейнер приложения: его записываемый слой сохраняется в локальном Docker-образе и используется новым контейнером. PostgreSQL, volumes, учётные данные и другие контейнеры не удаляются и не пересоздаются. Такой образ может содержать секреты — не публикуйте его. Если применение прервано, исправьте причину и повторите `start`: изменение останется ожидающим. При смене портов MCP-клиентам понадобится новый URL; активные сессии могут потребовать повторного входа.
+```powershell
+$env:MCPKIT_METAMCP_PORT = '14008'
+$env:MCPKIT_METAMCP_BACKEND_PORT = '0'
+.\windows\install-local.ps1
+```
 
-По умолчанию данные хранятся в `%USERPROFILE%\mcp-local`; прежние `config\.env`, `config\mcp-local.json`, `config\local-settings.json`, `config\private\secrets.json` и данные не перезаписываются. Если задан `$env:MCP_LOCAL_DIR`, используйте его и при дальнейших запусках. MetaMCP получает свои отдельные имена контейнеров/volumes и отдельный приватный `config\private\metamcp.env`; чужие Docker-проекты не используются. Остановка не удаляет контейнеры или volumes.
+В этом примере интерфейс и конечные точки используют `http://localhost:14008`. `set-ports` сохраняет порты в `config\private\metamcp-state.json` и применяет их к `APP_URL`; значения портов, оставшиеся в `metamcp.env` после первоначальной установки, не определяют действующие порты.
 
-PostgreSQL не публикуется на хост. Windows MCP-шлюз остаётся на loopback и требует свой ключ. Docker Desktop обращается к нему через `host.docker.internal`; скрипт проверяет этот маршрут и не открывает доступ в LAN, если он не работает. Любой, кто получит доступ к приватному ключу, Docker или учётной записи, может получить широкие права на файлы и рабочий стол Windows — храните секреты и резервные копии БД приватно.
+Изменение портов, применение ручной регистрации к старой установке или добавление администратора останавливает и пересоздаёт **только** контейнер приложения: его записываемый слой сохраняется в локальном Docker-образе и используется новым контейнером. PostgreSQL, тома, учётные данные и другие контейнеры не удаляются и не пересоздаются. Такой образ может содержать секреты — не публикуйте его. Если применение прервано, исправьте причину и повторите `start`: изменение останется ожидающим. При смене портов MCP-клиентам понадобится новый URL; активные сессии могут потребовать повторного входа.
 
-`ready` означает ответ на MCP `initialize`, а не проверку всех операций. `waiting` означает, что требуется внешняя настройка; `error` выдаёт ненулевой код, но не мешает скрипту запустить MetaMCP и зарегистрировать остальные серверы. Например, для Obsidian нужен ключ плагина, а причину ошибки Codebase Memory смотрите в его журнале. Перед отправкой журналов удалите секреты и личные пути.
+По умолчанию данные хранятся в `%USERPROFILE%\mcp-local`; прежние `config\.env`, `config\mcp-local.json`, `config\local-settings.json`, `config\private\secrets.json` и данные не перезаписываются. Если задан `$env:MCP_LOCAL_DIR`, используйте его и при дальнейших запусках. MetaMCP получает свои отдельные имена контейнеров и томов и отдельный приватный `config\private\metamcp.env`; чужие Docker-проекты не используются. Остановка не удаляет контейнеры или тома.
+
+PostgreSQL не публикуется на хост. По умолчанию Windows MCP-шлюз слушает `127.0.0.1:13001` и требует отдельный `gatewayApiKey` в заголовке `X-API-Key`. Например, прямой адрес одного сервера — `http://127.0.0.1:13001/servers/filesystem/mcp`; это не групповая конечная точка MetaMCP. Один ключ шлюза даёт прямой доступ ко всем его серверам; клиентам MetaMCP он не нужен. При этом API-ключ MetaMCP тоже может давать доступ ко всем общим группам, как описано выше. Docker Desktop обращается к шлюзу через `host.docker.internal`; скрипт проверяет этот маршрут и не открывает доступ в локальную сеть, если он не работает. Автоматической Docker-регистрации нужны IPv4 loopback и HTTP без TLS; другие настройки шлюза не настраивают удалённое подключение автоматически.
+
+Не меняйте `hostId`, порт или ключ шлюза существующей установки без согласования с записями MetaMCP: `start` и `seed` не перезаписывают существующие подключения новым адресом или ключом. Любой, кто получит доступ к ключу шлюза, Docker или обладающей правами учётной записи, может получить широкие права на файлы и рабочий стол Windows — храните секреты и резервные копии БД приватно.
+
+`ready` означает ответ на MCP `initialize`, а не проверку всех операций. `waiting` означает, что требуется настройка, и само по себе не считается ошибкой; `error` или остающийся `starting` даёт ненулевой код. При ошибке шлюза `start` всё равно пытается запустить MetaMCP и выполнить регистрацию, но стек может остаться работоспособным лишь частично. Например, для Obsidian нужен ключ плагина, а причину ошибки Codebase Memory смотрите в его журнале, не удаляя его кэш или данные. Перед отправкой журналов удалите секреты и личные пути.
 
 #### Что нужно для отдельных серверов
 
-- **Windows-MCP** управляет реальным рабочим столом. Нужна доступная интерактивная сессия и необходимые права; экран входа/UAC и заблокированный рабочий стол не гарантируют работу. **Desktop Commander** и Git также могут выполнять команды и изменять файлы от имени пользователя. Ограничения каталогов `filesystem` не являются песочницей для остальных серверов.
+- **Windows-MCP** управляет реальным рабочим столом. Нужна доступная интерактивная сессия и необходимые права; экран входа/UAC и заблокированный рабочий стол не гарантируют работу. **Desktop Commander** может выполнять команды и изменять файлы от имени пользователя, а Git — изменять репозитории. Ограничения каталогов `filesystem` не являются песочницей для остальных серверов.
 - **Everything** должен быть запущен, его служба/индекс готовы. Установщик ставит SDK, но `ready` сам по себе не означает, что поиск уже проиндексирован.
 - **Obsidian**: откройте Obsidian с включённым плагином Local REST API и HTTPS на `127.0.0.1:27124`. Скопируйте ключ плагина в `obsidianApiKey` файла `config\private\secrets.json`, сохраните и выполните `restart`. Без ключа сервер ожидает настройку. Сторонний `mcp-obsidian` не проверяет сертификат Local REST API, поэтому разрешён только `localhost`/`127.0.0.1`; для удалённого Obsidian нужен локально завершающийся защищённый туннель.
 - **CodeGraph** запускается без изменения существующих проектов; индекс для нужного проекта создаётся отдельно. Например, при стандартном пути комплекта:
@@ -262,17 +319,38 @@ PostgreSQL не публикуется на хост. Windows MCP-шлюз ос�
   ```
 
   Передайте путь индексированного проекта в параметре `projectPath` инструмента CodeGraph, если он отличается от `projectsDir`. Codebase Memory и Serena также требуют указания/активации проекта; необходимые LSP и индексы могут загружаться или создаваться при использовании.
-- **Playwright** запускает установленный Chromium в headless-режиме. **DBHub** по умолчанию использует сохраняемый `data\dbhub.sqlite`; другой DSN можно указать в `dbhubDsn` в `secrets.json`. **Simple Files Vectorstore** следит за `writingDir`, при первом индексировании скачивает модель из Hugging Face и, согласно текущей реализации сервера, хранит индекс в памяти и перестраивает его после перезапуска. **MarkItDown** ставится с дополнительными форматами.
+- **Playwright** запускает установленный Chromium без графического интерфейса. **DBHub** по умолчанию использует сохраняемый `data\dbhub.sqlite`; другой DSN можно указать в `dbhubDsn` в `secrets.json`. **Simple Files Vectorstore** следит за `writingDir`, при первом индексировании может скачать модель из Hugging Face и, согласно текущей реализации сервера, хранит индекс в памяти и перестраивает его после перезапуска. Поддерживаемые **MarkItDown** форматы зависят от установленного пакета и его зависимостей.
 
 #### Локальное подключение к MetaMCP
 
-Группы создаются один раз при `start`, в том числе до регистрации. Повторный автоматический запуск не восстанавливает намеренно удалённые записи и не перезаписывает настройки. Управляемые серверы и новые группы получают `user_id = NULL`; перевод старого namespace и endpoint в public выполняется только при безопасной миграции, как описано выше. Чужие и несовместимые записи сохраняются с предупреждением. В чужой или заменённый namespace инструменты не добавляются даже по `seed`; если в целевом namespace есть **хотя бы один endpoint без API-key и OAuth**, новые инструменты туда также не добавляются. Уже существующие mappings открытого endpoint могут быть доступны без ключа — защитите все endpoints. Выбор владельца для public-групп не требуется.
+Группы создаются один раз при `start`, в том числе до регистрации. Повторный автоматический запуск не восстанавливает намеренно удалённые записи и не перезаписывает настройки. Управляемые серверы и новые группы получают `user_id = NULL`; перевод старого пространства имён и конечной точки в общие выполняется только при безопасной миграции, как описано выше. Чужие и несовместимые записи сохраняются с предупреждением. В чужое или заменённое пространство имён инструменты не добавляются даже по `seed`; если в целевом пространстве есть **хотя бы одна конечная точка без API-ключа и OAuth**, новые инструменты туда также не добавляются. Уже существующие сопоставления открытой конечной точки могут быть доступны без ключа — защитите все конечные точки. Выбор владельца для общих групп не требуется.
 
-Если сеть Docker Desktop не даёт контейнеру обратиться к loopback-шлюзу Windows, команда сообщит об этом отдельно. Не меняйте адрес на `0.0.0.0` и не открывайте порт для решения проблемы: проверьте Docker Desktop и выполните `start` снова. Native Windows/Docker Desktop следует проверить на целевой машине.
+Если сеть Docker Desktop не даёт контейнеру обратиться к loopback-шлюзу Windows, команда сообщит об этом отдельно. Не меняйте адрес на `0.0.0.0` и не открывайте порт для решения проблемы: проверьте Docker Desktop и выполните `start` снова. Саму Windows и Docker Desktop следует проверить на целевой машине.
 
-### Seed regression tests
+## Обновление и восстановление
 
-The integration tests require `psql`, `jq`, and a disposable PostgreSQL database (the test user must be allowed to create and drop a schema). Docker and system package installation are mocked; no real containers or system packages are changed.
+Перед обновлением сделайте независимую резервную копию, особенно если следующий `start` может выполнить миграцию Windows. Затем согласуйте простой и остановите соответствующий стек штатной командой `bash linux/run-global.sh stop` или `.\windows\run-local.ps1 stop`; убедитесь, что остановка завершилась. На Linux сначала проверьте владельцев контейнеров с фиксированными именами, как указано выше. Linux `stop` может лишь предупредить об ошибке и всё равно вывести итоговое сообщение: проверьте предупреждения и реальное состояние контейнеров, например через `bash linux/run-global.sh status` и `docker ps`. В каталоге комплекта проверьте ветку и локальные изменения, сохраните их отдельно и обновляйте **все файлы комплекта вместе**. Например, если текущая ветка отслеживает нужную удалённую ветку:
+
+```sh
+git status --short --branch
+git log -1 --oneline
+git pull --ff-only
+```
+
+Если обновление невозможно из-за локальных правок или расхождения веток, сначала разберите и сохраните их; не используйте `git reset --hard` или `git clean` как способ установки. Для копии из ZIP вместо `git pull` распакуйте новую версию в отдельный каталог и перенесите только согласованные пользовательские изменения, сохранив конфигурацию и данные. Затем из обновлённого каталога на Linux выполните `bash linux/run-global.sh start`, на Windows — `.\windows\run-local.ps1 start`. Windows-полная установка дополнительно переустанавливает/обновляет пакетные зависимости по манифесту и останавливает шлюз на время работы; `-MetaMcpOnly` этого не делает. Обычный запуск или повтор установщика не обновляет автоматически уже существующий клон MetaMCP; на Windows существующий управляемый образ также сохраняется. Не считайте обновление комплекта обновлением исходного приложения.
+
+### Независимые копии и восстановление
+
+- **Windows:** сохраните актуальную согласованную резервную копию PostgreSQL вне тома Docker и вне самого компьютера, а также каталог `%USERPROFILE%\mcp-local` (или `$env:MCP_LOCAL_DIR`), данные серверов и пользовательские проекты, включая данные вне этого каталога. Особенно важны `config\private\metamcp.env`, `metamcp-state.json` и `secrets.json`: они связаны с базой, ключом шлюза, путём клона и идентификатором Docker-проекта. Сохраните также нужные тома комплекта и образы `*-app-backup:*`, если они используются. Образы, дампы, логи и эти файлы могут содержать секреты.
+- **Linux:** сохраните `~/mcp-global/config`, `~/mcp-global/metamcp/.env` и пользовательские Compose-файлы, согласованную резервную копию PostgreSQL, `~/mcp-global/data` для Neo4j/Qdrant и именованные тома MetaMCP, Cognee, Memory Bank и GDrive. Для согласованности используйте средства резервного копирования соответствующих БД и сервисов; не считайте копию работающего каталога БД автоматически пригодной для восстановления.
+- Автоматический Windows `pg_dump` при первом применении регистрации, миграции, явном `seed` или сбросе находится в `mcpkit-backups` **внутри того же тома PostgreSQL**, под `PGDATA`. Скопируйте нужную актуальную копию в защищённое независимое хранилище или заранее создайте отдельную резервную копию; сам том не является независимой копией. Дамп отражает состояние на момент своего создания и имеет специальный формат PostgreSQL (`pg_dump -Fc`). Для копирования готового файла из контейнера используйте бинарно-безопасный способ, например `docker cp` с фактического пути `<PGDATA>/mcpkit-backups/<имя>` внутри PostgreSQL-контейнера; значение `PGDATA` нужно определять внутри контейнера. Перенаправление вывода внешней исполняемой команды через `>` в Windows PowerShell 5.1 может повредить бинарный файл.
+- В комплекте нет общей команды `restore` или автоматического переноса на другой компьютер. Проверяйте резервные копии в изолированной среде и используйте подходящие средства PostgreSQL/Docker и соответствующих серверов: например, документацию [PostgreSQL по резервному копированию](https://www.postgresql.org/docs/16/backup-dump.html), [`pg_restore`](https://www.postgresql.org/docs/16/app-pgrestore.html) для дампа в специальном формате и [Docker по копированию томов](https://docs.docker.com/engine/storage/volumes/#back-up-restore-or-migrate-data-volumes). Восстановление поверх существующей базы может перезаписать данные; сначала сохраните её и проверьте совместимость версий, путей, Docker-проекта и секретов. Если Windows-секрет или управляемый образ пропал, восстановите его из копии; не удаляйте оставшиеся файлы состояния и тома и не рассчитывайте на регенерацию ключей при переустановке.
+- При прерванном изменении портов или конфигурации Windows исправьте причину и повторите `start`. Если результат **сброса** неизвестен, не повторяйте сброс: выполните `start`, проверьте интерфейс и резервную копию, как описано выше. Удалять оставшийся файл блокировки допустимо только убедившись, что соответствующая операция действительно не выполняется; не убивайте неизвестный процесс и не удаляйте данные для освобождения порта.
+
+<a id="seed-regression-tests"></a>
+## Регрессионные тесты регистрации
+
+Для интеграционных тестов нужны `psql`, `jq` и отдельная временная база PostgreSQL: тестовому пользователю должно быть разрешено создавать и удалять схемы. Docker и установка системных пакетов заменены заглушками; реальные контейнеры и системные пакеты не изменяются.
 
 ```sh
 TEST_DATABASE_URL='postgresql://user:password@localhost:5432/test_db' bash tests/test-global-seed.sh
@@ -281,7 +359,7 @@ TEST_DATABASE_URL='postgresql://user:password@localhost:5432/test_db' bash tests
 TEST_DATABASE_URL='postgresql://user:password@localhost:5432/test_db' bash tests/test-windows-reset.sh
 ```
 
-Gateway and installer/lifecycle tests use Node 24 and an installed copy of `mcp-proxy@6.10.0`. The PowerShell tests also require PowerShell Core and Python 3 on a POSIX host; they run the actual scripts with synthetic installers and POSIX MCP executables:
+Для тестов шлюза, установщика и управления жизненным циклом нужны Node 24 и установленный `mcp-proxy@6.10.0`. Тестам PowerShell также нужны PowerShell Core и Python 3 на POSIX-хосте; они запускают реальные скрипты с имитациями установщиков и исполняемых MCP-файлов POSIX:
 
 ```sh
 npm install --prefix /tmp/mcp-proxy-test mcp-proxy@6.10.0
@@ -290,7 +368,7 @@ export MCP_POWERSHELL="$(command -v pwsh)"
 node --test tests/test-windows-gateway.mjs tests/test-local-cli.mjs tests/test-windows-installer.mjs tests/test-windows-docker.mjs
 ```
 
-An optional real semantic-search test uses an existing vectorstore installation and a pre-populated `Xenova/all-MiniLM-L6-v2` model cache (the model is about 90 MB). It forbids model downloads during the test and writes only to a temporary directory:
+Необязательный тест реального семантического поиска использует существующую установку vectorstore и заранее заполненный кэш модели `Xenova/all-MiniLM-L6-v2` (около 90 МБ). Во время теста загрузка модели запрещена, запись ведётся только во временный каталог:
 
 ```sh
 MCP_PROXY_CLI=/absolute/path/to/mcp-proxy.mjs \
@@ -299,4 +377,4 @@ MCP_VECTORSTORE_CACHE=/absolute/path/to/@xenova/transformers/.cache \
   node --test tests/test-vectorstore-real.mjs
 ```
 
-These protocol/database tests do not replace a native Windows test of installation, desktop interaction, Everything, Chromium, Obsidian, firewall rules, or actual Docker Desktop networking.
+Эти тесты протокола и базы данных не заменяют проверку на Windows: установки, взаимодействия с рабочим столом, Everything, Chromium, Obsidian, правил брандмауэра и реальной сети Docker Desktop.
