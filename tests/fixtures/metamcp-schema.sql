@@ -25,6 +25,7 @@ CREATE TABLE mcp_servers (
     created_at timestamptz NOT NULL DEFAULT now(),
     bearer_token text,
     headers jsonb NOT NULL DEFAULT '{}'::jsonb,
+    forward_headers jsonb NOT NULL DEFAULT '{}'::jsonb,
     user_id text REFERENCES users(id) ON DELETE CASCADE,
     CONSTRAINT mcp_servers_name_user_unique_idx UNIQUE (name, user_id),
     CONSTRAINT mcp_servers_name_regex_check CHECK (name ~ '^[a-zA-Z0-9_-]+$'),
@@ -50,6 +51,9 @@ CREATE TABLE endpoints (
     namespace_uuid uuid NOT NULL REFERENCES namespaces(uuid) ON DELETE CASCADE,
     enable_api_key_auth boolean NOT NULL DEFAULT true,
     enable_oauth boolean NOT NULL DEFAULT false,
+    enable_max_rate boolean NOT NULL DEFAULT false,
+    enable_client_max_rate boolean NOT NULL DEFAULT false,
+    enable_metamcp_admin_tools boolean NOT NULL DEFAULT false,
     use_query_param_auth boolean NOT NULL DEFAULT false,
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
@@ -74,5 +78,9 @@ CREATE TABLE namespace_tool_mappings (
     tool_uuid uuid NOT NULL REFERENCES tools(uuid) ON DELETE CASCADE,
     mcp_server_uuid uuid NOT NULL REFERENCES mcp_servers(uuid) ON DELETE CASCADE,
     status mcp_server_status NOT NULL DEFAULT 'ACTIVE',
+    override_name text,
+    override_title text,
+    override_description text,
+    override_annotations jsonb,
     CONSTRAINT namespace_tool_mappings_unique_idx UNIQUE (namespace_uuid, tool_uuid)
 );

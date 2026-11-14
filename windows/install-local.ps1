@@ -191,7 +191,7 @@ if ($MetaMcpOnly) {
     Ensure-DockerPrerequisite
     Step 'Starting local MetaMCP and connecting existing Windows servers'
     Invoke-Runner 'start'
-    Ok 'MetaMCP is running. Register in its UI, then run run-local.ps1 seed to connect the Windows servers.'
+    Ok 'MetaMCP is running. Shared Windows groups are initialized automatically; register in the UI and create an API key.'
     exit 0
 }
 
@@ -380,7 +380,7 @@ catch { Fail "LOCAL stack: $($_.Exception.Message)" }
 
 Write-Host "`nSettings: $BaseDir\config\local-settings.json"
 Write-Host "Secrets:  $PrivateDir\secrets.json (keep private)"
-Write-Host 'MetaMCP: register in the UI, then run .\windows\run-local.ps1 seed. Disable signup yourself in MetaMCP Settings.'
+Write-Host 'MetaMCP: register in the UI and create an API key. Shared server groups are set up automatically. Disable signup yourself in MetaMCP Settings.'
 Write-Host 'Commands: .\windows\run-local.ps1 status | logs | restart | stop | ports'
 Write-Host 'Change existing MetaMCP ports: .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009'
 Note 'Obsidian requires its Local REST API plugin and key; the server waits until configured.'

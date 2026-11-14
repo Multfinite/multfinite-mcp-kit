@@ -455,8 +455,9 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
         throw 'Automatic Docker Desktop connection requires the existing gateway to use local IPv4 HTTP. Your customized gateway settings were not changed.'
     }
     if ($RequestedOwner -and -not (Test-MetaEmail $RequestedOwner)) { throw 'OwnerEmail must be the email of an existing MetaMCP account.' }
-    $owner = if ($RequestedOwner) { $RequestedOwner } else { $State.ownerEmail }
-    $bundle = [ordered]@{ version = 1; hostId = $settings.hostId; ownerEmail = $owner; port = $settings.port; gatewayKey = $config.secrets.gatewayApiKey }
+    # Shared resources do not belong to an account. Only an explicitly
+    # requested email is resolved (for the legacy administrator allowlist).
+    $bundle = [ordered]@{ version = 1; hostId = $settings.hostId; ownerEmail = $RequestedOwner; port = $settings.port; gatewayKey = $config.secrets.gatewayApiKey }
     $json = ConvertTo-Json -InputObject $bundle -Depth 10 -Compress
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
     $sql = Get-Content -LiteralPath (Join-Path $ScriptDir 'seed-local.sql') -Raw -Encoding UTF8
@@ -467,38 +468,32 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
     # The input includes a gateway key, so never print SQL/stdout/stderr on an
     # error. The transaction rolls back if migrations or account checks fail.
     Assert-DockerResult $result 'local server registration; check MetaMCP logs and retry' $false
-    $parts = $result.stdout.Trim() -split '\|', 4
-    if ($parts.Count -ne 4) { throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.' }
-    $message = switch ($parts[0]) {
-        'waiting'   { 'No MetaMCP account exists yet. Register in the MetaMCP UI, then run .\windows\run-local.ps1 seed.' }
-        'missing'   { 'The selected MetaMCP account was not found. Register first, then run seed -OwnerEmail <your-email>.' }
-        'ambiguous' { 'Several MetaMCP accounts exist or the email is ambiguous. Run seed -OwnerEmail <your-email> for a unique account.' }
-        default     { '' }
-    }
-    if ($message) {
-        if ($Force) { throw $message }
-        Write-Host $message
-        return $null
-    }
-    if ($parts[0] -notin @('seeded', 'skipped') -or $parts[3]) {
-        if ($parts[3]) { throw "Some existing server records conflict and were not changed or linked: $($parts[3])" }
-        throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.'
+    $parts = $result.stdout.Trim() -split '\|', 6
+    if ($parts.Count -ne 6) { throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.' }
+    switch ($parts[0]) {
+        'missing'   { throw 'The selected MetaMCP account was not found. Register first, then run seed -OwnerEmail <your-email>.' }
+        'ambiguous' { throw 'The selected MetaMCP email is ambiguous. Choose a unique existing account with seed -OwnerEmail <your-email>.' }
+        'seeded'    { }
+        'skipped'   { }
+        default     { throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.' }
     }
     $baseGroup = 'local-' + $settings.hostId
-    if (($parts[0] -eq 'seeded' -and -not $parts[1]) -or
-        ($parts[1] -and $parts[1] -cne $baseGroup -and $parts[1] -cnotmatch ('^' + [regex]::Escape($baseGroup) + '-[a-f0-9]{8}$'))) {
-        throw 'Unexpected local MetaMCP endpoint name; existing state was not changed.'
+    $allowedGroups = foreach ($suffix in @('system', 'files', 'code', 'web', 'data', 'memory')) { $baseGroup + '-' + $suffix }
+    if ($parts[2]) {
+        foreach ($group in @($parts[2] -split ',')) {
+            if ($allowedGroups -cnotcontains $group) { throw 'Unexpected local MetaMCP endpoint name; existing state was not changed.' }
+        }
     }
-    try { $actualOwner = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($parts[2])) }
-    catch { throw 'Unexpected MetaMCP account in registration result; existing state was not changed.' }
-    if (-not (Test-MetaEmail $actualOwner)) { throw 'Unexpected MetaMCP account in registration result; existing state was not changed.' }
-
-    $changed = $State.ownerEmail -cne $actualOwner
-    $State.ownerEmail = $actualOwner
-    # On an upgraded instance, keep the existing administrator and explicitly
-    # add the selected, already-registered owner. Never demote old accounts.
-    # A fresh single-user instance has no allowlist and needs no recreation.
+    # Explicit selection remains backward-compatible for legacy installations
+    # with an admin allowlist. Ordinary public seeding never chooses an owner.
     if ($RequestedOwner) {
+        try { $actualOwner = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($parts[1])) }
+        catch { throw 'Unexpected MetaMCP account in registration result; existing state was not changed.' }
+        if (-not (Test-MetaEmail $actualOwner) -or $actualOwner -ine $RequestedOwner) {
+            throw 'Unexpected MetaMCP account in registration result; existing state was not changed.'
+        }
+        $changed = $State.ownerEmail -cne $actualOwner
+        $State.ownerEmail = $actualOwner
         $admins = Get-MetaAdminEmails $State
         if ($admins -and @($admins.Split(',') | Where-Object { $_ -ieq $actualOwner }).Count -eq 0) {
             $State.additionalAdminEmails = @($State.additionalAdminEmails) + @($actualOwner)
@@ -506,14 +501,33 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
             $changed = $true
             Write-Host 'Adding the selected existing account to the MetaMCP administrator allowlist; existing administrators are retained.'
         }
-    }
-    if ($changed) { $null = Save-Json $MetaStateFile $State }
-    if ($parts[0] -eq 'seeded') {
-        Write-Host 'Registered the 13 Windows servers in a private, API-key-protected MetaMCP endpoint.'
+        if ($changed) { $null = Save-Json $MetaStateFile $State }
+    } elseif ($parts[1]) { throw 'Unexpected MetaMCP account in registration result; existing state was not changed.' }
+
+    if ($parts[3]) { Write-Host "[WARN] Unauthenticated endpoint detected or previously blocked group: $($parts[3]). Seed adds no tools while open; existing mappings may already be exposed. Protect all endpoints and run seed again." -ForegroundColor Yellow }
+    if ($parts[4]) { Write-Host "[WARN] Existing names or settings conflict and were not changed: $($parts[4]). Resolve the conflicts and run seed again." -ForegroundColor Yellow }
+    if ($parts[5]) { Write-Host "[WARN] Removed, disabled, or customized legacy servers were not re-exposed: $($parts[5]). Review them before explicitly running seed." -ForegroundColor Yellow }
+    if ($parts[0] -eq 'seeded' -and -not ($parts[3] -or $parts[4] -or $parts[5])) {
+        Write-Host 'Registered the 13 Windows servers in shared, API-key-protected groups.'
+    } elseif ($parts[0] -eq 'seeded') {
+        Write-Host 'Shared Windows server groups were initialized; review the warnings above for skipped records.'
     } else {
         Write-Host 'The local server configuration was already initialized; user edits and deletions were preserved.'
     }
-    return $parts[1]
+    return $parts[2]
+}
+function Show-MetaEndpoints($State, [string]$Groups) {
+    if (-not $Groups) {
+        Write-Host 'No usable shared MCP endpoint was found. Check the warnings and MetaMCP settings.'
+        return
+    }
+    $groupNames = @($Groups -split ',')
+    foreach ($group in $groupNames) {
+        Write-Host "MCP endpoint ($group): http://localhost:$($State.port)/metamcp/$group/mcp"
+    }
+    if ($groupNames.Count -lt 6) {
+        Write-Host '[WARN] One or more shared endpoints are missing, conflicting or open. Check MetaMCP settings before explicitly running seed.' -ForegroundColor Yellow
+    }
 }
 function Test-MetaBridge($State) {
     $running = Get-RunningState
@@ -609,14 +623,13 @@ function Start-MetaMcp {
             Assert-DockerResult $start 'MetaMCP start'
         }
         Wait-MetaMcp $state
-        $endpointGroup = Invoke-MetaSeed $state $false
+        $endpointGroups = Invoke-MetaSeed $state $false
         Test-MetaBridge $state
         Write-Host "MetaMCP: http://localhost:$($state.port)"
-        if ($endpointGroup) { Write-Host "MCP endpoint: http://localhost:$($state.port)/metamcp/$endpointGroup/mcp" }
-        else { Write-Host 'The private MCP endpoint will be shown after an account has been registered and seeded.' }
+        Show-MetaEndpoints $state $endpointGroups
         if ($state.backendPort -gt 0) { Write-Host "MetaMCP backend (loopback only): http://localhost:$($state.backendPort)" }
         Write-Host 'Sign in or register in MetaMCP. To close registration, use Settings > Authentication > Disable UI Registration.'
-        Write-Host 'Create a private API key in the MetaMCP UI for the MCP client.'
+        Write-Host 'Create an API key in the MetaMCP UI; new shared endpoints require it.'
     } finally { Exit-MetaLock $lock }
 }
 function Show-MetaPorts {
@@ -768,12 +781,10 @@ function Repair-MetaSeed([string]$RequestedOwner = '') {
         Test-MetaCompose $state
         Test-MetaResources $state
         Wait-MetaMcp $state
-        $endpointGroup = Invoke-MetaSeed $state $true $RequestedOwner
+        $endpointGroups = Invoke-MetaSeed $state $true $RequestedOwner
         Test-MetaBridge $state
         $needsApply = $state.authPending
-        if (-not $needsApply -and $endpointGroup) {
-            Write-Host "MCP endpoint: http://localhost:$($state.port)/metamcp/$endpointGroup/mcp"
-        }
+        if (-not $needsApply) { Show-MetaEndpoints $state $endpointGroups }
     } finally { Exit-MetaLock $lock }
     # An explicitly selected owner of a legacy multi-user instance becomes an
     # administrator without removing the old allowlist. Recreate only the app,

@@ -5,7 +5,6 @@
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
-const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 const stateFile = process.env.MCP_TEST_DOCKER_STATE;
@@ -136,19 +135,19 @@ async function main() {
       const bundle = JSON.parse(Buffer.from(match[1], 'base64').toString('utf8'));
       if (process.env.MCP_TEST_CAPTURE) fs.writeFileSync(process.env.MCP_TEST_CAPTURE, JSON.stringify(bundle));
       const users = state.users || [];
-      const matches = bundle.ownerEmail ? users.filter((u) => u.email.toLowerCase() === bundle.ownerEmail.toLowerCase()) : users;
-      if (!matches.length) { console.log(`${bundle.ownerEmail ? 'missing' : 'waiting'}|||`); return; }
-      if (matches.length !== 1) { console.log('ambiguous|||'); return; }
-      const user = matches[0]; const base = `local-${bundle.hostId}`;
-      state.seedRecords ||= {};
-      const previous = state.seedRecords[user.id];
-      const occupied = Object.values(state.seedRecords).some((record) => record.group === base && record.owner !== user.id);
-      const group = previous?.group || (occupied ? `${base}-${createHash('md5').update(user.id).digest('hex').slice(0, 8)}` : base);
+      const matches = bundle.ownerEmail ? users.filter((u) => u.email.toLowerCase() === bundle.ownerEmail.toLowerCase()) : [];
+      if (bundle.ownerEmail && !matches.length) { console.log('missing|||||'); return; }
+      if (bundle.ownerEmail && matches.length !== 1) { console.log('ambiguous|||||'); return; }
+      const base = `local-${bundle.hostId}`;
       const force = text.includes("\\set local_force 'true'");
-      state.seedRecords[user.id] = previous || { owner: user.id, group, serverCount: 13 };
+      const previous = state.sharedSeed;
+      state.sharedSeed ||= { serverCount: 13, owner: null, groups: ['code', 'data', 'files', 'memory', 'system', 'web'].map((suffix) => `${base}-${suffix}`) };
       state.seeds++; save();
       const result = previous && !force ? 'skipped' : 'seeded';
-      console.log(`${result}|${group}|${Buffer.from(user.email).toString('base64')}|`); return;
+      const warnings = result === 'seeded' ? (state.seedWarnings || {}) : {};
+      const groups = state.sharedSeed.groups.filter((group) => !(warnings.blocked || '').split(',').includes(group));
+      const owner = matches[0] ? Buffer.from(matches[0].email).toString('base64') : '';
+      console.log(`${result}|${owner}|${groups.join(',')}|${warnings.blocked || ''}|${warnings.conflicts || ''}|${warnings.deferred || ''}`); return;
     }
     if (script.includes('curl')) { if (state.running) return; fail('not running'); }
   }

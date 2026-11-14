@@ -7,6 +7,7 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { prepareDockerFixture } from './fixtures/docker-test-helpers.mjs';
@@ -72,8 +73,10 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     const secretsFile = path.join(base, 'config/private/secrets.json'); const secrets = readJson(secretsFile);
     installFakes(base);
     const first = invoke(env, setup.runner, 'start'); success(first);
-    assert.match(first.stdout, /No MetaMCP account exists yet/);
-    assert.doesNotMatch(first.stdout, /Registered the 13 Windows servers/);
+    assert.match(first.stdout, /Registered the 13 Windows servers in shared/);
+    for (const suffix of ['system', 'files', 'code', 'web', 'data', 'memory']) {
+      assert.match(first.stdout, new RegExp(`http://localhost:12080/metamcp/local-${settings.hostId}-${suffix}/mcp`));
+    }
     assert.match(first.stdout, /Docker Desktop can reach the authenticated loopback/);
     assert.match(first.stdout, /MetaMCP: http:\/\/localhost:12080/);
     assert.doesNotMatch(first.stdout, /SSH|VPN/i);
@@ -97,8 +100,10 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).appliedAuth.bootstrap, 'false');
     const credentials = invoke(env, setup.runner, 'credentials'); success(credentials);
     assert.match(credentials.stdout, /No bootstrap login was created/);
-    const beforeSignupSeed = invoke(env, setup.runner, 'seed');
-    assert.notEqual(beforeSignupSeed.status, 0); assert.match(beforeSignupSeed.stdout, /Register in the MetaMCP UI/);
+    const beforeSignupSeed = invoke(env, setup.runner, 'seed'); success(beforeSignupSeed);
+    assert.match(beforeSignupSeed.stdout, /shared, API-key-protected groups/);
+    assert.deepEqual(readJson(setup.env.MCP_TEST_DOCKER_STATE).users || [], []);
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).sharedSeed.owner, null);
     const trace = fs.readFileSync(setup.env.MCP_TEST_DOCKER_TRACE, 'utf8');
     for (const secret of [secrets.gatewayApiKey, metaEnv.POSTGRES_PASSWORD, metaEnv.BETTER_AUTH_SECRET]) {
       assert.ok(!trace.includes(secret), 'secrets must not appear in docker command arguments');
@@ -110,9 +115,9 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     signedUp.users = [{ id: 'alice-id', email: 'alice@example.com' }]; signedUp.signupDisabled = true;
     writeJson(setup.env.MCP_TEST_DOCKER_STATE, signedUp);
     const second = invoke(env, setup.runner, 'start'); success(second);
-    assert.match(second.stdout, /13 Windows servers/);
-    assert.equal(readJson(metaFile).ownerEmail, 'alice@example.com');
-    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).seedRecords['alice-id'].serverCount, 13);
+    assert.match(second.stdout, /already initialized/);
+    assert.equal(readJson(metaFile).ownerEmail, '');
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).sharedSeed.serverCount, 13);
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).signupDisabled, true);
     const stateBefore = fs.readFileSync(metaFile, 'utf8');
     const third = invoke(env, setup.runner, 'start'); success(third);
@@ -124,6 +129,19 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     success(invoke(env, setup.runner, 'status'));
     success(invoke(env, setup.runner, 'seed'));
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).signupDisabled, true);
+    // Partial seed diagnostics must not hide the other usable groups.
+    const withWarnings = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    const publicPrefix = `winpub-${createHash('md5').update(settings.hostId).digest('hex').slice(0, 8)}`;
+    withWarnings.seedWarnings = { blocked: `local-${settings.hostId}-web`, conflicts: `server:${publicPrefix}-git`, deferred: `${publicPrefix}-obsidian` };
+    writeJson(setup.env.MCP_TEST_DOCKER_STATE, withWarnings);
+    const warningResult = invoke(env, setup.runner, 'seed'); success(warningResult);
+    assert.match(warningResult.stdout, /unauthenticated endpoint/i);
+    assert.match(warningResult.stdout, /settings conflict/);
+    assert.match(warningResult.stdout, /legacy servers were not re-exposed/);
+    assert.match(warningResult.stdout, new RegExp(`local-${settings.hostId}-code/mcp`));
+    assert.doesNotMatch(warningResult.stdout, new RegExp(`local-${settings.hostId}-web/mcp`));
+    const afterWarnings = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    delete afterWarnings.seedWarnings; writeJson(setup.env.MCP_TEST_DOCKER_STATE, afterWarnings);
 
     const beforeUnsafe = readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls;
     const unsafe = invoke({ ...env, MCP_TEST_UNSAFE_PORT: '1' }, setup.runner, 'start');
@@ -224,6 +242,7 @@ test('legacy bootstrap is disabled without changing accounts, signup, volumes or
     meta.ownerEmail = oldEmail; writeJson(metaFile, meta);
     const previous = readJson(setup.env.MCP_TEST_DOCKER_STATE);
     previous.users = [{ id: 'legacy-id', email: oldEmail }]; previous.signupDisabled = true;
+    delete previous.sharedSeed; // model a database created by the old private seeder
     previous.seedRecords = { 'legacy-id': { owner: 'legacy-id', group: `local-${settings.hostId}`, serverCount: 13 } };
     previous.appliedAuth = { bootstrap: 'true', email: oldEmail, password: oldPassword, admins: oldEmail };
     const volumes = JSON.stringify(previous.volume);
@@ -232,6 +251,10 @@ test('legacy bootstrap is disabled without changing accounts, signup, volumes or
     const migrated = invoke(env, setup.runner, 'start'); success(migrated);
     let docker = readJson(setup.env.MCP_TEST_DOCKER_STATE);
     assert.equal(docker.signupDisabled, true, 'upgrade must not reopen a closed signup');
+    assert.equal(docker.sharedSeed.owner, null);
+    assert.equal(docker.sharedSeed.serverCount, 13);
+    assert.equal(docker.seedRecords['legacy-id'].group, `local-${settings.hostId}`, 'legacy endpoint remains intact');
+    assert.match(migrated.stdout, new RegExp(`local-${settings.hostId}-code/mcp`));
     assert.deepEqual(docker.appliedAuth, { bootstrap: 'false', email: '', password: '', admins: oldEmail });
     assert.equal(readJson(metaFile).manualAuthApplied, true);
     assert.equal(docker.appRecreates, 1); assert.equal(JSON.stringify(docker.volume), volumes);
@@ -248,15 +271,15 @@ test('legacy bootstrap is disabled without changing accounts, signup, volumes or
     docker = readJson(setup.env.MCP_TEST_DOCKER_STATE);
     assert.equal(docker.users.length, 2, 'neither account is deleted');
     assert.equal(docker.seedRecords['legacy-id'].group, `local-${settings.hostId}`);
-    assert.match(docker.seedRecords['manual-id'].group, new RegExp(`^local-${settings.hostId}-[a-f0-9]{8}$`));
-    assert.equal(docker.seedRecords['manual-id'].serverCount, 13);
+    assert.equal(docker.seedRecords['manual-id'], undefined, 'no new private endpoint is created');
+    assert.equal(docker.sharedSeed.serverCount, 13);
     assert.equal(docker.appliedAuth.admins, `${oldEmail},person@example.com`);
     assert.equal(docker.appRecreates, 2); assert.equal(JSON.stringify(docker.volume), volumes);
     assert.equal(docker.signupDisabled, false, 'the user must close signup manually');
     assert.equal(readJson(metaFile).ownerEmail, 'person@example.com');
     assert.deepEqual(readJson(metaFile).additionalAdminEmails, ['person@example.com']);
     assert.equal(fs.readFileSync(envFile, 'utf8'), oldEnv);
-    assert.match(selected.stdout, new RegExp(docker.seedRecords['manual-id'].group));
+    assert.match(selected.stdout, new RegExp(`local-${settings.hostId}-code/mcp`));
 
     docker.signupDisabled = true; writeJson(setup.env.MCP_TEST_DOCKER_STATE, docker); // UI setting
     success(invoke(env, setup.runner, 'start'));
