@@ -369,7 +369,7 @@ function metaRecoverySnapshot(ctx, state) {
       app.POSTGRES_PASSWORD !== password || postgres.POSTGRES_USER !== 'metamcp_user' || postgres.POSTGRES_DB !== 'metamcp_db' ||
       app.POSTGRES_USER !== 'metamcp_user' || app.POSTGRES_DB !== 'metamcp_db' || app.POSTGRES_HOST !== 'postgres' || app.POSTGRES_PORT !== '5432' ||
       app.DATABASE_URL !== `postgresql://metamcp_user:${password}@postgres:5432/metamcp_db`) {
-    fail('Container database credentials or configuration do not match the original kit; no file was changed.');
+    fail('Container database credentials or configuration do not match the expected kit format; no file was changed.');
   }
   if (app.APP_URL !== state.appUrl || app.NEXT_PUBLIC_APP_URL !== state.appUrl ||
       typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
@@ -414,14 +414,18 @@ async function recoverMetaEnv(ctx, state) {
   const stateItem = fs.lstatSync(stateFile);
   if (!stateItem.isFile() || stateItem.isSymbolicLink() || stateItem.size > 1024 * 1024) fail('The kit state must be a regular file; nothing was changed.');
   const stateBytes = fs.readFileSync(stateFile);
+  let savedState;
+  try { savedState = JSON.parse(stateBytes.toString('utf8')); } catch { fail('Cannot read the kit state; nothing was changed.'); }
+  if (JSON.stringify(savedState) !== JSON.stringify(state)) fail('The kit state changed during recovery; no file was changed.');
   const file = path.join(priv, '.env');
   const current = privateRegularFile(file);
   const snapshot = metaRecoverySnapshot(ctx, state);
   const recovered = `POSTGRES_PASSWORD=${snapshot.password}\nBETTER_AUTH_SECRET=${snapshot.secret}\n` +
     `METAMCP_ADMIN_EMAILS=${safeDotenvLiteral(snapshot.admins)}\nEXTRA_TRUSTED_ORIGINS=${safeDotenvLiteral(snapshot.extraOrigins)}\n`;
   if (current) {
-    // Refuse to overwrite another valid credential, even with a backup. A
-    // matching or missing/invalid line can be recovered from both containers.
+    // Never replace a nonempty credential we cannot identify as the same
+    // literal. PostgreSQL can have non-kit passwords and dotenv comments or
+    // interpolation are ambiguous; those cases require manual review.
     let matching = 0;
     for (const [key, value] of [['POSTGRES_PASSWORD', snapshot.password], ['BETTER_AUTH_SECRET', snapshot.secret]]) {
       const pattern = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=\\s*(.*)$`);
@@ -429,23 +433,25 @@ async function recoverMetaEnv(ctx, state) {
       if (matches.length > 1) fail(`Multiple ${key} entries need manual review; no file was changed.`);
       if (matches.length === 1) {
         const raw = matches[0][1].trim();
-        const normalized = /^(?:[a-f0-9]{64}|"[a-f0-9]{64}"|'[a-f0-9]{64}')$/.test(raw) ? raw.replace(/^['"]|['"]$/g, '') : '';
-        if (normalized && normalized !== value) fail(`A different valid ${key} is already present; no file was changed.`);
+        const empty = raw === '' || raw === "''" || raw === '""';
+        const same = raw === value || raw === `'${value}'` || raw === `"${value}"`;
+        if (!empty && !same) fail(`A different or unrecognized ${key} needs manual review; no file was changed.`);
         if (matches[0][0] === `${key}=${value}`) matching++;
       }
     }
-    if (matching === 2) fail('The private .env already contains the original credentials; no recovery was performed.');
+    if (matching === 2) fail('The private .env already contains the same credentials as the containers; no recovery was performed.');
   }
   const message = `Recover the MetaMCP .env for ${state.project} from its stopped, verified containers?\n` +
     'The existing .env will be saved as a private backup. Containers and volumes are not changed.\n' +
-    'The container configuration may be stale if the database password was separately changed with SQL; stop if that happened.';
+    'Only MetaMCP settings from the containers will be restored; other or unapplied settings remain in the backup.\n' +
+    'Container values may not be the current DB password or historical auth secret (e.g. after SQL changes or recreation with a different .env). Stop if unsure.';
   if (!(await confirm(message, `RECOVER ${state.project}`))) { console.log('Cancelled; no file was changed.'); return; }
   const rechecked = metaRecoverySnapshot(ctx, state);
   for (const key of ['appId', 'postgresId', 'password', 'secret', 'admins', 'extraOrigins']) {
     if (rechecked[key] !== snapshot[key]) fail('Container configuration changed during recovery; no file was changed.');
   }
   const checkedState = fs.lstatSync(stateFile);
-  if (!checkedState.isFile() || checkedState.isSymbolicLink() || !fs.readFileSync(stateFile).equals(stateBytes)) {
+  if (!checkedState.isFile() || checkedState.isSymbolicLink() || checkedState.size > 1024 * 1024 || !fs.readFileSync(stateFile).equals(stateBytes)) {
     fail('The kit state changed during recovery; no file was changed.');
   }
   const now = privateRegularFile(file);
