@@ -206,26 +206,34 @@ header "Конфигурация ключей API (.env)"
 GLOBAL_ENV="${CONFIG_DIR}/.env"
 
 if [ ! -f "$GLOBAL_ENV" ]; then
-    cat > "$GLOBAL_ENV" << EOF
-# ── OpenAI-compatible APIs: each service uses its own key and base URL ──
-GRAPHITI_API_KEY=
-GRAPHITI_BASE_URL=https://api.openai.com/v1
-# Graphiti uses this API key/base URL for its LLM and embeddings.
-# GRAPHITI_MODEL=gpt-4o-mini
+    # Keep this heredoc quoted: examples/comments contain backticks and must not execute.
+    cat > "$GLOBAL_ENV" <<'EOF'
+# Global defaults for LLM APIs. Per-service values below override these.
+LLM_API_ENDPOINT=https://api.openai.com/v1
+LLM_API_KEY=
+LLM_API_MODEL=gpt-4o-mini
+LLM_API_PROVIDER=openai
+
+# Graphiti: its LLM and embeddings share this API endpoint/key/model.
+# GRAPHITI_API_ENDPOINT=
+# GRAPHITI_API_KEY=
+# GRAPHITI_API_MODEL=gpt-4o-mini
 # GRAPHITI_EMBEDDER_MODEL=text-embedding-3-small
 # GRAPHITI_GROUP_ID=multfinite-mcp-kit-global
 
-# Cognee LLM and embeddings are independently configurable. Set a provider,
-# API key, model and OpenAI-compatible /v1 endpoint for each component.
-COGNEE_LLM_PROVIDER=openai
-COGNEE_LLM_API_KEY=
-COGNEE_LLM_MODEL=gpt-4o-mini
-COGNEE_LLM_ENDPOINT=https://api.openai.com/v1
-COGNEE_EMBEDDING_PROVIDER=openai
+# Cognee LLM can override every global API default independently.
+# COGNEE_LLM_API_ENDPOINT=
+# COGNEE_LLM_API_KEY=
+# COGNEE_LLM_API_MODEL=gpt-4o-mini
+# COGNEE_LLM_API_PROVIDER=openai
+
+# Cognee embeddings are independently configurable; API endpoint/key/provider
+# inherit global values when blank, while the embedding model remains specific.
+COGNEE_EMBEDDING_API_ENDPOINT=
 COGNEE_EMBEDDING_API_KEY=
-COGNEE_EMBEDDING_MODEL=text-embedding-3-small
+COGNEE_EMBEDDING_API_MODEL=text-embedding-3-small
+COGNEE_EMBEDDING_API_PROVIDER=openai
 COGNEE_EMBEDDING_DIMENSIONS=1536
-COGNEE_EMBEDDING_ENDPOINT=https://api.openai.com/v1
 
 # ── Neo4j & Qdrant ──────────────────────────────────────
 NEO4J_URI=bolt://localhost:7687
