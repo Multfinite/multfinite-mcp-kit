@@ -1,6 +1,6 @@
 # Сеть Hyper-V, WSL 2 и Windows-ВМ с выходом в интернет
 
-Это отдельная, необязательная настройка сети для [Multfinite MCP Kit](../README.md). В примере Windows-хост, гостевая Windows-ВМ и, **только при поддержке выбранной конфигурацией WSL**, WSL 2 используют внутреннюю подсеть. Команды изменяют сеть компьютера и могут прервать удалённое подключение. Выполняйте их только на своей машине, имея локальный доступ и возможность отката. Нативная настройка Windows, Hyper-V и WSL по этому руководству не проверялась.
+Это отдельная, необязательная настройка сети для [Multfinite MCP Kit](../README.md). В примере Windows-хост, Windows-VM и, **только при поддержке выбранной конфигурацией WSL**, WSL 2 используют внутреннюю подсеть. Команды изменяют сеть компьютера и могут прервать удалённое подключение. Выполняйте их только на своей машине, имея локальный доступ и возможность отката. Нативная настройка Windows, Hyper-V и WSL по этому руководству не проверялась.
 
 ## Схема и важное ограничение WSL
 
@@ -9,8 +9,8 @@
 | Внутренний коммутатор Hyper-V | `NATSwitch` | Соединяет хост и подключённые к нему виртуальные адаптеры. |
 | Подсеть | `192.168.100.0/24` | Маска `255.255.255.0`; адреса ниже должны быть свободны. |
 | Windows-хост | `192.168.100.1` | Адрес его `vEthernet (NATSwitch)` и шлюз для гостей; в WSL можно задать ему имя `wslhost`. |
-| Гостевая Windows-ВМ | `192.168.100.20` | Статический адрес с шлюзом `192.168.100.1`. |
-| WSL 2 | `192.168.100.10` | Только **условный устаревший вариант** с подключением WSL к `NATSwitch`; не гарантируется. |
+| Windows-VM | `192.168.100.Y`, Y=11 | Статический адрес с шлюзом `192.168.100.1`. |
+| WSL 2 | `192.168.100.X`, X=10 | Только **условный устаревший вариант** с подключением WSL к `NATSwitch`; не гарантируется. |
 
 Windows выполняет исходящий NAT для `192.168.100.0/24` через своё обычное подключение к интернету. Внутренний коммутатор сам по себе не соединяет гостей напрямую с физической LAN и не открывает входящие соединения из неё. WinNAT **не выдаёт адреса по DHCP и не является DNS-сервером**: адрес, шлюз и работающий DNS задаются внутри каждого гостя. Изоляция коммутатора и NAT не шифруют трафик.
 
@@ -366,7 +366,7 @@ Get-NetRoute -InterfaceIndex $guestNic.ifIndex -AddressFamily IPv4
 Для выделенного адаптера без другого шлюза задайте адрес и шлюз:
 
 ```powershell
-New-NetIPAddress -InterfaceIndex $guestNic.ifIndex -IPAddress '192.168.100.20' -PrefixLength 24 -DefaultGateway '192.168.100.1' -ErrorAction Stop
+New-NetIPAddress -InterfaceIndex $guestNic.ifIndex -IPAddress '192.168.100.11' -PrefixLength 24 -DefaultGateway '192.168.100.1' -ErrorAction Stop
 Get-NetIPAddress -InterfaceIndex $guestNic.ifIndex -AddressFamily IPv4 | Format-Table IPAddress, PrefixLength, AddressState
 Get-NetRoute -InterfaceIndex $guestNic.ifIndex -AddressFamily IPv4 | Format-Table DestinationPrefix, NextHop
 ```
@@ -386,7 +386,7 @@ Get-NetIPConfiguration -InterfaceIndex $guestNic.ifIndex
 
 | Поле | Значение примера |
 | --- | --- |
-| IP-адрес | `192.168.100.20` |
+| IP-адрес | `192.168.100.11` |
 | Маска подсети | `255.255.255.0` |
 | Основной шлюз | `192.168.100.1` |
 | Предпочитаемый и альтернативный DNS | Доступные DNS вашей сети; например, `1.1.1.1` и `8.8.8.8`, только если они разрешены. |
@@ -402,7 +402,7 @@ Get-VMSwitch -Name 'NATSwitch' | Format-List Name, SwitchType
 Get-NetNat -Name 'MCPKit-NAT' | Format-List Name, InternalIPInterfaceAddressPrefix
 Get-NetIPAddress -InterfaceIndex $adapter.ifIndex -AddressFamily IPv4
 Get-VMNetworkAdapter -VMName $vmName | Format-Table Name, SwitchName, MacAddress, Status
-Test-NetConnection 192.168.100.20
+Test-NetConnection 192.168.100.11
 ```
 
 Здесь `$adapter` и `$vmName` — значения, выбранные ранее на хосте; в новом сеансе задайте их заново после проверки. В гостевой Windows проверьте адрес, маршрут, шлюз и DNS, затем доступ наружу:
@@ -424,7 +424,7 @@ ip -4 route
 ip route get 192.168.100.1
 getent ahostsv4 wslhost
 ping -c 2 192.168.100.1
-ping -c 2 192.168.100.20
+ping -c 2 192.168.100.11
 getent ahostsv4 example.com
 curl -4 -I --connect-timeout 5 https://example.com
 ```
@@ -433,7 +433,7 @@ curl -4 -I --connect-timeout 5 https://example.com
 
 ### Связь с WSL в штатном режиме
 
-В NAT или `mirrored` проверьте выбранный WSL маршрут к Windows-ВМ командой `ip route get 192.168.100.20` и затем доступность нужного разрешённого сервиса. Наличие маршрута в Linux не доказывает, что Windows пересылает трафик между виртуальными сетями или что брандмауэры пропускают его. Соединение может требовать отдельно настроенной маршрутизации или защищённого туннеля; не включайте общую маршрутизацию и не отключайте брандмауэры вслепую.
+В NAT или `mirrored` проверьте выбранный WSL маршрут к Windows-ВМ командой `ip route get 192.168.100.11` и затем доступность нужного разрешённого сервиса. Наличие маршрута в Linux не доказывает, что Windows пересылает трафик между виртуальными сетями или что брандмауэры пропускают его. Соединение может требовать отдельно настроенной маршрутизации или защищённого туннеля; не включайте общую маршрутизацию и не отключайте брандмауэры вслепую.
 
 В обратном направлении ВМ также не получает автоматически доступ к адресам WSL. Для WSL в NAT один из вариантов доступа к **отдельному TCP-сервису** — прокси порта на хосте: прослушивать только `192.168.100.1` и нужный порт, разрешить его лишь доверенной ВМ и направить на действующий адрес и порт WSL. Адрес WSL может меняться после перезапуска, а служба должна принимать подключения по выбранному адресу; в `mirrored` применяются другие правила. Это отдельная настройка, не выдающая WSL адрес `.10`: см. [варианты подключения и portproxy Microsoft](https://learn.microsoft.com/en-us/windows/wsl/networking). Не копируйте пример Microsoft с `0.0.0.0` без ограничения доступа: он слушает все IPv4-адреса хоста. Прокси не шифрует соединение; для секретов нужен проверяемый TLS или другой защищённый канал.
 
@@ -451,7 +451,7 @@ $adapter | Format-List Name, ifIndex, MacAddress
 ```powershell
 New-NetFirewallRule -Name 'MCPKit-NAT-ICMPv4' -DisplayName 'MCP Kit: ICMPv4 к NAT-шлюзу' `
   -Direction Inbound -Action Allow -Protocol ICMPv4 -IcmpType 8 `
-  -InterfaceAlias $adapter.Name -LocalAddress '192.168.100.1' -RemoteAddress '192.168.100.10','192.168.100.20' -ErrorAction Stop
+  -InterfaceAlias $adapter.Name -LocalAddress '192.168.100.1' -RemoteAddress '192.168.100.10','192.168.100.11' -ErrorAction Stop
 ```
 
 Правило не открывает TCP-порты и не настраивает брандмауэр гостевой Windows или брандмауэр Hyper-V для WSL. Для проверки в обратном направлении при необходимости создавайте столь же ограниченное правило на соответствующем госте; для приложений разрешайте только нужный TCP-порт, интерфейс и доверенный источник. Учитывайте сетевой профиль и групповые политики: они могут запрещать локальные правила. Правило `MCPKit-NAT-ICMPv4`, если создали именно его, можно отдельно удалить через `Remove-NetFirewallRule -Name 'MCPKit-NAT-ICMPv4'`. См. [брандмауэр Hyper-V для WSL](https://learn.microsoft.com/en-us/windows/security/operating-system-security/network-security/windows-firewall/hyper-v-firewall).
