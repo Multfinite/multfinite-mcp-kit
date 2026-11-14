@@ -321,9 +321,153 @@ async function start(ctx, state) {
   }
 }
 async function confirm(message, expected) {
-  if (!process.stdin.isTTY || !process.stdout.isTTY) fail('Destructive removal requires an interactive terminal.');
+  if (!process.stdin.isTTY || !process.stdout.isTTY) fail('Confirmation requires an interactive terminal.');
   const rl = createInterface({ input: process.stdin, output: process.stdout });
   try { return (await rl.question(`${message}\nType ${expected}: `)) === expected; } finally { rl.close(); }
+}
+function stoppedMetaService(ctx, state, service) {
+  const result = run('docker', ['--context', ctx, 'container', 'ls', '-aq', '--no-trunc',
+    '--filter', `label=com.docker.compose.project=${state.project}`], { capture: true });
+  const ids = result.stdout.trim().split(/\s+/).filter(Boolean);
+  const found = [];
+  for (const id of ids) {
+    if (!/^[a-f0-9]{12,64}$/.test(id)) fail('Unexpected Docker container ID; recovery was not performed.');
+    const labels = inspect(ctx, 'container', id);
+    if (!labels) fail('A container disappeared during recovery; no file was changed.');
+    checkLabel(labels, state, 'container', id);
+    if (labels['com.docker.compose.service'] === service &&
+        String(labels['com.docker.compose.oneoff'] || '').toLowerCase() !== 'true') found.push(id);
+  }
+  if (found.length !== 1) fail(`Expected exactly one owned ${service} container; no file was changed.`);
+  const running = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.State.Running}}', found[0]], { capture: true }).stdout.trim();
+  if (running !== 'false') fail(`Stop the selected MetaMCP ${service} container before recovery; no file was changed.`);
+  return found[0];
+}
+function containerEnvironment(ctx, id) {
+  const result = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Config.Env}}', id], { capture: true });
+  let entries;
+  try { entries = JSON.parse(result.stdout.trim()); } catch { fail('Could not read container configuration; no file was changed.'); }
+  if (!Array.isArray(entries)) fail('Unexpected container configuration; no file was changed.');
+  const values = Object.create(null);
+  for (const entry of entries) {
+    if (typeof entry !== 'string' || !entry.includes('=')) fail('Unexpected container environment; no file was changed.');
+    const index = entry.indexOf('=');
+    const key = entry.slice(0, index);
+    if (!key || Object.hasOwn(values, key)) fail('Ambiguous container environment; no file was changed.');
+    values[key] = entry.slice(index + 1);
+  }
+  return values;
+}
+function metaRecoverySnapshot(ctx, state) {
+  const appId = stoppedMetaService(ctx, state, 'app');
+  const postgresId = stoppedMetaService(ctx, state, 'postgres');
+  const app = containerEnvironment(ctx, appId);
+  const postgres = containerEnvironment(ctx, postgresId);
+  const password = postgres.POSTGRES_PASSWORD;
+  const secret = app.BETTER_AUTH_SECRET;
+  if (!/^[a-f0-9]{64}$/.test(password || '') || !/^[a-f0-9]{64}$/.test(secret || '') ||
+      app.POSTGRES_PASSWORD !== password || postgres.POSTGRES_USER !== 'metamcp_user' || postgres.POSTGRES_DB !== 'metamcp_db' ||
+      app.POSTGRES_USER !== 'metamcp_user' || app.POSTGRES_DB !== 'metamcp_db' || app.POSTGRES_HOST !== 'postgres' || app.POSTGRES_PORT !== '5432' ||
+      app.DATABASE_URL !== `postgresql://metamcp_user:${password}@postgres:5432/metamcp_db`) {
+    fail('Container database credentials or configuration do not match the original kit; no file was changed.');
+  }
+  if (app.APP_URL !== state.appUrl || app.NEXT_PUBLIC_APP_URL !== state.appUrl ||
+      typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
+      !app.EXTRA_TRUSTED_ORIGINS.startsWith(`${state.appUrl},`)) {
+    fail('Container MetaMCP settings differ from the saved kit state; no file was changed.');
+  }
+  const mountsResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', postgresId], { capture: true });
+  let mounts;
+  try { mounts = JSON.parse(mountsResult.stdout.trim()); } catch { fail('Cannot inspect the PostgreSQL mount; no file was changed.'); }
+  const dbMounts = Array.isArray(mounts) ? mounts.filter((item) => item?.Destination === '/var/lib/postgresql/data') : [];
+  const volume = `${state.project}_postgres_data`;
+  if (dbMounts.length !== 1 || dbMounts[0].Type !== 'volume' || dbMounts[0].Name !== volume) {
+    fail('Unexpected PostgreSQL data mount; no file was changed.');
+  }
+  const labels = inspect(ctx, 'volume', volume);
+  if (!labels) fail('The PostgreSQL volume was not found; no file was changed.');
+  checkLabel(labels, state, 'volume', volume);
+  if (labels['com.docker.compose.volume'] !== 'postgres_data') fail('Unexpected PostgreSQL volume identity; no file was changed.');
+  return { appId, postgresId, password, secret, admins: app.METAMCP_ADMIN_EMAILS,
+    extraOrigins: app.EXTRA_TRUSTED_ORIGINS.slice(state.appUrl.length + 1) };
+}
+function safeDotenvLiteral(value) {
+  if (typeof value !== 'string' || /[\x00-\x1f\x7f'\\]/.test(value)) {
+    fail('Stored MetaMCP admin/origin settings need manual recovery; no file was changed.');
+  }
+  return `'${value}'`;
+}
+function privateRegularFile(file) {
+  let item;
+  try { item = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+  if (!item.isFile() || item.isSymbolicLink() || item.size > 1024 * 1024) fail('The existing private .env is not a regular file or is too large; it was not changed.');
+  return fs.readFileSync(file);
+}
+async function recoverMetaEnv(ctx, state) {
+  if (process.platform !== 'linux' || state.type !== 'meta') fail('recover-env is only available for an independent MetaMCP on Linux.');
+  const priv = path.join(state.base, '.mcpkit');
+  for (const dir of [state.base, priv]) {
+    const item = fs.lstatSync(dir);
+    if (!item.isDirectory() || item.isSymbolicLink()) fail('The MetaMCP directory and private directory must not be links; nothing was changed.');
+  }
+  const stateFile = path.join(priv, 'state.json');
+  const stateItem = fs.lstatSync(stateFile);
+  if (!stateItem.isFile() || stateItem.isSymbolicLink() || stateItem.size > 1024 * 1024) fail('The kit state must be a regular file; nothing was changed.');
+  const stateBytes = fs.readFileSync(stateFile);
+  const file = path.join(priv, '.env');
+  const current = privateRegularFile(file);
+  const snapshot = metaRecoverySnapshot(ctx, state);
+  const recovered = `POSTGRES_PASSWORD=${snapshot.password}\nBETTER_AUTH_SECRET=${snapshot.secret}\n` +
+    `METAMCP_ADMIN_EMAILS=${safeDotenvLiteral(snapshot.admins)}\nEXTRA_TRUSTED_ORIGINS=${safeDotenvLiteral(snapshot.extraOrigins)}\n`;
+  if (current) {
+    // Refuse to overwrite another valid credential, even with a backup. A
+    // matching or missing/invalid line can be recovered from both containers.
+    let matching = 0;
+    for (const [key, value] of [['POSTGRES_PASSWORD', snapshot.password], ['BETTER_AUTH_SECRET', snapshot.secret]]) {
+      const pattern = new RegExp(`^\\s*(?:export\\s+)?${key}\\s*=\\s*(.*)$`);
+      const matches = current.toString('utf8').split(/\r?\n/).map((line) => pattern.exec(line)).filter(Boolean);
+      if (matches.length > 1) fail(`Multiple ${key} entries need manual review; no file was changed.`);
+      if (matches.length === 1) {
+        const raw = matches[0][1].trim();
+        const normalized = /^(?:[a-f0-9]{64}|"[a-f0-9]{64}"|'[a-f0-9]{64}')$/.test(raw) ? raw.replace(/^['"]|['"]$/g, '') : '';
+        if (normalized && normalized !== value) fail(`A different valid ${key} is already present; no file was changed.`);
+        if (matches[0][0] === `${key}=${value}`) matching++;
+      }
+    }
+    if (matching === 2) fail('The private .env already contains the original credentials; no recovery was performed.');
+  }
+  const message = `Recover the MetaMCP .env for ${state.project} from its stopped, verified containers?\n` +
+    'The existing .env will be saved as a private backup. Containers and volumes are not changed.\n' +
+    'The container configuration may be stale if the database password was separately changed with SQL; stop if that happened.';
+  if (!(await confirm(message, `RECOVER ${state.project}`))) { console.log('Cancelled; no file was changed.'); return; }
+  const rechecked = metaRecoverySnapshot(ctx, state);
+  for (const key of ['appId', 'postgresId', 'password', 'secret', 'admins', 'extraOrigins']) {
+    if (rechecked[key] !== snapshot[key]) fail('Container configuration changed during recovery; no file was changed.');
+  }
+  const checkedState = fs.lstatSync(stateFile);
+  if (!checkedState.isFile() || checkedState.isSymbolicLink() || !fs.readFileSync(stateFile).equals(stateBytes)) {
+    fail('The kit state changed during recovery; no file was changed.');
+  }
+  const now = privateRegularFile(file);
+  if ((current === null) !== (now === null) || (current && !current.equals(now))) fail('The private .env changed during recovery; no file was changed.');
+  if (current) {
+    const backup = path.join(priv, `.env.before-recovery-${crypto.randomBytes(8).toString('hex')}.backup`);
+    privateWrite(backup, current);
+    console.log(`Previous private configuration saved at ${backup}. Keep this backup private.`);
+  }
+  const temp = `${file}.recovery-${crypto.randomBytes(8).toString('hex')}.tmp`;
+  let tempCreated = false;
+  try {
+    privateWrite(temp, recovered);
+    tempCreated = true;
+    const atCommit = privateRegularFile(file);
+    if ((current === null) !== (atCommit === null) || (current && !current.equals(atCommit))) {
+      fail('The private .env changed during recovery and was not replaced; a backup may have been saved.');
+    }
+    fs.renameSync(temp, file);
+    tempCreated = false;
+  } finally { if (tempCreated) { try { fs.unlinkSync(temp); } catch { /* left for inspection */ } } }
+  console.log('MetaMCP credentials recovered from the verified containers. Containers and volumes were not changed.');
 }
 // Gateway diagnostics run inside the verified kit container. The control key
 // never appears in command arguments or is sent to an unrelated host port.
@@ -416,7 +560,7 @@ function connectLocalProjects(ctx, globalState, metaDir, detach) {
 
 try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink} --dir DIR [--port PORT] [--app-url URL] [--delete-volumes] [--meta-dir DIR] [--server ID]');
+  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'recover-env'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|recover-env} --dir DIR [--port PORT] [--app-url URL] [--delete-volumes] [--meta-dir DIR] [--server ID]');
   const opts = parseArgs(argv);
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
   if (opts.metaDir && !['link', 'unlink'].includes(action)) fail('--meta-dir is only valid for link/unlink.');
@@ -428,15 +572,16 @@ try {
   const base = path.resolve(opts.dir);
   const state = isInit ? initialize(action === 'init-meta' ? 'meta' : 'global', opts) : originState(base);
   if (opts.server && state.type !== 'global') fail('--server is only available for GLOBAL logs.');
-  // Stopping and basic status do not need credentials. Keep strict validation
-  // for operations that create, start, reconfigure or delete project resources.
+  // Stopping, basic status and the explicit recovery path can operate without
+  // credentials; creation, start, apply and removal still validate them.
   let envError = null;
   if (action === 'status') {
     try { readEnv(state.base, state.type); } catch (error) { envError = error; }
-  } else if (action !== 'stop') readEnv(state.base, state.type);
+  } else if (!['stop', 'recover-env'].includes(action)) readEnv(state.base, state.type);
   const ctx = dockerContext();
   if (isInit || action === 'start') await start(ctx, state);
   else if (action === 'stop') stopOwnedContainers(ctx, state);
+  else if (action === 'recover-env') await recoverMetaEnv(ctx, state);
   else if (action === 'link' || action === 'unlink') connectLocalProjects(ctx, state, opts.metaDir, action === 'unlink');
   else if (action === 'apply') {
     if (state.type !== 'global') fail('apply is only for GLOBAL services.');

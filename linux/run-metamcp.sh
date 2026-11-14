@@ -4,10 +4,10 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=linux/docker-common.sh
 source "$HERE/docker-common.sh"
 command="${1:-}"; dir="${2:-}"
-[ -n "$dir" ] && [ "$#" -ge 2 ] && [ "$#" -le 3 ] || { echo "Usage: $0 {start|stop|status|logs|remove} DIRECTORY [--delete-volumes]" >&2; exit 2; }
+[ -n "$dir" ] && [ "$#" -ge 2 ] && [ "$#" -le 3 ] || { echo "Usage: $0 {start|stop|status|logs|remove|recover-env} DIRECTORY [--delete-volumes]" >&2; exit 2; }
 case "$command" in
     start) mcpkit_require_docker ;;
-    stop|status|logs|remove) ;;
+    stop|status|logs|remove|recover-env) ;;
     *) echo "Unknown command: $command" >&2; exit 2 ;;
 esac
 args=("$command" --dir "$dir")
