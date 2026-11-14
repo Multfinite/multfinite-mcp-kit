@@ -10,7 +10,7 @@ command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
 
 TMP="$(mktemp -d)"
 SCHEMA="mcpkit_test_${RANDOM}_$$"
-export MOCK_STATE="$TMP/state" MOCK_LOG="$TMP/docker.log"
+export MOCK_STATE="$TMP/state" MOCK_LOG="$TMP/docker.log" MOCK_SYSTEM_LOG="$TMP/system.log" MOCK_TMP="$TMP"
 export PATH="$TMP/bin:$PATH"
 mkdir -p "$TMP/bin" "$MOCK_STATE"
 
@@ -54,7 +54,7 @@ set -euo pipefail
 printf '%q ' "$@" >> "$MOCK_LOG"; printf '\n' >> "$MOCK_LOG"
 project=multfinite-mcp-kit-global
 case "${1:-}" in
-    info) exit 0 ;;
+    info) [ "${MOCK_DOCKER_INFO_FAIL:-0}" != 1 ] ;;
     --version) echo 'Docker test' ;;
     network|volume)
         kind="$1"
@@ -148,9 +148,22 @@ case "${1:-}" in
             exit 1
         fi
         case "${1:-}" in
-            version) echo '2.30.0' ;;
+            version)
+                [ "${MOCK_COMPOSE_MISSING:-0}" != 1 ] || exit 1
+                echo '2.30.0'
+                ;;
             pull|stop|down|logs) exit 0 ;;
             up)
+                if [[ " $* " == *' --force-recreate '* ]]; then
+                    if [ "${MOCK_REQUIRE_CLEAN_URL_ENV:-0}" = 1 ] && { [ "${APP_URL+x}" = x ] || [ "${NEXT_PUBLIC_APP_URL+x}" = x ]; }; then
+                        echo 'inherited shell URL must not override MetaMCP .env' >&2
+                        exit 1
+                    fi
+                    if [ "${MOCK_RECREATE_FAIL:-0}" = 1 ]; then
+                        echo 'simulated app recreation failure' >&2
+                        exit 1
+                    fi
+                fi
                 if [[ " $* " == *" --force-recreate app "* ]] || [ ! -f "$MOCK_STATE/app-env" ]; then
                     grep -E '^(APP_URL|NEXT_PUBLIC_APP_URL)=' "$HOME/mcp-global/metamcp/.env" > "$MOCK_STATE/app-env" || :
                 fi
@@ -198,11 +211,61 @@ esac
 MOCK
 cat > "$TMP/bin/sudo" <<'MOCK'
 #!/usr/bin/env bash
-exec "$@"
+printf '%q ' "$@" >> "$MOCK_SYSTEM_LOG"; printf '\n' >> "$MOCK_SYSTEM_LOG"
+# Every privileged action is simulated. Fail closed on unexpected commands;
+# never execute operations that write APT sources or modify user groups.
+case "${1:-}" in
+    apt-get) exec "$@" ;;
+    install)
+        [ "${MOCK_ALLOW_DOCKER_INSTALL:-0}" = 1 ] || { echo 'Unexpected APT source write' >&2; exit 1; }
+        destination="${@: -1}"
+        case "$destination" in
+            /etc/apt/keyrings|/etc/apt/keyrings/mcpkit-docker.asc) ;;
+            /etc/apt/sources.list.d/mcpkit-docker.sources) cp "${@: -2:1}" "$MOCK_STATE/docker.sources" ;;
+            *) echo "Unexpected install target: $destination" >&2; exit 1 ;;
+        esac
+        ;;
+    groupadd|usermod)
+        [ "${MOCK_ALLOW_DOCKER_INSTALL:-0}" = 1 ] || { echo 'Unexpected group modification' >&2; exit 1; }
+        ;;
+    *) echo "Unexpected privileged command: $*" >&2; exit 1 ;;
+esac
 MOCK
 cat > "$TMP/bin/apt-get" <<'MOCK'
 #!/usr/bin/env bash
+case "${1:-}" in update|install) ;; *) echo 'Unexpected apt-get command' >&2; exit 1 ;; esac
+docker_package=false
+for arg in "$@"; do
+    case "$arg" in docker*|containerd*) docker_package=true ;; esac
+done
+if [ "$docker_package" = true ]; then
+    [ "${MOCK_ALLOW_DOCKER_INSTALL:-0}" = 1 ] || { echo 'Unexpected Docker package installation' >&2; exit 1; }
+    : > "$MOCK_STATE/docker-installed"
+fi
 exit 0
+MOCK
+cat > "$TMP/bin/curl" <<'MOCK'
+#!/usr/bin/env bash
+[ "${MOCK_ALLOW_DOCKER_INSTALL:-0}" = 1 ] || { echo 'Unexpected external curl' >&2; exit 1; }
+output=''
+while [ "$#" -gt 0 ]; do
+    if [ "$1" = -o ]; then output="$2"; shift; fi
+    shift
+done
+case "$output" in "$MOCK_TMP"/*/docker.asc) printf 'simulated signing key\n' > "$output" ;; *) echo 'Unexpected curl target' >&2; exit 1 ;; esac
+MOCK
+cat > "$TMP/bin/getent" <<'MOCK'
+#!/usr/bin/env bash
+if [ "${MOCK_ALLOW_DOCKER_INSTALL:-0}" = 1 ] && [ "${1:-}" = group ] && [ "${2:-}" = docker ]; then
+    if [ "${MOCK_GROUP_EXISTS:-1}" = 1 ]; then echo 'docker:x:9000:'; exit 0; fi
+    exit 2
+fi
+exec /usr/bin/getent "$@"
+MOCK
+cat > "$TMP/bin/newgrp" <<'MOCK'
+#!/usr/bin/env bash
+echo 'Unexpected newgrp; tests must not change groups' >&2
+exit 1
 MOCK
 cat > "$TMP/bin/sleep" <<'MOCK'
 #!/usr/bin/env bash
@@ -232,6 +295,7 @@ BOOTSTRAP_NAMESPACES=[{"name":"Default","update":true}]
 BOOTSTRAP_ENDPOINTS=[{"name":"Public","update":true}]
 EOF
     : > "$MOCK_LOG"
+    : > "$MOCK_SYSTEM_LOG"
 }
 prepare_existing() {
     prepare_home
@@ -244,6 +308,47 @@ QDRANT_URL=http://localhost:6333
 EOF
 }
 export METAMCP_START_TIMEOUT=4
+
+# An existing Docker executable must not be reinstalled or reconfigured. A
+# stopped/inaccessible daemon or missing Compose must fail without starting the
+# stack. A genuinely absent Docker executable takes the guarded install path.
+reset_db
+prepare_home
+if MOCK_DOCKER_INFO_FAIL=1 bash "$ROOT/linux/install-global.sh" > "$TMP/docker-missing.out" 2>&1; then fail 'unavailable Docker reported as success'; fi
+assert_contains "$TMP/docker-missing.out" 'Docker недоступен' 'unavailable Docker is explained'
+assert_not_contains "$MOCK_SYSTEM_LOG" 'docker' 'Docker packages are not installed'
+[ ! -f "$HOME/mcp-global/metamcp/.env" ] || fail 'Docker failure must not create MetaMCP config'
+prepare_home
+if MOCK_COMPOSE_MISSING=1 bash "$ROOT/linux/install-global.sh" > "$TMP/compose-missing.out" 2>&1; then fail 'missing Compose plugin reported as success'; fi
+assert_contains "$TMP/compose-missing.out" 'Docker Compose plugin не найден' 'missing Compose is explained'
+assert_not_contains "$MOCK_SYSTEM_LOG" 'docker' 'Compose packages are not installed automatically'
+[ ! -f "$HOME/mcp-global/metamcp/.env" ] || fail 'Compose failure must not create MetaMCP config'
+printf 'ok - existing Docker is preserved; inaccessible daemon and missing Compose fail safely\n'
+
+# Simulate absence without exposing a real host docker binary: the Bash command
+# lookup reports absent until mocked apt-get creates the install marker. All
+# sudo, curl and group operations remain mocked and never touch the host.
+cat > "$TMP/docker-missing.bashenv" <<'MOCK'
+command() {
+    if [ "${1:-}" = -v ] && [ "${2:-}" = docker ] && [ ! -f "$MOCK_STATE/docker-installed" ]; then return 1; fi
+    builtin command "$@"
+}
+MOCK
+reset_db
+prepare_home
+if ! MOCK_ALLOW_DOCKER_INSTALL=1 MOCK_GROUP_EXISTS=1 BASH_ENV="$TMP/docker-missing.bashenv" TMPDIR="$TMP" \
+    bash "$ROOT/linux/install-global.sh" > "$TMP/docker-install.out" 2>&1; then
+    cat "$TMP/docker-install.out" >&2; fail 'guarded installation of missing Docker failed'
+fi
+assert_contains "$MOCK_SYSTEM_LOG" 'apt-get install -y -qq --no-remove docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin' 'missing Docker installs Engine and Compose without removing packages'
+assert_not_contains "$MOCK_SYSTEM_LOG" 'groupadd docker' 'existing docker group is not created again'
+assert_contains "$TMP/docker-install.out" 'Docker не найден' 'Docker installation is announced'
+if [ -f "$MOCK_STATE/docker.sources" ]; then
+    distro="$(. /etc/os-release; printf '%s' "$ID")"
+    assert_contains "$MOCK_STATE/docker.sources" "URIs: https://download.docker.com/linux/$distro" 'Docker APT source matches Debian/Ubuntu'
+    assert_contains "$MOCK_STATE/docker.sources" 'Signed-By: /etc/apt/keyrings/mcpkit-docker.asc' 'Docker uses a separate kit keyring'
+fi
+printf 'ok - absent Docker follows guarded, non-interactive installation path\n'
 
 # A fresh install registers all eleven README servers, the four legacy records,
 # five groups and five protected endpoints. fetch belongs to two groups.
@@ -364,7 +469,7 @@ INSERT INTO namespace_server_mappings (uuid, namespace_uuid, mcp_server_uuid, st
  ('00000000-0000-0000-0000-000000000303', '00000000-0000-0000-0000-000000000102', '00000000-0000-0000-0000-000000000203', 'ACTIVE');
 INSERT INTO endpoints (uuid, name, description, namespace_uuid, enable_api_key_auth, user_id) VALUES
  ('00000000-0000-0000-0000-000000000401', 'global-sse', 'private manual endpoint', '00000000-0000-0000-0000-000000000102', false, 'owner');
-INSERT INTO tools (uuid, mcp_server_uuid, name) VALUES ('00000000-0000-0000-0000-000000000501', '00000000-0000-0000-0000-000000000202', 'manual-tool');
+INSERT INTO tools (uuid, mcp_server_uuid, name, tool_schema) VALUES ('00000000-0000-0000-0000-000000000501', '00000000-0000-0000-0000-000000000202', 'manual-tool', '{\"type\":\"object\"}');
 INSERT INTO namespace_tool_mappings (namespace_uuid, tool_uuid, mcp_server_uuid, status) VALUES ('00000000-0000-0000-0000-000000000101', '00000000-0000-0000-0000-000000000501', '00000000-0000-0000-0000-000000000202', 'INACTIVE');" >/dev/null
 if ! bash "$ROOT/linux/install-global.sh" > "$TMP/manual.out" 2>&1; then
     cat "$TMP/manual.out" >&2; fail 'installation with existing configuration failed'
@@ -615,11 +720,17 @@ prepare_existing
 bash "$ROOT/linux/run-global.sh" start > "$TMP/url-start.out" 2>&1 || { cat "$TMP/url-start.out" >&2; fail 'URL setup start failed'; }
 printf '\nAPP_URL=https://mcp.example.test\n' >> "$HOME/mcp-global/config/.env"
 : > "$MOCK_LOG"
-bash "$ROOT/linux/run-global.sh" apply-metamcp-config > "$TMP/url-apply.out" 2>&1 || { cat "$TMP/url-apply.out" >&2; fail 'MetaMCP URL apply failed'; }
+APP_URL=https://stale-shell.example.test NEXT_PUBLIC_APP_URL=https://stale-shell.example.test MOCK_REQUIRE_CLEAN_URL_ENV=1 \
+    bash "$ROOT/linux/run-global.sh" apply-metamcp-config > "$TMP/url-apply.out" 2>&1 || { cat "$TMP/url-apply.out" >&2; fail 'MetaMCP URL apply failed'; }
 assert_contains "$HOME/mcp-global/metamcp/.env" 'APP_URL=https://mcp.example.test' 'kit APP_URL reaches MetaMCP dotenv'
 assert_contains "$HOME/mcp-global/metamcp/.env" 'NEXT_PUBLIC_APP_URL=https://mcp.example.test' 'frontend URL follows APP_URL when omitted'
 assert_contains "$MOCK_LOG" 'compose up -d --no-deps --force-recreate app' 'URL update explicitly recreates only app'
 assert_contains "$TMP/url-apply.out" 'APP_URL и NEXT_PUBLIC_APP_URL применены' 'URL update reports success'
+[ ! -e "$HOME/mcp-global/config/.metamcp-url-apply-pending" ] || fail 'successful URL apply must clear pending state'
+: > "$MOCK_LOG"
+bash "$ROOT/linux/run-global.sh" apply-metamcp-config > "$TMP/url-repeat.out" 2>&1 || { cat "$TMP/url-repeat.out" >&2; fail 'unchanged URL apply failed'; }
+assert_not_contains "$MOCK_LOG" '--force-recreate' 'unchanged successful URL apply must not recreate app'
+printf 'ok - public URL sync and explicit MetaMCP app recreation\n'
 # A normal start must also sync a later URL edit and recreate only app.
 printf '\nAPP_URL=https://mcp-auto.example.test\n' >> "$HOME/mcp-global/config/.env"
 export MOCK_UV_CACHE_BAD=1
@@ -638,7 +749,29 @@ printf 'APP_URL=http://localhost:12008\nNEXT_PUBLIC_APP_URL=http://localhost:120
 bash "$ROOT/linux/run-global.sh" start > "$TMP/url-start-stale-container.out" 2>&1 || { cat "$TMP/url-start-stale-container.out" >&2; fail 'stale container URL repair failed'; }
 assert_contains "$MOCK_LOG" 'up -d --no-deps --force-recreate app' 'start recreates app if its runtime env is stale even when dotenv matches'
 assert_contains "$MOCK_STATE/app-env" 'APP_URL=https://mcp-auto.example.test' 'stale container receives current APP_URL'
+# If a later sidecar step fails, the already-updated app still needs a retry;
+# the pending marker must not be cleared just because its environment matches.
+printf '\nAPP_URL=https://mcp-retry-start.example.test\n' >> "$HOME/mcp-global/config/.env"
+if MOCK_SERVICES_FAIL=1 bash "$ROOT/linux/run-global.sh" start > "$TMP/url-start-failed.out" 2>&1; then fail 'failed sidecar start reported as success'; fi
+[ -f "$HOME/mcp-global/config/.metamcp-url-apply-pending" ] || fail 'failed start must retain the URL retry marker'
+: > "$MOCK_LOG"
+bash "$ROOT/linux/run-global.sh" start > "$TMP/url-start-retry.out" 2>&1 || { cat "$TMP/url-start-retry.out" >&2; fail 'retry of URL start failed'; }
+assert_contains "$MOCK_LOG" 'up -d --no-deps --force-recreate app' 'pending URL start retries app recreation'
+[ ! -e "$HOME/mcp-global/config/.metamcp-url-apply-pending" ] || fail 'successful start clears URL retry marker'
 printf 'ok - public URL sync and automatic runtime environment repair on start\n'
+
+# A failed recreation must remain retryable even though .env was already
+# updated, otherwise a repeat would incorrectly claim the URL was applied.
+printf '\nAPP_URL=https://retry.example.test\n' >> "$HOME/mcp-global/config/.env"
+: > "$MOCK_LOG"
+if MOCK_RECREATE_FAIL=1 bash "$ROOT/linux/run-global.sh" apply-metamcp-config > "$TMP/url-failed.out" 2>&1; then fail 'failed app recreation reported as success'; fi
+assert_contains "$HOME/mcp-global/metamcp/.env" 'APP_URL=https://retry.example.test' 'desired URL is saved before recreation'
+[ -f "$HOME/mcp-global/config/.metamcp-url-apply-pending" ] || fail 'failed recreation must be marked pending'
+: > "$MOCK_LOG"
+bash "$ROOT/linux/run-global.sh" apply-metamcp-config > "$TMP/url-retry.out" 2>&1 || { cat "$TMP/url-retry.out" >&2; fail 'retry of URL apply failed'; }
+assert_contains "$MOCK_LOG" 'compose up -d --no-deps --force-recreate app' 'retry must actually recreate the app'
+[ ! -e "$HOME/mcp-global/config/.metamcp-url-apply-pending" ] || fail 'successful retry must clear pending state'
+printf 'ok - failed URL application is retried instead of falsely succeeding\n'
 
 # A pre-created kit .env also supplies the public address when the installer
 # creates MetaMCP's .env for the first time.
@@ -653,6 +786,29 @@ assert_contains "$HOME/mcp-global/metamcp/.env" 'NEXT_PUBLIC_APP_URL=https://ini
 assert_not_contains "$HOME/mcp-global/config/.env" "$(printf '\033')" 'installer template does not expand comments as shell commands'
 assert_not_contains "$MOCK_LOG" 'force-recreate app' 'installer template generation does not execute documented commands'
 printf 'ok - initial installer carries the configured public origin without executing template comments\n'
+
+# When only the frontend URL is set, it becomes the canonical value too; sed
+# metacharacters must be written literally, not interpreted as replacements.
+reset_db
+prepare_home
+cat > "$HOME/mcp-global/config/.env" <<'EOF'
+APP_URL=
+NEXT_PUBLIC_APP_URL='https://frontend.example.test/?first=one&second=two'
+EOF
+bash "$ROOT/linux/install-global.sh" > "$TMP/frontend-url-install.out" 2>&1 || { cat "$TMP/frontend-url-install.out" >&2; fail 'install with frontend URL fallback failed'; }
+assert_eq 'APP_URL=https://frontend.example.test/?first=one&second=two' "$(grep '^APP_URL=' "$HOME/mcp-global/metamcp/.env")" 'installer escapes a frontend URL when applying APP_URL'
+assert_eq 'NEXT_PUBLIC_APP_URL=https://frontend.example.test/?first=one&second=two' "$(grep '^NEXT_PUBLIC_APP_URL=' "$HOME/mcp-global/metamcp/.env")" 'installer aligns frontend URL literally'
+
+# A malformed multiline value must be rejected before creating .env, so that a
+# corrected retry is not stuck preserving an incomplete configuration.
+prepare_home
+cat > "$HOME/mcp-global/config/.env" <<'EOF'
+APP_URL=$'https://bad.example.test\nINJECT=1'
+EOF
+if bash "$ROOT/linux/install-global.sh" > "$TMP/invalid-url-install.out" 2>&1; then fail 'multiline public URL was accepted'; fi
+assert_contains "$TMP/invalid-url-install.out" 'не должны содержать переносы строк' 'invalid public URL is explained'
+[ ! -f "$HOME/mcp-global/metamcp/.env" ] || fail 'invalid URL left a partial MetaMCP .env'
+printf 'ok - initial URL, frontend fallback, escaping and safe rejection\n'
 
 reset_db
 prepare_existing

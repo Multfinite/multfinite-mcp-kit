@@ -1,0 +1,6 @@
+# Optional loopback-only host access to the backend. The upstream app keeps
+# listening on 12009 inside its container; the frontend proxies to that port.
+services:
+  app:
+    ports:
+      - "127.0.0.1:${MCPKIT_METAMCP_BACKEND_PORT}:12009"
