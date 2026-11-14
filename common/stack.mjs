@@ -8,6 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { setTimeout as delay } from 'node:timers/promises';
+import { GLOBAL_GROUPS, GLOBAL_SERVER_NAMES, GLOBAL_GROUP_NAMES, localGroups, LOCAL_SERVER_NAMES, LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const revision = '05818ec2767b946f98d280ae9cefa401f0362d62';
@@ -19,7 +20,7 @@ function parseArgs(args) {
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === '--delete-volumes') { result.deleteVolumes = true; continue; }
-    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--meta-dir': 'metaDir', '--server': 'server' }[arg];
+    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--meta-dir': 'metaDir', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile' }[arg];
     if (!key || i + 1 >= args.length || args[i + 1].startsWith('--') || result[key] !== undefined) fail(`Invalid argument: ${arg}`);
     result[key] = args[++i];
   }
@@ -873,13 +874,278 @@ function connectLocalProjects(ctx, globalState, metaDir, detach) {
   console.log('Traffic on this local Docker network is not encrypted; use it only if the host and network are trusted. Reconnect after recreating the MetaMCP app.');
 }
 
+function requirePrivateDirectory(dir) {
+  const item = fs.lstatSync(dir);
+  if (!item.isDirectory() || item.isSymbolicLink() || (item.mode & 0o077) !== 0) {
+    fail(`Private directory must be a real directory inaccessible to group/other users: ${dir}. No database records were changed.`);
+  }
+}
+function sha256(value) { return crypto.createHash('sha256').update(value).digest('hex'); }
+function exactKeys(value, expected) {
+  return value && typeof value === 'object' && !Array.isArray(value) &&
+    JSON.stringify(Object.keys(value).sort()) === JSON.stringify([...expected].sort());
+}
+function sharingManifest(journal) {
+  if (journal?.version !== 1 || !['global', 'local'].includes(journal.profile)) {
+    fail('Only completed v1 independent LOCAL/GLOBAL registrations can be converted.');
+  }
+  const linuxLocal = journal.servers && Object.hasOwn(journal.servers, 'linux-desktop');
+  const definitions = journal.profile === 'global' ? GLOBAL_GROUPS : localGroups(linuxLocal);
+  const serverNames = journal.profile === 'global' ? GLOBAL_SERVER_NAMES : LOCAL_SERVER_NAMES;
+  const groupNames = journal.profile === 'global' ? GLOBAL_GROUP_NAMES : LOCAL_GROUP_NAMES;
+  const groups = Object.keys(definitions);
+  const serverIds = [...new Set(Object.values(definitions).flat())];
+  const validUuid = (value) => typeof value === 'string' && /^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/i.test(value);
+  if (journal.pending !== null || typeof journal.owner !== 'string' || !journal.owner || journal.owner.length > 320 || /[\x00-\x1f\x7f]/.test(journal.owner) ||
+      !new RegExp(`^mcpkit-${journal.profile}-[a-f0-9]{12}$`).test(journal.prefix || '') ||
+      !exactKeys(journal.servers, serverIds) || !exactKeys(journal.namespaces, groups) || !exactKeys(journal.endpoints, groups)) {
+    fail('Registration is incomplete, pending, or has unexpected records; no database records were changed.');
+  }
+  const unique = (ids) => new Set(ids.map((value) => value.toLowerCase())).size === ids.length;
+  const servers = serverIds.map((id) => {
+    const item = journal.servers[id];
+    const name = serverNames[id];
+    if (!item || !validUuid(item.uuid) || item.name !== `${journal.prefix}-${id}` || !/^[a-f0-9]{64}$/.test(item.hash || '') ||
+        typeof name !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(name)) {
+      fail('Registration contains an invalid server record; no database records were changed.');
+    }
+    return { uuid: item.uuid, old_name: item.name, name };
+  });
+  if (!unique(servers.map((item) => item.uuid)) || !unique(servers.map((item) => item.name))) fail('Duplicate registered server UUID or name; no database records were changed.');
+  const namespaces = groups.map((group) => {
+    const item = journal.namespaces[group];
+    const name = groupNames[group];
+    const expected = definitions[group].map((id) => journal.servers[id].uuid.toLowerCase()).sort();
+    if (!item || !validUuid(item.uuid) || item.name !== `${journal.prefix}-${group}` || typeof name !== 'string' || !/^[a-zA-Z0-9_-]+$/.test(name) || !Array.isArray(item.servers) ||
+        item.servers.some((id) => !validUuid(id)) || JSON.stringify(item.servers.map((id) => id.toLowerCase()).sort()) !== JSON.stringify(expected)) {
+      fail('Registration contains an invalid namespace or membership; no database records were changed.');
+    }
+    return { uuid: item.uuid, old_name: item.name, name, servers: [...item.servers] };
+  });
+  if (!unique(namespaces.map((item) => item.uuid)) || !unique(namespaces.map((item) => item.name))) fail('Duplicate registered namespace UUID or name; no database records were changed.');
+  const endpoints = groups.map((group) => {
+    const item = journal.endpoints[group];
+    if (!item || !validUuid(item.uuid) || item.name !== `${journal.prefix}-${group}`) {
+      fail('Registration contains an invalid endpoint; no database records were changed.');
+    }
+    return { uuid: item.uuid, old_name: item.name, name: groupNames[group], namespace_uuid: journal.namespaces[group].uuid };
+  });
+  if (!unique(endpoints.map((item) => item.uuid)) || !unique(endpoints.map((item) => item.name))) fail('Duplicate registered endpoint UUID or name; no database records were changed.');
+  return { owner: journal.owner, servers, namespaces, endpoints };
+}
+function registeredGlobalJournal(state, snapshot, gatewayKey, registration) {
+  const dir = path.join(state.base, '.mcpkit', 'registrations');
+  requirePrivateDirectory(dir);
+  if (registration && !/^[a-f0-9]{32}$/.test(registration)) fail('The registration ID must be 32 lowercase hexadecimal characters.');
+  const names = registration ? [`${registration}.json`] : fs.readdirSync(dir).filter((name) => /^[a-f0-9]{32}\.json$/.test(name));
+  const candidates = [];
+  for (const name of names) {
+    const file = path.join(dir, name);
+    const bytes = privateRegularFile(file);
+    if (!bytes) continue;
+    let journal;
+    try { journal = JSON.parse(bytes.toString('utf8')); } catch { continue; }
+    if (!journal || journal.version !== 1 || journal.profile !== 'global' || journal.hostId !== state.id ||
+        journal.origin !== snapshot.appUrl || journal.keyHash !== sha256(gatewayKey) ||
+        typeof journal.owner !== 'string' || typeof journal.gateway !== 'string') continue;
+    const expected = sha256(`${journal.origin}\n${journal.owner}\n${journal.gateway}\n${journal.profile}\n${journal.hostId}`).slice(0, 32);
+    if (name !== `${expected}.json`) continue;
+    candidates.push({ file, bytes, journal, id: expected });
+  }
+  if (candidates.length !== 1) {
+    if (candidates.length > 1) console.log(`Matching registration IDs: ${candidates.map((item) => item.id).join(', ')}`);
+    fail('Expected exactly one matching GLOBAL registration for this MetaMCP origin and gateway key. If there are several, select one with --registration; no database records were changed.');
+  }
+  return candidates[0];
+}
+function shareSql(ctx, postgresId, manifest, apply) {
+  const template = fs.readFileSync(path.join(root, 'common', 'share-registration.sql'), 'utf8');
+  const parts = template.split('__MCPKIT_BUNDLE_BASE64__');
+  if (parts.length !== 2) fail('Invalid sharing SQL template; no database records were changed.');
+  const encoded = Buffer.from(JSON.stringify({ ...manifest, apply }), 'utf8').toString('base64');
+  const sql = `${parts[0]}${encoded}${parts[1]}`;
+  const command = 'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql -X -qAt -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"';
+  const result = spawnSync('docker', ['--context', ctx, 'exec', '-i', postgresId, 'sh', '-c', command], {
+    input: sql, encoding: 'utf8', env: cleanEnv(), maxBuffer: 1024 * 1024,
+  });
+  if (result.error || result.status !== 0 || result.stdout.trim() !== 'MCPKIT_PUBLIC_OK') {
+    const detail = (result.stderr || '').split(/\r?\n/).find((line) => /\b(?:ERROR|FATAL):/.test(line));
+    const hint = detail ? ` ${detail.slice(0, 300)}` : '';
+    if (apply) fail(`The sharing transaction did not report success; it may have committed. Inspect the records and the backup before retrying.${hint}`);
+    fail(`Registration sharing preflight failed; no database records were changed.${hint}`);
+  }
+}
+function backupMetaForSharing(ctx, state, postgresId) {
+  const directory = path.join(state.base, '.mcpkit', 'backups');
+  try { fs.mkdirSync(directory, { mode: 0o700 }); } catch (error) { if (error.code !== 'EEXIST') throw error; }
+  requirePrivateDirectory(directory);
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const file = path.join(directory, `before-registration-sharing-${stamp}-${crypto.randomBytes(6).toString('hex')}.dump`);
+  const fd = fs.openSync(file, 'wx', 0o600);
+  let success = false;
+  try {
+    const command = 'export PGPASSWORD="$POSTGRES_PASSWORD"; exec pg_dump -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB" --format=custom';
+    const result = spawnSync('docker', ['--context', ctx, 'exec', postgresId, 'sh', '-c', command], {
+      stdio: ['ignore', fd, 'pipe'], encoding: 'utf8', env: cleanEnv(), maxBuffer: 1024 * 1024,
+    });
+    if (result.error || result.status !== 0) fail('Could not create the PostgreSQL backup; no database records were changed.');
+    fs.fsyncSync(fd);
+    success = true;
+  } finally {
+    fs.closeSync(fd);
+    if (!success) { try { fs.unlinkSync(file); } catch { /* private partial backup may remain */ } }
+  }
+  const check = fs.openSync(file, 'r');
+  const magic = Buffer.alloc(5);
+  let length;
+  try { length = fs.readSync(check, magic, 0, magic.length, 0); } finally { fs.closeSync(check); }
+  if (length !== magic.length || magic.toString('ascii') !== 'PGDMP') fail(`PostgreSQL backup has an unexpected format: ${file}. No database records were changed.`);
+  const archive = fs.openSync(file, 'r');
+  let verified;
+  try {
+    // --list can exit after the catalog without reading all archive data.
+    // Keep the Docker stdin open and drain the rest to avoid a broken pipe.
+    const command = 'pg_restore --list >/dev/null; status=$?; cat >/dev/null || exit 1; exit "$status"';
+    verified = spawnSync('docker', ['--context', ctx, 'exec', '-i', postgresId, 'sh', '-c', command], {
+      stdio: [archive, 'ignore', 'pipe'], encoding: 'utf8', env: cleanEnv(), maxBuffer: 1024 * 1024,
+    });
+  } finally { fs.closeSync(archive); }
+  if (verified.error || verified.status !== 0) fail(`Could not read the PostgreSQL backup catalog: ${file}. No database records were changed.`);
+  console.log(`Private database dump: ${file} (contains secrets; copy it off this machine). Its catalog was read, but a restore was not verified.`);
+  return file;
+}
+function snapshotFiles(files) {
+  return files.map((file) => {
+    const bytes = privateRegularFile(file);
+    if (!bytes) fail(`Missing private kit file: ${file}. No database records were changed.`);
+    return { file, bytes };
+  });
+}
+function assertFilesUnchanged(files) {
+  for (const item of files) {
+    const current = privateRegularFile(item.file);
+    if (!current || !current.equals(item.bytes)) fail('A kit state, configuration, or registration changed; no sharing update was attempted.');
+  }
+}
+function prepareSharingMeta(ctx, meta) {
+  if (process.platform !== 'linux' || meta.type !== 'meta' || meta.revision !== revision) {
+    fail('Sharing requires a local Linux independent MetaMCP with the expected pinned revision.');
+  }
+  const dir = fs.lstatSync(meta.base);
+  if (!dir.isDirectory() || dir.isSymbolicLink()) fail('The MetaMCP directory must be a real directory, not a link.');
+  const priv = path.join(meta.base, '.mcpkit');
+  requirePrivateDirectory(priv);
+  const files = snapshotFiles([path.join(priv, 'state.json'), path.join(priv, '.env')]);
+  if (JSON.stringify(JSON.parse(files[0].bytes)) !== JSON.stringify(meta)) fail('The MetaMCP state changed; no database records were changed.');
+  const env = readEnv(meta.base, 'meta');
+  checkResources(ctx, meta);
+  const before = metaContainerSnapshot(ctx, meta);
+  if (before.password !== env.POSTGRES_PASSWORD || before.secret !== env.BETTER_AUTH_SECRET) {
+    fail('MetaMCP credentials differ from its existing containers; no database records were changed.');
+  }
+  requireRunningMetaApp(ctx, meta, before.appId);
+  const postgresStatus = run('docker', ['--context', ctx, 'container', 'inspect', '--format',
+    '{{.State.Running}} {{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', before.postgresId], { capture: true }).stdout.trim();
+  if (postgresStatus !== 'true healthy') fail('The selected MetaMCP PostgreSQL container must be running and healthy.');
+  return { before, files, priv };
+}
+async function shareSelectedRegistration(ctx, meta, prepared, selected, extraCheck = () => {}) {
+  const lockFile = `${selected.file}.lock`;
+  let lock;
+  try { lock = fs.openSync(lockFile, 'wx', 0o600); } catch { fail('The registration is locked; inspect the lock before retrying. No database records were changed.'); }
+  try {
+    const unchanged = () => {
+      requirePrivateDirectory(prepared.priv);
+      requirePrivateDirectory(path.dirname(selected.file));
+      assertFilesUnchanged([...prepared.files, { file: selected.file, bytes: selected.bytes }]);
+      const current = metaContainerSnapshot(ctx, meta);
+      for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
+        if (current[key] !== prepared.before[key]) fail('MetaMCP containers changed during inspection; no sharing update was attempted.');
+      }
+      requireRunningMetaApp(ctx, meta, prepared.before.appId);
+      checkResources(ctx, meta);
+      extraCheck();
+    };
+    unchanged();
+    const manifest = sharingManifest(selected.journal);
+    shareSql(ctx, prepared.before.postgresId, manifest, false);
+    const profile = selected.journal.profile.toUpperCase();
+    console.log(`Public server names: ${manifest.servers.map((item) => item.name).join(', ')}`);
+    console.log('New endpoint URLs:');
+    for (const item of manifest.endpoints) console.log(`  ${prepared.before.appUrl}/metamcp/${item.name}/mcp`);
+    const message = `Rename and make the registered ${profile} records shared in ${meta.project}?\n` +
+      `Registration: ${selected.journal.prefix}; ${manifest.servers.length} servers, ${manifest.namespaces.length} namespaces, ${manifest.endpoints.length} endpoints.\n` +
+      'All MetaMCP users can use the shared servers, including configured credentials and stored data.\n' +
+      (profile === 'LOCAL' ? 'WARNING: LOCAL tools can expose files, terminal, databases and desktop control.\n' : '') +
+      'Existing endpoint authentication is preserved. Any valid MetaMCP API key can use a shared API-key endpoint.\n' +
+      'Old endpoint URLs and server-prefixed tool names will change; reconnect clients. Avoid concurrent edits during this operation.\n' +
+      'A private dump of the selected MetaMCP database will be saved first. Names and ownership of journaled records are changed in one transaction; no records are deleted.';
+    if (!(await confirm(message, `SHARE ${profile}`))) { console.log('Cancelled; no database records were changed.'); process.exitCode = 1; return; }
+    unchanged();
+    const backup = backupMetaForSharing(ctx, meta, prepared.before.postgresId);
+    unchanged();
+    try { shareSql(ctx, prepared.before.postgresId, manifest, true); }
+    catch (error) { console.error(`Database backup saved at ${backup}. Inspect the result before retrying.`); throw error; }
+    console.log(`${profile} registration ${selected.journal.prefix} is now shared with the displayed names. UUIDs, endpoint authentication, settings, and mappings were preserved.`);
+    console.log('Refresh MetaMCP and reconnect clients using the new URLs; the old URLs and server-based tool names have changed.');
+    console.log('Only trusted users/clients should receive access; shared services can use configured credentials.');
+  } finally {
+    fs.closeSync(lock);
+    fs.unlinkSync(lockFile);
+  }
+}
+async function shareGlobalRegistration(ctx, globalState, metaDir, registration) {
+  if (process.platform !== 'linux' || globalState.type !== 'global' || !metaDir) {
+    fail('GLOBAL sharing requires a local Linux GLOBAL directory and independent MetaMCP directory.');
+  }
+  const dir = fs.lstatSync(globalState.base);
+  if (!dir.isDirectory() || dir.isSymbolicLink()) fail('The GLOBAL directory must be a real directory, not a link.');
+  const priv = path.join(globalState.base, '.mcpkit');
+  requirePrivateDirectory(priv);
+  const files = snapshotFiles([path.join(priv, 'state.json'), path.join(priv, '.env')]);
+  if (JSON.stringify(JSON.parse(files[0].bytes)) !== JSON.stringify(globalState)) fail('The GLOBAL state changed; no database records were changed.');
+  const env = readEnv(globalState.base, 'global');
+  checkResources(ctx, globalState);
+  const meta = originState(path.resolve(metaDir));
+  const prepared = prepareSharingMeta(ctx, meta);
+  const selected = registeredGlobalJournal(globalState, prepared.before, env.MCPKIT_GATEWAY_KEY, registration);
+  await shareSelectedRegistration(ctx, meta, prepared, selected, () => {
+    requirePrivateDirectory(priv);
+    assertFilesUnchanged(files);
+    checkResources(ctx, globalState);
+  });
+}
+async function shareRegistrationFile(ctx, meta, registrationFile) {
+  if (!registrationFile) fail('Pass the completed registration journal file.');
+  const prepared = prepareSharingMeta(ctx, meta);
+  const file = path.resolve(registrationFile);
+  requirePrivateDirectory(path.dirname(file));
+  const bytes = privateRegularFile(file);
+  if (!bytes) fail('Registration journal not found; no database records were changed.');
+  let journal;
+  try { journal = JSON.parse(bytes.toString('utf8')); } catch { fail('Invalid registration journal; no database records were changed.'); }
+  if (!journal || journal.version !== 1 || !['global', 'local'].includes(journal.profile) ||
+      journal.origin !== prepared.before.appUrl || typeof journal.owner !== 'string' || !journal.owner ||
+      typeof journal.gateway !== 'string' || !journal.gateway || /[\r\n\0]/.test(journal.owner + journal.gateway) ||
+      !/^[a-f0-9]{64}$/.test(journal.keyHash || '') ||
+      (journal.profile === 'global' ? !/^[a-f0-9]{16}$/.test(journal.hostId || '') :
+        !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(journal.hostId || '') || journal.hostId.length > 32)) {
+    fail('Journal target or identity is invalid; no database records were changed.');
+  }
+  const id = sha256(`${journal.origin}\n${journal.owner}\n${journal.gateway}\n${journal.profile}\n${journal.hostId}`).slice(0, 32);
+  if (path.basename(file) !== `${id}.json`) fail('Journal filename or identity changed; preserve its original filename. No database records were changed.');
+  await shareSelectedRegistration(ctx, meta, prepared, { file, bytes, journal, id });
+}
+
 try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'check-env', 'recover-env'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|check-env|recover-env} --dir DIR [--port PORT] [--app-url URL] [--delete-volumes] [--meta-dir DIR] [--server ID]');
+  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'check-env', 'recover-env', 'share-global', 'share-registration'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|check-env|recover-env|share-global|share-registration} --dir DIR [--port PORT] [--app-url URL] [--delete-volumes] [--meta-dir DIR] [--server ID] [--registration ID] [--registration-file FILE]');
   const opts = parseArgs(argv);
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
-  if (opts.metaDir && !['link', 'unlink'].includes(action)) fail('--meta-dir is only valid for link/unlink.');
+  if (opts.metaDir && !['link', 'unlink', 'share-global'].includes(action)) fail('--meta-dir is only valid for link/unlink/share-global.');
   if (opts.server && action !== 'logs') fail('--server is only valid for logs.');
+  if (opts.registration && action !== 'share-global') fail('--registration is only valid for share-global.');
+  if (opts.registrationFile && action !== 'share-registration') fail('--registration-file is only valid for share-registration.');
   if (!opts.dir) fail('--dir is required.');
   const isInit = action === 'init-meta' || action === 'init-global';
   if (!isInit && (opts.port || opts.appUrl)) fail('Ports and APP_URL are only accepted for new installations.');
@@ -899,6 +1165,8 @@ try {
   else if (action === 'check-env') checkMetaEnv(ctx, state);
   else if (action === 'recover-env') await recoverMetaEnv(ctx, state);
   else if (action === 'link' || action === 'unlink') connectLocalProjects(ctx, state, opts.metaDir, action === 'unlink');
+  else if (action === 'share-global') await shareGlobalRegistration(ctx, state, opts.metaDir, opts.registration);
+  else if (action === 'share-registration') await shareRegistrationFile(ctx, state, opts.registrationFile);
   else if (action === 'apply') {
     if (state.type === 'meta') await applyMetaConfig(ctx, state);
     else {

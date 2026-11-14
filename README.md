@@ -33,7 +33,7 @@ bash linux/connect-local.sh
 .\windows\connect-local.ps1
 ```
 
-Регистраторы спрашивают адрес MetaMCP и адрес шлюза, доступный **из MetaMCP**, и создают новые приватные защищённые записи, не изменяя пользовательские. Для разных машин заранее нужны доверенный HTTPS или защищённые туннели и маршруты; скрипты сами не создают сетевую инфраструктуру. Linux LOCAL использует `locate/plocate` вместо Windows Everything и Linux-аналог управления рабочим столом; возможности отличаются.
+Регистраторы спрашивают адрес MetaMCP и адрес шлюза, доступный **из MetaMCP**, и создают **общие** записи GLOBAL и LOCAL под именами серверов без случайных префиксов. Для регистрации нужна учётная запись администратора. Пространства имён и конечные точки имеют короткие тематические имена; новые конечные точки требуют API-ключ MetaMCP. При конфликте имён чужие записи не перезаписываются. Общий доступ даёт пользователям MetaMCP доступ к инструментам и настроенным на серверах учётным данным и данным; LOCAL может управлять файлами и рабочим столом. Для разных машин заранее нужны доверенный HTTPS или защищённые туннели и маршруты; скрипты сами не создают сетевую инфраструктуру. Linux LOCAL использует `locate/plocate` вместо Windows Everything и Linux-аналог управления рабочим столом; возможности отличаются.
 
 [Как безопасно удалить kit и при необходимости его данные](docs/uninstall.md) · [Справочник прежних настроек](docs/configuration.md) · [Сеть Hyper-V и WSL](docs/wsl-hyperv-network.md)
 
@@ -53,10 +53,10 @@ bash linux/connect-local.sh
 │ ├── [cognee](https://github.com/topoteretes/cognee)  
 │ ├── [memory-bank-mcp](https://github.com/alioshr/memory-bank-mcp)  
 │ ├── [context7](https://github.com/upstash/context7)  
-│ ├── [duckduckgo](https://github.com/nickclyde/duckduckgo-mcp-server)  
+│ ├── [duckduckgo-mcp-server](https://github.com/nickclyde/duckduckgo-mcp-server)  
 │ ├── [fetch](https://github.com/modelcontextprotocol/servers/blob/main/src/fetch/README.md)  
 │ ├── [github-mcp-server](https://github.com/github/github-mcp-server)<br>
-│ ├── [io.draw](https://github.com/jgraph/drawio-mcp)<br>
+│ ├── [drawio-mcp](https://github.com/jgraph/drawio-mcp) (io.draw)<br>
 │ ├── [mcp-compass](https://github.com/liuyoshio/mcp-compass)  
 │ └── [gdrive](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive)  
 │  
@@ -72,7 +72,7 @@ bash linux/connect-local.sh
 │ ├── [playwright-mcp](https://github.com/microsoft/playwright-mcp)<br>
 │ ├── [dbhub](https://github.com/bytebase/dbhub)<br>
 │ ├── [simple-files-vectorstore](https://github.com/lishenxydlgzs/simple-files-vectorstore)  
-│ ├── [markitdown](https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp)<br>
+│ ├── [markitdown-mcp](https://github.com/microsoft/markitdown/tree/main/packages/markitdown-mcp)<br>
 │ └── [mcp-obsidian](https://github.com/MarkusPfundstein/mcp-obsidian)
 
 На Linux вместо Windows-MCP используется Universal Computer Control, а поиск Everything опирается на `locate/plocate`; подробности и ограничения — в [руководстве](docs/independent-installation.md#3-отдельный-local).
