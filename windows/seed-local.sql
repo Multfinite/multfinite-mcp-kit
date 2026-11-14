@@ -12,11 +12,15 @@ DECLARE
     bundle jsonb := current_setting('mcpkit.local_bundle')::jsonb;
     host_id text := bundle->>'hostId';
     owner_id text;
+    requested_email text := bundle->>'ownerEmail';
+    actual_email text;
     owner_matches integer;
     port_text text := bundle->>'port';
     base_url text;
     gateway_key text := bundle->>'gatewayKey';
     group_name text;
+    base_group text;
+    suffix_group text;
     marker text;
     namespace_id uuid;
     server_id uuid;
@@ -32,7 +36,8 @@ BEGIN
        OR COALESCE(host_id ~ '^[a-z0-9]+(-[a-z0-9]+)*$' AND length(host_id) <= 32, false) IS NOT TRUE
        OR COALESCE(gateway_key ~ '^[a-f0-9]{64}$', false) IS NOT TRUE
        OR COALESCE(port_text ~ '^[0-9]{1,5}$', false) IS NOT TRUE
-       OR COALESCE(length(bundle->>'ownerEmail') BETWEEN 3 AND 320, false) IS NOT TRUE THEN
+       OR COALESCE(requested_email = '' OR (length(requested_email) BETWEEN 3 AND 320
+          AND requested_email ~ '^[^[:space:],|@]+@[^[:space:],|@]+$'), false) IS NOT TRUE THEN
         RAISE EXCEPTION 'Invalid local Docker registration bundle';
     END IF;
     IF port_text::integer NOT BETWEEN 1 AND 65535 THEN
@@ -41,31 +46,59 @@ BEGIN
     -- Only Docker Desktop's own host alias is allowed; there is no LAN or
     -- arbitrary-URL fallback in the automatic local registration.
     base_url := 'http://host.docker.internal:' || port_text;
-
-    SELECT count(*), min(id) INTO owner_matches, owner_id FROM users WHERE lower(email) = lower(bundle->>'ownerEmail');
-    IF owner_matches <> 1 THEN
-        RAISE EXCEPTION 'MetaMCP account not found or email is ambiguous; use a unique existing account';
-    END IF;
-    -- Upstream creates the bootstrap user through the normal signup hook.
-    -- Registration must be enabled during that initial creation; once the
-    -- owner exists, close it on this dedicated loopback-only instance. The
-    -- upstream bootstrap resets this flag on each app start, so apply it on
-    -- each successful automatic seed, including the idempotent skip path.
-    INSERT INTO config (id, value, description)
-    VALUES ('DISABLE_SIGNUP', 'true', 'Whether new user signup is disabled')
-    ON CONFLICT (id) DO UPDATE SET value = 'true', updated_at = now();
-    group_name := 'local-' || host_id;
-    marker := 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_V1:' || owner_id || ':' || host_id;
-    PERFORM pg_advisory_xact_lock(hashtext('multfinite-mcp-kit:local-docker-seed-v1'));
+    PERFORM set_config('mcpkit.local_result', '', false);
+    PERFORM set_config('mcpkit.local_group', '', false);
+    PERFORM set_config('mcpkit.local_owner', '', false);
     PERFORM set_config('mcpkit.local_conflicts', '', false);
-    IF current_setting('mcpkit.local_force') <> 'true' AND EXISTS (SELECT 1 FROM config WHERE id = marker) THEN
-        PERFORM set_config('mcpkit.local_result', 'skipped', false);
+
+    -- There is no bootstrap account. Wait for a real user to sign up; if
+    -- there is more than one, require an explicit owner rather than choosing
+    -- an arbitrary account. The UI's registration settings are never changed.
+    IF requested_email = '' THEN
+        SELECT count(*), min(id), min(email) INTO owner_matches, owner_id, actual_email FROM users;
+    ELSE
+        SELECT count(*), min(id), min(email) INTO owner_matches, owner_id, actual_email
+        FROM users WHERE lower(email) = lower(requested_email);
+    END IF;
+    IF owner_matches = 0 THEN
+        PERFORM set_config('mcpkit.local_result', CASE WHEN requested_email = '' THEN 'waiting' ELSE 'missing' END, false);
+        RETURN;
+    ELSIF owner_matches <> 1 THEN
+        PERFORM set_config('mcpkit.local_result', 'ambiguous', false);
         RETURN;
     END IF;
-
+    IF length(actual_email) NOT BETWEEN 3 AND 320 OR actual_email !~ '^[^[:space:],|@]+@[^[:space:],|@]+$' THEN
+        RAISE EXCEPTION 'Unsupported MetaMCP account email';
+    END IF;
+    PERFORM set_config('mcpkit.local_owner', replace(encode(convert_to(actual_email, 'UTF8'), 'base64'), E'\n', ''), false);
+    base_group := 'local-' || host_id;
+    suffix_group := base_group || '-' || substr(md5(owner_id), 1, 8);
+    marker := 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_V1:' || owner_id || ':' || host_id;
+    PERFORM pg_advisory_xact_lock(hashtext('multfinite-mcp-kit:local-docker-seed-v1'));
     -- Same order as the global seeder. Serialize checks with UI and other
     -- seeders; never attach this machine to a public namespace or endpoint.
     LOCK TABLE namespaces, mcp_servers, namespace_server_mappings, endpoints IN SHARE ROW EXCLUSIVE MODE;
+    group_name := base_group;
+    IF NOT EXISTS (SELECT 1 FROM namespaces n WHERE n.name = base_group AND n.user_id = owner_id)
+       AND NOT EXISTS (SELECT 1 FROM endpoints e WHERE e.name = base_group AND e.user_id = owner_id)
+       AND (EXISTS (SELECT 1 FROM namespaces n WHERE n.name = suffix_group AND n.user_id = owner_id)
+            OR EXISTS (SELECT 1 FROM endpoints e WHERE e.name = suffix_group AND e.user_id = owner_id)
+            OR EXISTS (SELECT 1 FROM namespaces n WHERE n.name = base_group AND n.user_id IS DISTINCT FROM owner_id)
+            OR EXISTS (SELECT 1 FROM endpoints e WHERE e.name = base_group AND e.user_id IS DISTINCT FROM owner_id)
+            OR EXISTS (SELECT 1 FROM config c WHERE starts_with(c.id, 'MULTFINITE_MCP_KIT_LOCAL_DOCKER_V1:')
+                       AND right(c.id, length(host_id) + 1) = ':' || host_id AND c.id <> marker)) THEN
+        -- Do not take over the previous account's private endpoint on upgrade.
+        group_name := suffix_group;
+    END IF;
+    IF current_setting('mcpkit.local_force') <> 'true' AND EXISTS (SELECT 1 FROM config WHERE id = marker) THEN
+        IF EXISTS (SELECT 1 FROM endpoints e JOIN namespaces n ON n.uuid = e.namespace_uuid
+                   WHERE e.name = group_name AND e.user_id = owner_id AND n.user_id = owner_id
+                     AND (e.enable_api_key_auth OR e.enable_oauth)) THEN
+            PERFORM set_config('mcpkit.local_group', group_name, false);
+        END IF;
+        PERFORM set_config('mcpkit.local_result', 'skipped', false);
+        RETURN;
+    END IF;
     SELECT n.uuid INTO namespace_id FROM namespaces n WHERE n.name = group_name AND n.user_id = owner_id;
     IF namespace_id IS NULL THEN
         INSERT INTO namespaces (name, description, user_id)
@@ -131,8 +164,10 @@ BEGIN
     VALUES (marker, 'complete', 'Native Windows LOCAL servers initialized by multfinite-mcp-kit')
     ON CONFLICT (id) DO NOTHING;
     PERFORM set_config('mcpkit.local_result', 'seeded', false);
+    PERFORM set_config('mcpkit.local_group', group_name, false);
     PERFORM set_config('mcpkit.local_conflicts', array_to_string(conflicts, ','), false);
 END
 $seed$;
 COMMIT;
-SELECT current_setting('mcpkit.local_result') || '|' || current_setting('mcpkit.local_conflicts');
+SELECT current_setting('mcpkit.local_result') || '|' || current_setting('mcpkit.local_group') || '|' ||
+       current_setting('mcpkit.local_owner') || '|' || current_setting('mcpkit.local_conflicts');

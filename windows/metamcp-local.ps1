@@ -147,24 +147,37 @@ function Write-CreateOnlyText([string]$File, [string]$Text) {
     $stream = [IO.File]::Open($File, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
     try { $stream.Write($bytes, 0, $bytes.Length) } finally { $stream.Dispose() }
 }
+function Test-MetaEmail([string]$Email) {
+    # Email is a selector, never SQL source or a shell command. Commas delimit
+    # the upstream administrator list; exclude controls and line separators.
+    return ($Email.Length -ge 3 -and $Email.Length -le 320 -and $Email -cmatch '^[^@\s,|]+@[^@\s,|]+$')
+}
 function Get-MetaState {
     if (-not (Test-Path -LiteralPath $MetaStateFile -PathType Leaf)) { return $null }
     $state = Read-Json $MetaStateFile
     if ($state.version -ne 1 -or $state.instanceId -cnotmatch '^[a-f0-9]{16}$' -or
         $state.project -cne ('mcpkit-win-' + $state.instanceId) -or
-        $state.ownerEmail -cne ('local-' + $state.instanceId + '@mcpkit.local') -or
+        $state.ownerEmail -isnot [string] -or ($state.ownerEmail -and -not (Test-MetaEmail $state.ownerEmail)) -or
         ($state.port -isnot [int] -and $state.port -isnot [long]) -or $state.port -lt 1 -or $state.port -gt 65535 -or
         $state.envCreated -isnot [bool]) { throw "Invalid MetaMCP state; existing files were not changed: $MetaStateFile" }
-    # Old installations published only the frontend. Do not change their
-    # ports or recreate their app unless the user explicitly asks to do so.
+    # Legacy instances need one app-only recreation to stop upstream bootstrap
+    # from reopening signup on every restart. Do not alter their saved ports.
     if (-not $state.PSObject.Properties['backendPort']) { $state | Add-Member -NotePropertyName backendPort -NotePropertyValue 0 }
     if (-not $state.PSObject.Properties['portsPending']) { $state | Add-Member -NotePropertyName portsPending -NotePropertyValue $false }
     if (-not $state.PSObject.Properties['appImage']) { $state | Add-Member -NotePropertyName appImage -NotePropertyValue '' }
+    if (-not $state.PSObject.Properties['manualAuthApplied']) { $state | Add-Member -NotePropertyName manualAuthApplied -NotePropertyValue $false }
+    if (-not $state.PSObject.Properties['authPending']) { $state | Add-Member -NotePropertyName authPending -NotePropertyValue $false }
+    if (-not $state.PSObject.Properties['additionalAdminEmails']) { $state | Add-Member -NotePropertyName additionalAdminEmails -NotePropertyValue @() }
     if (($state.backendPort -isnot [int] -and $state.backendPort -isnot [long]) -or
         $state.backendPort -lt 0 -or $state.backendPort -gt 65535 -or
         ($state.backendPort -ne 0 -and $state.backendPort -eq $state.port) -or
-        $state.portsPending -isnot [bool] -or $state.appImage -isnot [string]) {
-        throw "Invalid MetaMCP port state; existing files were not changed: $MetaStateFile"
+        $state.portsPending -isnot [bool] -or $state.appImage -isnot [string] -or
+        $state.manualAuthApplied -isnot [bool] -or $state.authPending -isnot [bool] -or
+        $state.additionalAdminEmails -isnot [array]) {
+        throw "Invalid MetaMCP state; existing files were not changed: $MetaStateFile"
+    }
+    foreach ($email in $state.additionalAdminEmails) {
+        if ($email -isnot [string] -or -not (Test-MetaEmail $email)) { throw 'Invalid MetaMCP administrator email in local state.' }
     }
     $imagePattern = '^' + [regex]::Escape($state.project) + '-app-backup:[0-9]{14}-[a-f0-9]{8}$'
     if ($state.appImage -and $state.appImage -cnotmatch $imagePattern) {
@@ -212,7 +225,8 @@ function Initialize-MetaState {
         }
         $candidate = [ordered]@{ version = 1; instanceId = $id; project = 'mcpkit-win-' + $id; port = $port;
             backendPort = $backendPort; portsPending = $false; appImage = '';
-            ownerEmail = 'local-' + $id + '@mcpkit.local'; cloneDir = [IO.Path]::GetFullPath($clone); envCreated = $false }
+            manualAuthApplied = $true; authPending = $false; additionalAdminEmails = @();
+            ownerEmail = ''; cloneDir = [IO.Path]::GetFullPath($clone); envCreated = $false }
         $null = Save-Json $MetaStateFile $candidate -CreateOnly
         $state = Get-MetaState
     }
@@ -220,21 +234,13 @@ function Initialize-MetaState {
         if ($state.envCreated) { throw "The existing MetaMCP env file is missing. Restore it from backup; credentials were not regenerated: $MetaEnvFile" }
         $pgPassword = New-RandomHex 32
         $authSecret = New-RandomHex 32
-        $userPassword = New-RandomHex 24
         $image = $state.project + '-metamcp:' + $Manifest.metamcp.revision.Substring(0, 12)
-        $keys = '[{"name":"Windows LOCAL","is_public":false,"user_email":"' + $state.ownerEmail + '"}]'
         $lines = @(
             'NODE_ENV=production', 'LOG_LEVEL=errors-only',
             'POSTGRES_HOST=postgres', 'POSTGRES_PORT=5432', 'POSTGRES_USER=metamcp_user',
             "POSTGRES_PASSWORD=$pgPassword", 'POSTGRES_DB=metamcp_db',
             "APP_URL=http://localhost:$($state.port)", "BETTER_AUTH_SECRET=$authSecret",
-            'TRANSFORM_LOCALHOST_TO_DOCKER_INTERNAL=false',
-            'BOOTSTRAP_ENABLE=true', 'BOOTSTRAP_USER_NAME=Windows LOCAL',
-            "BOOTSTRAP_USER_EMAIL=$($state.ownerEmail)", "BOOTSTRAP_USER_PASSWORD=$userPassword",
-            'BOOTSTRAP_RECREATE_USER=false', 'BOOTSTRAP_DELETE_OTHER_USERS=false',
-            'BOOTSTRAP_ONLY_FIRST_RUN=true', 'BOOTSTRAP_DISABLE_REGISTRATION_UI=false',
-            'BOOTSTRAP_DISABLE_REGISTRATION_SSO=true', "BOOTSTRAP_API_KEYS=$keys",
-            "METAMCP_ADMIN_EMAILS=$($state.ownerEmail)",
+            'TRANSFORM_LOCALHOST_TO_DOCKER_INTERNAL=false', 'BOOTSTRAP_ENABLE=false',
             "MCPKIT_INSTANCE=$($state.instanceId)", "MCPKIT_PROJECT=$($state.project)",
             "MCPKIT_METAMCP_PORT=$($state.port)", "MCPKIT_METAMCP_BACKEND_PORT=$($state.backendPort)", "MCPKIT_IMAGE=$image"
         )
@@ -260,6 +266,23 @@ function Read-MetaEnv {
     }
     return $values
 }
+function Get-MetaAdminEmails($State) {
+    # Preserve any legacy administrator allowlist. New installations have no
+    # allowlist until an administrator is selected explicitly; upstream then
+    # treats all signed-in users as administrators (single-user mode).
+    $values = Read-MetaEnv
+    $sources = @()
+    if ($values.METAMCP_ADMIN_EMAILS) { $sources += @(([string]$values.METAMCP_ADMIN_EMAILS).Split(',')) }
+    $sources += @($State.additionalAdminEmails)
+    $emails = @()
+    foreach ($source in $sources) {
+        $email = ([string]$source).Trim()
+        if (-not $email) { continue }
+        if (-not (Test-MetaEmail $email)) { throw 'Invalid MetaMCP administrator allowlist; existing configuration was not changed.' }
+        if (@($emails | Where-Object { $_ -ieq $email }).Count -eq 0) { $emails += $email }
+    }
+    return ($emails -join ',')
+}
 function Get-MetaImage($State) {
     if ($State.appImage) { return [string]$State.appImage }
     return ($State.project + '-metamcp:' + $Manifest.metamcp.revision.Substring(0, 12))
@@ -279,6 +302,7 @@ function Invoke-Compose($State, [string[]]$Subcommand, [int]$TimeoutSeconds = 60
         MCPKIT_ENV_FILE = $MetaEnvFile
         MCPKIT_METAMCP_PORT = [string]$State.port
         MCPKIT_METAMCP_BACKEND_PORT = [string]$State.backendPort
+        MCPKIT_METAMCP_ADMIN_EMAILS = (Get-MetaAdminEmails $State)
         MCPKIT_IMAGE = (Get-MetaImage $State)
         APP_URL = 'http://localhost:' + $State.port
     }
@@ -358,14 +382,13 @@ function Test-MetaCompose($State) {
         $envs.DATABASE_URL -cne $expectedDb -or $pgEnv.POSTGRES_PASSWORD -cne $dbPassword -or
         $pgEnv.POSTGRES_USER -cne 'metamcp_user' -or $pgEnv.POSTGRES_DB -cne 'metamcp_db') { throw 'MetaMCP database must use its dedicated local PostgreSQL service; existing configuration was not changed.' }
     if ($envs.APP_URL -cne ('http://localhost:' + $State.port) -or $envs.NEXT_PUBLIC_APP_URL -cne $envs.APP_URL -or
-        $envs.BETTER_AUTH_SECRET -cnotmatch '^[a-f0-9]{64}$' -or $envs.BOOTSTRAP_USER_EMAIL -cne $State.ownerEmail -or
-        $envs.BOOTSTRAP_USER_PASSWORD -cnotmatch '^[a-f0-9]{48}$' -or $envs.BOOTSTRAP_ENABLE -cne 'true' -or
+        $envs.BETTER_AUTH_SECRET -cnotmatch '^[a-f0-9]{64}$' -or $envs.BOOTSTRAP_ENABLE -cne 'false' -or
         $envs.BOOTSTRAP_RECREATE_USER -cne 'false' -or $envs.BOOTSTRAP_DELETE_OTHER_USERS -cne 'false' -or
-        $envs.BOOTSTRAP_ONLY_FIRST_RUN -cne 'true' -or $envs.BOOTSTRAP_DISABLE_REGISTRATION_UI -cne 'false' -or
-        $envs.BOOTSTRAP_DISABLE_REGISTRATION_SSO -cne 'true') { throw 'Unexpected local MetaMCP authentication or bootstrap settings; existing credentials were not changed.' }
-    # Supplying a second bootstrap array can override the single generated
-    # owner, or affect existing records. It is never used by this installer.
-    foreach ($name in @('BOOTSTRAP_USERS', 'BOOTSTRAP_NAMESPACES', 'BOOTSTRAP_ENDPOINTS')) {
+        [string]$envs.METAMCP_ADMIN_EMAILS -cne (Get-MetaAdminEmails $State)) {
+        throw 'Unexpected local MetaMCP authentication or bootstrap settings; existing credentials were not changed.'
+    }
+    foreach ($name in @('BOOTSTRAP_USER_NAME', 'BOOTSTRAP_USER_EMAIL', 'BOOTSTRAP_USER_PASSWORD',
+            'BOOTSTRAP_USERS', 'BOOTSTRAP_API_KEYS', 'BOOTSTRAP_NAMESPACES', 'BOOTSTRAP_ENDPOINTS')) {
         if ($envs.$name) { throw "Unexpected $name in local MetaMCP config; it was not changed." }
     }
 }
@@ -425,13 +448,15 @@ function Wait-MetaMcp($State) {
     } while ([DateTime]::UtcNow -lt $deadline)
     throw 'MetaMCP did not become ready. Check .\windows\run-local.ps1 logs metamcp; its database and containers were preserved.'
 }
-function Invoke-MetaSeed($State, [bool]$Force) {
+function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
     $config = Get-Configuration
     $settings = $config.settings
     if ($settings.listenHost.ToLowerInvariant() -notin @('127.0.0.1', 'localhost') -or $settings.tlsCertFile -or $settings.tlsKeyFile) {
         throw 'Automatic Docker Desktop connection requires the existing gateway to use local IPv4 HTTP. Your customized gateway settings were not changed.'
     }
-    $bundle = [ordered]@{ version = 1; hostId = $settings.hostId; ownerEmail = $State.ownerEmail; port = $settings.port; gatewayKey = $config.secrets.gatewayApiKey }
+    if ($RequestedOwner -and -not (Test-MetaEmail $RequestedOwner)) { throw 'OwnerEmail must be the email of an existing MetaMCP account.' }
+    $owner = if ($RequestedOwner) { $RequestedOwner } else { $State.ownerEmail }
+    $bundle = [ordered]@{ version = 1; hostId = $settings.hostId; ownerEmail = $owner; port = $settings.port; gatewayKey = $config.secrets.gatewayApiKey }
     $json = ConvertTo-Json -InputObject $bundle -Depth 10 -Compress
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
     $sql = Get-Content -LiteralPath (Join-Path $ScriptDir 'seed-local.sql') -Raw -Encoding UTF8
@@ -440,15 +465,55 @@ function Invoke-MetaSeed($State, [bool]$Force) {
     $script = 'PGPASSWORD="$POSTGRES_PASSWORD"; export PGPASSWORD; exec psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -qAt'
     $result = Invoke-Docker @('--context', 'desktop-linux', 'exec', '-i', ($State.project + '-app'), 'sh', '-c', $script) $inputText 120
     # The input includes a gateway key, so never print SQL/stdout/stderr on an
-    # error. The transaction rolls back if migrations or owner are missing.
+    # error. The transaction rolls back if migrations or account checks fail.
     Assert-DockerResult $result 'local server registration; check MetaMCP logs and retry' $false
-    $response = $result.stdout.Trim()
-    if ($response -match '^seeded\|(.*)$') {
-        if ($Matches[1]) { throw "Some existing server records conflict and were not changed or linked: $($Matches[1])" }
+    $parts = $result.stdout.Trim() -split '\|', 4
+    if ($parts.Count -ne 4) { throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.' }
+    $message = switch ($parts[0]) {
+        'waiting'   { 'No MetaMCP account exists yet. Register in the MetaMCP UI, then run .\windows\run-local.ps1 seed.' }
+        'missing'   { 'The selected MetaMCP account was not found. Register first, then run seed -OwnerEmail <your-email>.' }
+        'ambiguous' { 'Several MetaMCP accounts exist or the email is ambiguous. Run seed -OwnerEmail <your-email> for a unique account.' }
+        default     { '' }
+    }
+    if ($message) {
+        if ($Force) { throw $message }
+        Write-Host $message
+        return $null
+    }
+    if ($parts[0] -notin @('seeded', 'skipped') -or $parts[3]) {
+        if ($parts[3]) { throw "Some existing server records conflict and were not changed or linked: $($parts[3])" }
+        throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.'
+    }
+    $baseGroup = 'local-' + $settings.hostId
+    if (($parts[0] -eq 'seeded' -and -not $parts[1]) -or
+        ($parts[1] -and $parts[1] -cne $baseGroup -and $parts[1] -cnotmatch ('^' + [regex]::Escape($baseGroup) + '-[a-f0-9]{8}$'))) {
+        throw 'Unexpected local MetaMCP endpoint name; existing state was not changed.'
+    }
+    try { $actualOwner = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($parts[2])) }
+    catch { throw 'Unexpected MetaMCP account in registration result; existing state was not changed.' }
+    if (-not (Test-MetaEmail $actualOwner)) { throw 'Unexpected MetaMCP account in registration result; existing state was not changed.' }
+
+    $changed = $State.ownerEmail -cne $actualOwner
+    $State.ownerEmail = $actualOwner
+    # On an upgraded instance, keep the existing administrator and explicitly
+    # add the selected, already-registered owner. Never demote old accounts.
+    # A fresh single-user instance has no allowlist and needs no recreation.
+    if ($RequestedOwner) {
+        $admins = Get-MetaAdminEmails $State
+        if ($admins -and @($admins.Split(',') | Where-Object { $_ -ieq $actualOwner }).Count -eq 0) {
+            $State.additionalAdminEmails = @($State.additionalAdminEmails) + @($actualOwner)
+            $State.authPending = $true
+            $changed = $true
+            Write-Host 'Adding the selected existing account to the MetaMCP administrator allowlist; existing administrators are retained.'
+        }
+    }
+    if ($changed) { $null = Save-Json $MetaStateFile $State }
+    if ($parts[0] -eq 'seeded') {
         Write-Host 'Registered the 13 Windows servers in a private, API-key-protected MetaMCP endpoint.'
-    } elseif ($response -eq 'skipped|') {
+    } else {
         Write-Host 'The local server configuration was already initialized; user edits and deletions were preserved.'
-    } else { throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.' }
+    }
+    return $parts[1]
 }
 function Test-MetaBridge($State) {
     $running = Get-RunningState
@@ -493,15 +558,15 @@ function Exit-MetaLock($Lock) {
 function Save-MetaAppImage($State) {
     $app = $State.project + '-app'
     if (-not (Test-OwnedDockerObject 'container' $app $State)) { return '' }
-    # Port bindings cannot be changed on an existing container. Stop only the
-    # verified kit app, snapshot its writable layer, and run the replacement
-    # from that snapshot. The PostgreSQL and uv-cache volumes remain attached.
+    # Port bindings and container environment cannot be changed in place.
+    # Stop only the verified kit app, snapshot its writable layer, and run the
+    # replacement from that snapshot. PostgreSQL and uv-cache volumes remain.
     $stamp = [DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
     $image = $State.project + '-app-backup:' + $stamp + '-' + (New-RandomHex 4)
     $probe = Invoke-Docker @('--context', 'desktop-linux', 'image', 'inspect', '--format', '{{.Id}}', $image)
     if ($probe.code -eq 0) { throw 'The generated MetaMCP backup image name already exists; nothing was overwritten.' }
     if ($probe.stderr -notmatch '(?i)(no such image|not found)') { Assert-DockerResult $probe 'backup image inspection' }
-    Write-Host 'Stopping the kit MetaMCP app and preserving its writable layer before changing ports...'
+    Write-Host 'Stopping the kit MetaMCP app and preserving its writable layer before applying configuration...'
     $stop = Invoke-Docker @('--context', 'desktop-linux', 'stop', '--time', '20', $app) '' 180
     Assert-DockerResult $stop 'MetaMCP app stop for port change'
     $commit = Invoke-Docker @('--context', 'desktop-linux', 'commit', '--change', ('LABEL com.multfinite.mcpkit.instance=' + $State.instanceId), $app, $image) '' 600
@@ -520,10 +585,10 @@ function Start-MetaMcp {
         Test-MetaResources $state
         Ensure-MetaImage $state
         Test-MetaResources $state
-        if ($state.portsPending) {
-            # Changing published ports requires replacing only the app. Keep a
-            # retry marker until Compose has created the new binding. Never
-            # recreate the database, remove volumes, or touch other projects.
+        if ($state.portsPending -or -not $state.manualAuthApplied -or $state.authPending) {
+            # A port change, old bootstrap environment, or an explicitly added
+            # administrator requires replacing only the app. Keep retry state
+            # until Compose succeeds; never recreate the DB or remove volumes.
             $database = Invoke-Compose $state @('up', '-d', '--no-recreate', '--no-build', 'postgres') 600
             Assert-DockerResult $database 'MetaMCP database start'
             $snapshot = Save-MetaAppImage $state
@@ -534,21 +599,24 @@ function Start-MetaMcp {
                 Test-MetaResources $state
             }
             $start = Invoke-Compose $state @('up', '-d', '--no-deps', '--force-recreate', '--no-build', 'app') 600
-            Assert-DockerResult $start 'MetaMCP start with new ports'
+            Assert-DockerResult $start 'MetaMCP start with updated configuration'
             $state.portsPending = $false
+            $state.manualAuthApplied = $true
+            $state.authPending = $false
             $null = Save-Json $MetaStateFile $state
         } else {
             $start = Invoke-Compose $state @('up', '-d', '--no-recreate', '--no-build') 600
             Assert-DockerResult $start 'MetaMCP start'
         }
         Wait-MetaMcp $state
-        Invoke-MetaSeed $state $false
+        $endpointGroup = Invoke-MetaSeed $state $false
         Test-MetaBridge $state
-        $settings = (Get-Configuration).settings
         Write-Host "MetaMCP: http://localhost:$($state.port)"
-        Write-Host "MCP endpoint: http://localhost:$($state.port)/metamcp/local-$($settings.hostId)/mcp"
+        if ($endpointGroup) { Write-Host "MCP endpoint: http://localhost:$($state.port)/metamcp/$endpointGroup/mcp" }
+        else { Write-Host 'The private MCP endpoint will be shown after an account has been registered and seeded.' }
         if ($state.backendPort -gt 0) { Write-Host "MetaMCP backend (loopback only): http://localhost:$($state.backendPort)" }
-        Write-Host 'Initial login: .\windows\run-local.ps1 credentials (keep it private). The private API key is in the MetaMCP UI.'
+        Write-Host 'Sign in or register in MetaMCP. To close registration, use Settings > Authentication > Disable UI Registration.'
+        Write-Host 'Create a private API key in the MetaMCP UI for the MCP client.'
     } finally { Exit-MetaLock $lock }
 }
 function Show-MetaPorts {
@@ -633,11 +701,17 @@ function Show-MetaCredentials {
     $state = Get-MetaState
     if (-not $state) { throw 'Local MetaMCP has not been created. Run start.' }
     $values = Read-MetaEnv
-    if ($values.BOOTSTRAP_USER_EMAIL -cne $state.ownerEmail -or -not $values.BOOTSTRAP_USER_PASSWORD) { throw 'The existing MetaMCP login file is invalid; it was not changed.' }
+    $legacyEmail = 'local-' + $state.instanceId + '@mcpkit.local'
+    if ($values.BOOTSTRAP_USER_EMAIL -cne $legacyEmail -or $values.BOOTSTRAP_USER_PASSWORD -cnotmatch '^[a-f0-9]{48}$') {
+        Write-Host 'No bootstrap login was created. Register your own account in the MetaMCP UI.'
+        return
+    }
+    # Backward compatibility only: do not create, change, or delete this old
+    # account. Its original password may no longer be current.
     Write-Host "MetaMCP: http://localhost:$($state.port)"
-    Write-Host "Initial email: $($values.BOOTSTRAP_USER_EMAIL)"
-    Write-Host "Initial password: $($values.BOOTSTRAP_USER_PASSWORD)"
-    Write-Host 'Keep these private. If you changed the password in MetaMCP, use the changed password instead.'
+    Write-Host "Legacy initial email: $($values.BOOTSTRAP_USER_EMAIL)"
+    Write-Host "Legacy initial password: $($values.BOOTSTRAP_USER_PASSWORD)"
+    Write-Host 'Keep these private. If the password was changed in MetaMCP, use the current password instead.'
 }
 function Show-MetaLogs {
     $state = Get-MetaState
@@ -649,17 +723,60 @@ function Show-MetaLogs {
     if ($result.stdout) { Write-Host $result.stdout.TrimEnd() }
     if ($result.stderr) { Write-Host $result.stderr.TrimEnd() }
 }
-function Repair-MetaSeed {
-    $state = Get-MetaState
-    if (-not $state) { throw 'Local MetaMCP has not been created. Run start.' }
+function Enable-MetaSignup {
+    # This changes only the UI-signup flag, and only on an explicit command.
+    # It is useful when an older kit version already closed registration.
     $lock = Enter-MetaLock
     try {
+        $state = Get-MetaState
+        if (-not $state) { throw 'Local MetaMCP has not been created. Run start.' }
+        if (-not $state.manualAuthApplied -or $state.authPending -or $state.portsPending) {
+            throw 'MetaMCP configuration is pending. Run start before enabling registration.'
+        }
         Ensure-DesktopDocker -NoStart
         Assert-MetaClone $state
         Test-MetaCompose $state
         Test-MetaResources $state
         Wait-MetaMcp $state
-        Invoke-MetaSeed $state $true
-        Test-MetaBridge $state
+        $sql = @'
+BEGIN;
+INSERT INTO config (id, value, description)
+VALUES ('DISABLE_SIGNUP', 'false', 'Whether new user signup is disabled')
+ON CONFLICT (id) DO UPDATE SET value = 'false', updated_at = now();
+COMMIT;
+SELECT 'signup-open';
+'@
+        $script = 'PGPASSWORD="$POSTGRES_PASSWORD"; export PGPASSWORD; exec psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -qAt'
+        $result = Invoke-Docker @('--context', 'desktop-linux', 'exec', '-i', ($state.project + '-app'), 'sh', '-c', $script) $sql 120
+        Assert-DockerResult $result 'enable UI registration' $false
+        if ($result.stdout.Trim() -cne 'signup-open') { throw 'Could not confirm that UI registration was enabled.' }
+        Write-Host "UI registration is enabled at http://localhost:$($state.port). Register, then turn it off yourself in MetaMCP Settings."
+        Write-Host 'SSO registration and existing accounts were not changed.'
     } finally { Exit-MetaLock $lock }
+}
+function Repair-MetaSeed([string]$RequestedOwner = '') {
+    $lock = Enter-MetaLock
+    $needsApply = $false
+    try {
+        $state = Get-MetaState
+        if (-not $state) { throw 'Local MetaMCP has not been created. Run start.' }
+        if (-not $state.manualAuthApplied -or $state.authPending -or $state.portsPending) {
+            throw 'MetaMCP configuration is pending. Run start before registering the servers.'
+        }
+        Ensure-DesktopDocker -NoStart
+        Assert-MetaClone $state
+        Test-MetaCompose $state
+        Test-MetaResources $state
+        Wait-MetaMcp $state
+        $endpointGroup = Invoke-MetaSeed $state $true $RequestedOwner
+        Test-MetaBridge $state
+        $needsApply = $state.authPending
+        if (-not $needsApply -and $endpointGroup) {
+            Write-Host "MCP endpoint: http://localhost:$($state.port)/metamcp/$endpointGroup/mcp"
+        }
+    } finally { Exit-MetaLock $lock }
+    # An explicitly selected owner of a legacy multi-user instance becomes an
+    # administrator without removing the old allowlist. Recreate only the app,
+    # after releasing the lock; a failed application remains retryable.
+    if ($needsApply) { Start-MetaMcp }
 }

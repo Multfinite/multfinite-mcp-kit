@@ -5,6 +5,7 @@
 const fs = require('node:fs');
 const http = require('node:http');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 const stateFile = process.env.MCP_TEST_DOCKER_STATE;
@@ -28,7 +29,10 @@ function composeConfig(e, clone) {
   const labels = { 'com.multfinite.mcpkit.instance': e.MCPKIT_INSTANCE };
   const appEnv = { ...e,
     POSTGRES_HOST: 'postgres', POSTGRES_PORT: '5432', POSTGRES_USER: 'metamcp_user', POSTGRES_DB: 'metamcp_db',
-    DATABASE_URL: `postgresql://metamcp_user:${e.POSTGRES_PASSWORD}@postgres:5432/metamcp_db`, NEXT_PUBLIC_APP_URL: e.APP_URL };
+    DATABASE_URL: `postgresql://metamcp_user:${e.POSTGRES_PASSWORD}@postgres:5432/metamcp_db`, NEXT_PUBLIC_APP_URL: e.APP_URL,
+    BOOTSTRAP_ENABLE: 'false', BOOTSTRAP_USER_NAME: '', BOOTSTRAP_USER_EMAIL: '', BOOTSTRAP_USER_PASSWORD: '',
+    BOOTSTRAP_USERS: '', BOOTSTRAP_API_KEYS: '', BOOTSTRAP_NAMESPACES: '', BOOTSTRAP_ENDPOINTS: '',
+    BOOTSTRAP_RECREATE_USER: 'false', BOOTSTRAP_DELETE_OTHER_USERS: 'false', METAMCP_ADMIN_EMAILS: e.MCPKIT_METAMCP_ADMIN_EMAILS || '' };
   const ports = [{ host_ip: process.env.MCP_TEST_UNSAFE_PORT ? '0.0.0.0' : '127.0.0.1', published: e.MCPKIT_METAMCP_PORT, target: 12008, protocol: 'tcp' }];
   if (Number(e.MCPKIT_METAMCP_BACKEND_PORT) > 0) ports.push({ host_ip: '127.0.0.1', published: e.MCPKIT_METAMCP_BACKEND_PORT, target: 12009, protocol: 'tcp' });
   return { services: {
@@ -56,7 +60,7 @@ async function main() {
     const e = envFile(envPath);
     // Compose shell interpolation overrides the initial values in the env
     // file. Model that for an existing installation whose ports were changed.
-    for (const name of ['APP_URL', 'MCPKIT_METAMCP_PORT', 'MCPKIT_METAMCP_BACKEND_PORT', 'MCPKIT_IMAGE']) {
+    for (const name of ['APP_URL', 'MCPKIT_METAMCP_PORT', 'MCPKIT_METAMCP_BACKEND_PORT', 'MCPKIT_METAMCP_ADMIN_EMAILS', 'MCPKIT_IMAGE']) {
       if (process.env[name] !== undefined) e[name] = process.env[name];
     }
     if (project !== e.MCPKIT_PROJECT) fail('wrong project');
@@ -78,8 +82,14 @@ async function main() {
       if (recreate && process.env.MCP_TEST_RECREATE_FAIL) fail('simulated port conflict');
       const postgresOnly = command.at(-1) === 'postgres';
       const appOnly = command.at(-1) === 'app';
+      const newApp = !state.container[`${project}-app`];
       if (!postgresOnly) state.container[`${project}-app`] ||= labels;
       if (!appOnly) state.container[`${project}-postgres`] ||= labels;
+      if (!postgresOnly && (newApp || recreate)) {
+        const applied = composeConfig(e, clone).services.app.environment;
+        state.appliedAuth = { bootstrap: applied.BOOTSTRAP_ENABLE, email: applied.BOOTSTRAP_USER_EMAIL,
+          password: applied.BOOTSTRAP_USER_PASSWORD, admins: applied.METAMCP_ADMIN_EMAILS };
+      }
       for (const suffix of ['postgres_data', 'uv_cache']) state.volume[`${project}_${suffix}`] ||= labels;
       state.network[`${project}_metamcp-network`] ||= labels;
       if (!postgresOnly) {
@@ -117,13 +127,28 @@ async function main() {
     const script = command.at(-1);
     if (script.includes('psql')) {
       const text = await input();
+      if (text.includes("SELECT 'signup-open'")) {
+        state.signupDisabled = false; state.explicitSignupEnables = (state.explicitSignupEnables || 0) + 1; save();
+        console.log('signup-open'); return;
+      }
       const match = text.match(/\\set local_bundle_b64 '([A-Za-z0-9+/=]+)'/);
-      if (!match || !text.includes('host.docker.internal:')) fail('invalid SQL input');
+      if (!match || !text.includes('host.docker.internal:') || text.includes('DISABLE_SIGNUP')) fail('invalid or unsafe SQL input');
       const bundle = JSON.parse(Buffer.from(match[1], 'base64').toString('utf8'));
       if (process.env.MCP_TEST_CAPTURE) fs.writeFileSync(process.env.MCP_TEST_CAPTURE, JSON.stringify(bundle));
+      const users = state.users || [];
+      const matches = bundle.ownerEmail ? users.filter((u) => u.email.toLowerCase() === bundle.ownerEmail.toLowerCase()) : users;
+      if (!matches.length) { console.log(`${bundle.ownerEmail ? 'missing' : 'waiting'}|||`); return; }
+      if (matches.length !== 1) { console.log('ambiguous|||'); return; }
+      const user = matches[0]; const base = `local-${bundle.hostId}`;
+      state.seedRecords ||= {};
+      const previous = state.seedRecords[user.id];
+      const occupied = Object.values(state.seedRecords).some((record) => record.group === base && record.owner !== user.id);
+      const group = previous?.group || (occupied ? `${base}-${createHash('md5').update(user.id).digest('hex').slice(0, 8)}` : base);
       const force = text.includes("\\set local_force 'true'");
-      const first = !state.seeds; state.seeds++; save();
-      console.log(first || force ? 'seeded|' : 'skipped|'); return;
+      state.seedRecords[user.id] = previous || { owner: user.id, group, serverCount: 13 };
+      state.seeds++; save();
+      const result = previous && !force ? 'skipped' : 'seeded';
+      console.log(`${result}|${group}|${Buffer.from(user.email).toString('base64')}|`); return;
     }
     if (script.includes('curl')) { if (state.running) return; fail('not running'); }
   }

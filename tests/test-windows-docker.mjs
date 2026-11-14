@@ -72,41 +72,58 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     const secretsFile = path.join(base, 'config/private/secrets.json'); const secrets = readJson(secretsFile);
     installFakes(base);
     const first = invoke(env, setup.runner, 'start'); success(first);
-    assert.match(first.stdout, /13 Windows servers/);
+    assert.match(first.stdout, /No MetaMCP account exists yet/);
+    assert.doesNotMatch(first.stdout, /Registered the 13 Windows servers/);
     assert.match(first.stdout, /Docker Desktop can reach the authenticated loopback/);
     assert.match(first.stdout, /MetaMCP: http:\/\/localhost:12080/);
-    assert.doesNotMatch(first.stdout, /SSH|VPN|configure and register/i);
+    assert.doesNotMatch(first.stdout, /SSH|VPN/i);
     const metaFile = path.join(base, 'config/private/metamcp-state.json'); const meta = readJson(metaFile);
     const metaEnvFile = path.join(base, 'config/private/metamcp.env'); const metaEnv = readEnv(metaEnvFile);
     assert.equal(meta.port, 12080); assert.equal(meta.backendPort, 0); assert.equal(meta.envCreated, true);
+    assert.equal(meta.ownerEmail, ''); assert.equal(meta.manualAuthApplied, true);
     assert.match(meta.cloneDir, /metamcp-kit-[a-f0-9]{16}$/);
     assert.equal(fs.readFileSync(path.join(existingClone, 'do-not-touch.txt'), 'utf8'), 'existing user clone');
     assert.equal(fs.existsSync(path.join(meta.cloneDir, '.env')), false, 'secrets must stay outside the Docker build context');
     assert.match(metaEnv.POSTGRES_PASSWORD, /^[a-f0-9]{64}$/);
     assert.match(metaEnv.BETTER_AUTH_SECRET, /^[a-f0-9]{64}$/);
-    assert.match(metaEnv.BOOTSTRAP_USER_PASSWORD, /^[a-f0-9]{48}$/);
-    assert.equal(metaEnv.BOOTSTRAP_RECREATE_USER, 'false'); assert.equal(metaEnv.BOOTSTRAP_DELETE_OTHER_USERS, 'false');
-    assert.equal(metaEnv.BOOTSTRAP_DISABLE_REGISTRATION_UI, 'false'); // seeder closes signup after bootstrap
-    assert.deepEqual(JSON.parse(metaEnv.BOOTSTRAP_API_KEYS), [{ name: 'Windows LOCAL', is_public: false, user_email: meta.ownerEmail }]);
+    assert.equal(metaEnv.BOOTSTRAP_ENABLE, 'false');
+    for (const name of ['BOOTSTRAP_USER_EMAIL', 'BOOTSTRAP_USER_PASSWORD', 'BOOTSTRAP_API_KEYS', 'METAMCP_ADMIN_EMAILS']) {
+      assert.equal(metaEnv[name], undefined, `${name} must not be generated`);
+    }
     assert.equal(readJson(setup.env.MCP_TEST_CAPTURE).gatewayKey, secrets.gatewayApiKey);
     assert.equal(readJson(setup.env.MCP_TEST_CAPTURE).port, settings.port);
-    assert.equal(readJson(setup.env.MCP_TEST_CAPTURE).ownerEmail, meta.ownerEmail);
+    assert.equal(readJson(setup.env.MCP_TEST_CAPTURE).ownerEmail, '');
+    assert.deepEqual(readJson(setup.env.MCP_TEST_DOCKER_STATE).users || [], []);
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).appliedAuth.bootstrap, 'false');
+    const credentials = invoke(env, setup.runner, 'credentials'); success(credentials);
+    assert.match(credentials.stdout, /No bootstrap login was created/);
+    const beforeSignupSeed = invoke(env, setup.runner, 'seed');
+    assert.notEqual(beforeSignupSeed.status, 0); assert.match(beforeSignupSeed.stdout, /Register in the MetaMCP UI/);
     const trace = fs.readFileSync(setup.env.MCP_TEST_DOCKER_TRACE, 'utf8');
-    for (const secret of [secrets.gatewayApiKey, metaEnv.POSTGRES_PASSWORD, metaEnv.BETTER_AUTH_SECRET, metaEnv.BOOTSTRAP_USER_PASSWORD]) {
+    for (const secret of [secrets.gatewayApiKey, metaEnv.POSTGRES_PASSWORD, metaEnv.BETTER_AUTH_SECRET]) {
       assert.ok(!trace.includes(secret), 'secrets must not appear in docker command arguments');
       assert.ok(!first.stdout.includes(secret), 'secrets must not appear in normal startup output');
     }
-    const stateBefore = fs.readFileSync(metaFile, 'utf8'); const envBefore = fs.readFileSync(metaEnvFile, 'utf8');
+    const envBefore = fs.readFileSync(metaEnvFile, 'utf8');
+    // Simulate the user signing up and disabling registration in the UI.
+    const signedUp = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    signedUp.users = [{ id: 'alice-id', email: 'alice@example.com' }]; signedUp.signupDisabled = true;
+    writeJson(setup.env.MCP_TEST_DOCKER_STATE, signedUp);
     const second = invoke(env, setup.runner, 'start'); success(second);
-    assert.match(second.stdout, /already initialized/);
+    assert.match(second.stdout, /13 Windows servers/);
+    assert.equal(readJson(metaFile).ownerEmail, 'alice@example.com');
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).seedRecords['alice-id'].serverCount, 13);
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).signupDisabled, true);
+    const stateBefore = fs.readFileSync(metaFile, 'utf8');
+    const third = invoke(env, setup.runner, 'start'); success(third);
+    assert.match(third.stdout, /already initialized/);
     assert.equal(fs.readFileSync(metaFile, 'utf8'), stateBefore); assert.equal(fs.readFileSync(metaEnvFile, 'utf8'), envBefore);
     assert.deepEqual(readJson(settingsFile), settings); assert.deepEqual(readJson(secretsFile), secrets);
     assert.equal(fs.readFileSync(legacy, 'utf8'), 'OTHER=keep\n');
-    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls, 2);
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls, 3);
     success(invoke(env, setup.runner, 'status'));
-    const credentials = invoke(env, setup.runner, 'credentials'); success(credentials);
-    assert.match(credentials.stdout, new RegExp(meta.ownerEmail)); assert.ok(credentials.stdout.includes(metaEnv.BOOTSTRAP_USER_PASSWORD));
     success(invoke(env, setup.runner, 'seed'));
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).signupDisabled, true);
 
     const beforeUnsafe = readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls;
     const unsafe = invoke({ ...env, MCP_TEST_UNSAFE_PORT: '1' }, setup.runner, 'start');
@@ -176,6 +193,80 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     assert.deepEqual(changedDocker.volume, oldVolumes); assert.equal(fs.readFileSync(metaEnvFile, 'utf8'), envBefore);
     success(invoke(env, setup.runner, 'start'));
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).appRecreates, 1);
+    success(invoke(env, setup.runner, 'stop'));
+  } finally {
+    try { invoke(env, setup.runner, 'stop'); } catch { /* fixture cleanup */ }
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('legacy bootstrap is disabled without changing accounts, signup, volumes or private endpoints', { skip, timeout: 240000 }, async () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpkit-legacy-auth-'));
+  const home = path.join(root, 'home'); const base = path.join(root, 'local'); const bin = path.join(root, 'bin');
+  fs.mkdirSync(home); fs.mkdirSync(base);
+  const setup = prepareDockerFixture(root, bin);
+  const env = { ...process.env, ...setup.env, OS: 'Windows_NT', USERPROFILE: home, HOME: home, MCP_LOCAL_DIR: base,
+    PATH: `${bin}${path.delimiter}${path.dirname(process.execPath)}${path.delimiter}${process.env.PATH}` };
+  try {
+    success(invoke(env, setup.runner, 'init'));
+    const settingsFile = path.join(base, 'config/local-settings.json'); const settings = readJson(settingsFile);
+    settings.port = await freePort(); writeJson(settingsFile, settings);
+    installFakes(base);
+    success(invoke(env, setup.runner, 'start'));
+    const metaFile = path.join(base, 'config/private/metamcp-state.json'); const meta = readJson(metaFile);
+    const envFile = path.join(base, 'config/private/metamcp.env');
+    const oldEmail = `local-${meta.instanceId}@mcpkit.local`; const oldPassword = 'a'.repeat(48);
+    const oldEnv = fs.readFileSync(envFile, 'utf8').replace('BOOTSTRAP_ENABLE=false', 'BOOTSTRAP_ENABLE=true') +
+      `BOOTSTRAP_USER_NAME=Windows LOCAL\nBOOTSTRAP_USER_EMAIL=${oldEmail}\nBOOTSTRAP_USER_PASSWORD=${oldPassword}\n` +
+      `BOOTSTRAP_API_KEYS=[{"name":"Windows LOCAL","user_email":"${oldEmail}"}]\nMETAMCP_ADMIN_EMAILS=${oldEmail}\n`;
+    fs.writeFileSync(envFile, oldEnv);
+    delete meta.manualAuthApplied; delete meta.authPending; delete meta.additionalAdminEmails;
+    meta.ownerEmail = oldEmail; writeJson(metaFile, meta);
+    const previous = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    previous.users = [{ id: 'legacy-id', email: oldEmail }]; previous.signupDisabled = true;
+    previous.seedRecords = { 'legacy-id': { owner: 'legacy-id', group: `local-${settings.hostId}`, serverCount: 13 } };
+    previous.appliedAuth = { bootstrap: 'true', email: oldEmail, password: oldPassword, admins: oldEmail };
+    const volumes = JSON.stringify(previous.volume);
+    writeJson(setup.env.MCP_TEST_DOCKER_STATE, previous);
+
+    const migrated = invoke(env, setup.runner, 'start'); success(migrated);
+    let docker = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.equal(docker.signupDisabled, true, 'upgrade must not reopen a closed signup');
+    assert.deepEqual(docker.appliedAuth, { bootstrap: 'false', email: '', password: '', admins: oldEmail });
+    assert.equal(readJson(metaFile).manualAuthApplied, true);
+    assert.equal(docker.appRecreates, 1); assert.equal(JSON.stringify(docker.volume), volumes);
+    assert.equal(fs.readFileSync(envFile, 'utf8'), oldEnv, 'legacy credentials are not rewritten');
+    const legacyCredentials = invoke(env, setup.runner, 'credentials'); success(legacyCredentials);
+    assert.ok(legacyCredentials.stdout.includes(oldEmail)); assert.ok(legacyCredentials.stdout.includes(oldPassword));
+
+    success(invoke(env, setup.runner, 'enable-signup'));
+    docker = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.equal(docker.signupDisabled, false); assert.equal(docker.explicitSignupEnables, 1);
+    docker.users.push({ id: 'manual-id', email: 'person@example.com' });
+    writeJson(setup.env.MCP_TEST_DOCKER_STATE, docker);
+    const selected = invoke(env, setup.runner, 'seed', '-OwnerEmail', 'person@example.com'); success(selected);
+    docker = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.equal(docker.users.length, 2, 'neither account is deleted');
+    assert.equal(docker.seedRecords['legacy-id'].group, `local-${settings.hostId}`);
+    assert.match(docker.seedRecords['manual-id'].group, new RegExp(`^local-${settings.hostId}-[a-f0-9]{8}$`));
+    assert.equal(docker.seedRecords['manual-id'].serverCount, 13);
+    assert.equal(docker.appliedAuth.admins, `${oldEmail},person@example.com`);
+    assert.equal(docker.appRecreates, 2); assert.equal(JSON.stringify(docker.volume), volumes);
+    assert.equal(docker.signupDisabled, false, 'the user must close signup manually');
+    assert.equal(readJson(metaFile).ownerEmail, 'person@example.com');
+    assert.deepEqual(readJson(metaFile).additionalAdminEmails, ['person@example.com']);
+    assert.equal(fs.readFileSync(envFile, 'utf8'), oldEnv);
+    assert.match(selected.stdout, new RegExp(docker.seedRecords['manual-id'].group));
+
+    docker.signupDisabled = true; writeJson(setup.env.MCP_TEST_DOCKER_STATE, docker); // UI setting
+    success(invoke(env, setup.runner, 'start'));
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).signupDisabled, true, 'restart must preserve the UI setting');
+    const missing = invoke(env, setup.runner, 'seed', '-OwnerEmail', 'missing@example.com');
+    assert.notEqual(missing.status, 0); assert.match(missing.stdout, /account was not found/);
+    assert.equal(readJson(metaFile).ownerEmail, 'person@example.com');
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).appRecreates, 2);
+    const stillAccessible = invoke(env, setup.runner, 'credentials'); success(stillAccessible);
+    assert.ok(stillAccessible.stdout.includes(oldEmail));
     success(invoke(env, setup.runner, 'stop'));
   } finally {
     try { invoke(env, setup.runner, 'stop'); } catch { /* fixture cleanup */ }

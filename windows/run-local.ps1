@@ -6,7 +6,9 @@
     .\windows\run-local.ps1 start
     .\windows\run-local.ps1 status
     .\windows\run-local.ps1 logs obsidian
-    .\windows\run-local.ps1 credentials
+    .\windows\run-local.ps1 seed
+    .\windows\run-local.ps1 seed -OwnerEmail 'you@example.com'
+    .\windows\run-local.ps1 enable-signup
     .\windows\run-local.ps1 logs metamcp
     .\windows\run-local.ps1 ports
     .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009
@@ -14,9 +16,10 @@
 [CmdletBinding()]
 param(
     # init is used by the installer; it never replaces existing settings.
-    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
+    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
     [string]$Command = 'start',
     [string]$Server = '',
+    [string]$OwnerEmail = '',
     [ValidateRange(0, 65535)]
     [int]$WebPort = 0,
     [ValidateRange(0, 65535)]
@@ -400,6 +403,7 @@ function Get-LocalStackStatus {
 }
 
 try {
+    if ($PSBoundParameters.ContainsKey('OwnerEmail') -and $Command -ne 'seed') { throw 'OwnerEmail is only accepted by the seed command.' }
     switch ($Command) {
         'init'      { Initialize-Configuration }
         'start'        { Start-LocalStack }
@@ -408,7 +412,8 @@ try {
         'status'       { Get-LocalStackStatus }
         'logs'         { if ($Server -eq 'metamcp') { Show-MetaLogs } else { Show-Logs $Server } }
         'credentials'  { Show-MetaCredentials }
-        'seed'            { Repair-MetaSeed }
+        'seed'            { Repair-MetaSeed $OwnerEmail }
+        'enable-signup'   { Enable-MetaSignup }
         'ports'           { Show-MetaPorts }
         'set-ports'       {
             if (-not $PSBoundParameters.ContainsKey('WebPort') -or -not $PSBoundParameters.ContainsKey('BackendPort')) {
