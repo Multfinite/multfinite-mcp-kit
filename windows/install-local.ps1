@@ -13,6 +13,8 @@ param(
     [switch]$NonInteractive,
     # Add local Docker MetaMCP to an already installed native LOCAL stack.
     [switch]$MetaMcpOnly,
+    # Install the native servers only; never install/start Docker or MetaMCP.
+    [switch]$ServersOnly,
     [switch]$InstallBuildTools,
     [switch]$SkipEverything,
     [switch]$SkipBrowserDownload
@@ -181,6 +183,7 @@ Protect-PrivateDirectory (Join-Path $BaseDir 'logs')
 Protect-PrivateDirectory $Runtime
 Refresh-Path
 
+if ($MetaMcpOnly -and $ServersOnly) { throw 'Choose either MetaMcpOnly or ServersOnly.' }
 if ($MetaMcpOnly) {
     if (-not (Test-Path -LiteralPath (Join-Path $BaseDir 'config\local-settings.json') -PathType Leaf) -or
         -not (Test-Path -LiteralPath (Join-Path $PrivateDir 'secrets.json') -PathType Leaf)) {
@@ -201,7 +204,9 @@ Step 'Preparing the kit for updates'
 Invoke-Runner 'gateway-stop'
 
 Ensure-GitPrerequisite
-try { Ensure-DockerPrerequisite } catch { Fail "Docker Desktop: $($_.Exception.Message)" }
+if (-not $ServersOnly) {
+    try { Ensure-DockerPrerequisite } catch { Fail "Docker Desktop: $($_.Exception.Message)" }
+}
 
 Step 'Node.js bootstrap'
 $nodeDir = Join-Path $Runtime 'node'
@@ -372,24 +377,35 @@ if (-not $SkipBrowserDownload) {
 # this installer's temporary node-gyp selection.
 [Environment]::SetEnvironmentVariable('npm_config_python', $originalNpmPython, 'Process')
 [Environment]::SetEnvironmentVariable('NODE_GYP_FORCE_PYTHON', $originalNodeGypPython, 'Process')
-Step 'Starting LOCAL servers and Docker Desktop MetaMCP'
-# Even if one native server fails, the runner still starts MetaMCP and
-# registers the other servers, then reports the incomplete status.
-try { Invoke-Runner 'start' }
-catch { Fail "LOCAL stack: $($_.Exception.Message)" }
+if ($ServersOnly) {
+    Step 'Starting native LOCAL servers only'
+    try { Invoke-Runner 'gateway-start' }
+    catch { Fail "LOCAL servers: $($_.Exception.Message)" }
+} else {
+    Step 'Starting LOCAL servers and legacy Docker Desktop MetaMCP'
+    # Retain the original combined workflow for existing installations.
+    try { Invoke-Runner 'start' }
+    catch { Fail "LOCAL stack: $($_.Exception.Message)" }
+}
 
 Write-KitHeader 'Windows LOCAL configuration'
 Write-KitInfo "Settings: $BaseDir\config\local-settings.json"
 Write-KitInfo "Secrets:  $PrivateDir\secrets.json (keep private)"
-Write-KitInfo 'MetaMCP: register in the UI and create an API key. Shared server groups are set up automatically. Disable signup yourself in MetaMCP Settings.'
-Write-KitInfo 'Commands: .\windows\run-local.ps1 status | logs | restart | stop | ports'
-Write-KitInfo 'Change existing MetaMCP ports: .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009'
+if ($ServersOnly) {
+    Write-KitInfo 'No MetaMCP was installed or configured. Use install-metamcp.ps1 and connect-local.ps1 separately.'
+    Write-KitInfo 'Commands: .\windows\run-servers.ps1 status | logs | restart | stop'
+} else {
+    Write-KitInfo 'MetaMCP: register in the UI and create an API key. Shared server groups are set up automatically. Disable signup yourself in MetaMCP Settings.'
+    Write-KitInfo 'Commands: .\windows\run-local.ps1 status | logs | restart | stop | ports'
+    Write-KitInfo 'Change existing MetaMCP ports: .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009'
+}
 Note 'Obsidian requires its Local REST API plugin and key; the server waits until configured.'
 if ($Failures.Count -gt 0) {
     Write-KitError 'Installation is incomplete. Fix the errors above and rerun this script; existing configuration and data are preserved.'
     exit 1
 }
-Ok 'Installation completed. Open local MetaMCP and check server-specific prerequisites as described above.'
+if ($ServersOnly) { Ok 'LOCAL servers installed. Connect them to a chosen MetaMCP separately.' }
+else { Ok 'Installation completed. Open local MetaMCP and check server-specific prerequisites as described above.' }
 } finally {
     # Restore the caller's PATH, node-gyp Python and TLS protocol settings.
     [Environment]::SetEnvironmentVariable('Path', $originalPath, 'Process')

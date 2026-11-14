@@ -1,0 +1,142 @@
+# Independent GLOBAL services; only the authenticated gateway is published,
+# and only on host loopback. No existing MetaMCP container is modified.
+x-kit-labels: &kit-labels
+  com.multfinite.mcpkit.instance: ${MCPKIT_INSTANCE}
+services:
+  gateway:
+    image: ${MCPKIT_IMAGE}
+    build:
+      context: ${MCPKIT_BUILD_DIR}
+      labels: *kit-labels
+    pull_policy: never
+    environment:
+      MCPKIT_GATEWAY_KEY: ${MCPKIT_GATEWAY_KEY}
+      MCPKIT_CONTROL_KEY: ${MCPKIT_CONTROL_KEY}
+      MCPKIT_INSTANCE_ID: ${MCPKIT_INSTANCE}
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      CONTEXT7_API_KEY: ${CONTEXT7_API_KEY:-}
+    ports:
+      - "127.0.0.1:${MCPKIT_PORT}:13001"
+    volumes:
+      - gateway_data:/data
+    # The gateway reaches the sidecars on default, but MetaMCP is only
+    # connected to the separate client network. Never attach sidecars to it.
+    networks:
+      default: {}
+      client:
+        aliases:
+          - "${MCPKIT_PROJECT}-gateway"
+    labels: *kit-labels
+    restart: unless-stopped
+  neo4j:
+    image: neo4j:community
+    environment:
+      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+    labels: *kit-labels
+    restart: unless-stopped
+  qdrant:
+    image: qdrant/qdrant
+    volumes:
+      - qdrant_data:/qdrant/storage
+    labels: *kit-labels
+    restart: unless-stopped
+  graphiti:
+    image: zepai/knowledge-graph-mcp:standalone
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$OPENAI_API_KEY" ]; then
+          echo 'Graphiti needs LLM_API_KEY in the private kit env.' >&2
+          exec sleep infinity
+        fi
+        exec uv run --no-sync main.py --transport http --host 0.0.0.0 --database-provider neo4j
+    environment:
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
+      NEO4J_DATABASE: neo4j
+      OPENAI_API_KEY: ${LLM_API_KEY:-}
+      OPENAI_BASE_URL: ${LLM_API_ENDPOINT:-https://api.openai.com/v1}
+      MODEL_NAME: ${LLM_API_MODEL:-gpt-4o-mini}
+      EMBEDDER_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      GRAPHITI_GROUP_ID: multfinite-mcp-kit-global
+    labels: *kit-labels
+    restart: unless-stopped
+  cognee:
+    image: cognee/cognee-mcp:main
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        if [ -z "$$LLM_API_KEY" ]; then
+          echo 'Cognee needs LLM_API_KEY in the private kit env.' >&2
+          exec sleep infinity
+        fi
+        exec /app/entrypoint.sh
+    environment:
+      TRANSPORT_MODE: http
+      MCP_ALLOWED_HOSTS: "cognee:*"
+      LLM_PROVIDER: ${LLM_API_PROVIDER:-openai}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_API_MODEL:-gpt-4o-mini}
+      LLM_ENDPOINT: ${LLM_API_ENDPOINT:-https://api.openai.com/v1}
+      EMBEDDING_PROVIDER: ${LLM_API_PROVIDER:-openai}
+      EMBEDDING_API_KEY: ${LLM_API_KEY:-}
+      EMBEDDING_ENDPOINT: ${LLM_API_ENDPOINT:-https://api.openai.com/v1}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      SYSTEM_ROOT_DIRECTORY: /cognee-storage/system
+      DATA_ROOT_DIRECTORY: /cognee-storage/data
+    volumes:
+      - cognee_system:/cognee-storage/system
+      - cognee_data:/cognee-storage/data
+    labels: *kit-labels
+    restart: unless-stopped
+  memory:
+    image: ${MCPKIT_NODE_IMAGE}
+    build:
+      context: ${MCPKIT_NODE_BUILD_DIR}
+      labels: *kit-labels
+    pull_policy: never
+    environment:
+      MEMORY_BANK_ROOT: /mcpkit/memory
+    command: ["mcp-proxy", "--host", "0.0.0.0", "--port", "8000", "--server", "stream", "--", "mcp-server-memory-bank"]
+    volumes:
+      - memory_data:/mcpkit/memory
+    labels: *kit-labels
+    restart: unless-stopped
+  gdrive:
+    image: ${MCPKIT_NODE_IMAGE}
+    pull_policy: never
+    depends_on: [memory]
+    environment:
+      GDRIVE_CREDENTIALS_PATH: /mcpkit/gdrive/credentials.json
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        while [ ! -s /mcpkit/gdrive/credentials.json ]; do
+          echo 'Waiting for Google Drive OAuth credentials.' >&2
+          sleep 30
+        done
+        exec mcp-proxy --host 0.0.0.0 --port 8000 --server stream -- mcp-server-gdrive
+    volumes:
+      - gdrive_data:/mcpkit/gdrive
+    labels: *kit-labels
+    restart: unless-stopped
+volumes:
+  gateway_data: { labels: *kit-labels }
+  neo4j_data: { labels: *kit-labels }
+  qdrant_data: { labels: *kit-labels }
+  cognee_system: { labels: *kit-labels }
+  cognee_data: { labels: *kit-labels }
+  memory_data: { labels: *kit-labels }
+  gdrive_data: { labels: *kit-labels }
+networks:
+  default: { labels: *kit-labels }
+  client:
+    # No direct sidecar/database access for linked MetaMCP instances.
+    internal: true
+    labels: *kit-labels

@@ -24,7 +24,10 @@ param(
     [ValidateRange(0, 65535)]
     [int]$WebPort = 0,
     [ValidateRange(0, 65535)]
-    [int]$BackendPort = 0
+    [int]$BackendPort = 0,
+    # Used only for the create-only independent LOCAL initialization.
+    [ValidateRange(1, 65535)]
+    [int]$GatewayPort = 13001
 )
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'This script must be run in a Windows user session.' }
@@ -105,7 +108,7 @@ function Initialize-Configuration {
         version = 1
         hostId = "$name-$(New-RandomHex 3)"
         listenHost = '127.0.0.1'
-        port = 13001
+        port = $GatewayPort
         tlsCertFile = ''
         tlsKeyFile = ''
         allowInsecureLan = $false
@@ -416,6 +419,7 @@ function Get-LocalStackStatus {
 
 try {
     if ($PSBoundParameters.ContainsKey('OwnerEmail') -and $Command -ne 'seed') { throw 'OwnerEmail is only accepted by the seed command.' }
+    if ($PSBoundParameters.ContainsKey('GatewayPort') -and $Command -ne 'init') { throw 'GatewayPort is only accepted by create-only init.' }
     switch ($Command) {
         'init'      { Initialize-Configuration }
         'start'        { Start-LocalStack }

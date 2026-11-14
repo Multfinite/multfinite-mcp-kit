@@ -59,7 +59,7 @@ function Invoke-KitProcess {
     foreach ($name in @($start.EnvironmentVariables.Keys)) {
         $upper = $name.ToUpperInvariant()
         if ($upper -match '^(COMPOSE_|POSTGRES_|BOOTSTRAP_|MCPKIT_|METAMCP_)' -or
-            $upper -in @('DATABASE_URL', 'APP_URL', 'NEXT_PUBLIC_APP_URL', 'BETTER_AUTH_SECRET',
+            $upper -in @('DATABASE_URL', 'APP_URL', 'NEXT_PUBLIC_APP_URL', 'EXTRA_TRUSTED_ORIGINS', 'BETTER_AUTH_SECRET',
                 'TRANSFORM_LOCALHOST_TO_DOCKER_INTERNAL', 'DOCKER_HOST', 'DOCKER_CONTEXT',
                 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH', 'DOCKER_API_VERSION',
                 'GIT_DIR', 'GIT_WORK_TREE', 'GIT_INDEX_FILE', 'GIT_OBJECT_DIRECTORY', 'GIT_ALTERNATE_OBJECT_DIRECTORIES')) {
@@ -199,6 +199,14 @@ function Initialize-MetaState {
         # Use set-ports for an existing instance; do not rewrite its secrets.
         $port = [int]$Manifest.metamcp.frontendPort
         $backendPort = [int]$Manifest.metamcp.backendPort
+        # Existing instances keep their saved ports. Even the legacy combined
+        # installer must obtain an explicit port for a newly created instance.
+        if (-not $env:MCPKIT_METAMCP_PORT) {
+            if ([Console]::IsInputRedirected) { throw 'A new MetaMCP needs an explicit MCPKIT_METAMCP_PORT or an interactive port selection.' }
+            $answer = Read-Host 'Port for this new MetaMCP (1-65535)'
+            if ($answer -notmatch '^\d{1,5}$' -or [int]$answer -lt 1 -or [int]$answer -gt 65535) { throw 'A port between 1 and 65535 is required.' }
+            $port = [int]$answer
+        }
         if ($env:MCPKIT_METAMCP_PORT) {
             if ($env:MCPKIT_METAMCP_PORT -notmatch '^\d{1,5}$' -or [int]$env:MCPKIT_METAMCP_PORT -lt 1 -or [int]$env:MCPKIT_METAMCP_PORT -gt 65535) {
                 throw 'MCPKIT_METAMCP_PORT must be a port between 1 and 65535.'

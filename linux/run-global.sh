@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=linux/docker-common.sh
+source "$SCRIPT_DIR/docker-common.sh"
 BASE_DIR="$HOME/mcp-global"
 CONFIG_DIR="$BASE_DIR/config"
 METAMCP_DIR="$BASE_DIR/metamcp"
@@ -29,7 +31,7 @@ credential_value() {
 
 check_docker() {
     header "Docker"
-    if ! docker info >/dev/null 2>&1; then
+    if ! mcpkit_require_docker; then
         error "Docker не запущен или недоступен текущему пользователю"
         return 1
     fi

@@ -1,0 +1,6 @@
+services:
+  app:
+    # On Linux this explicit hostname lets a separately installed loopback
+    # gateway be reached via a protected local tunnel or reverse proxy.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

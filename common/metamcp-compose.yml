@@ -1,0 +1,66 @@
+# A separate Compose project per installation. No legacy container names.
+services:
+  app:
+    image: ${MCPKIT_IMAGE}
+    build:
+      context: ${MCPKIT_SOURCE}
+      dockerfile: Dockerfile
+      labels:
+        com.multfinite.mcpkit.instance: ${MCPKIT_INSTANCE}
+    pull_policy: never
+    environment:
+      NODE_ENV: production
+      LOG_LEVEL: errors-only
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: metamcp_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: metamcp_db
+      DATABASE_URL: postgresql://metamcp_user:${POSTGRES_PASSWORD}@postgres:5432/metamcp_db
+      APP_URL: ${MCPKIT_APP_URL}
+      NEXT_PUBLIC_APP_URL: ${MCPKIT_APP_URL}
+      # Better Auth checks the explicit trustedOrigins array on POST. The
+      # upstream defaults omit arbitrary ports and external APP_URL values.
+      # Keep any additional origins from the private env file as well.
+      EXTRA_TRUSTED_ORIGINS: "${MCPKIT_APP_URL},${EXTRA_TRUSTED_ORIGINS:-}"
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET}
+      METAMCP_ADMIN_EMAILS: ${METAMCP_ADMIN_EMAILS:-}
+      TRANSFORM_LOCALHOST_TO_DOCKER_INTERNAL: "false"
+      BOOTSTRAP_ENABLE: "false"
+    ports:
+      - "127.0.0.1:${MCPKIT_PORT}:12008"
+    volumes:
+      - uv_cache:/home/nextjs/.cache/uv
+    depends_on:
+      postgres:
+        condition: service_healthy
+    labels:
+      com.multfinite.mcpkit.instance: ${MCPKIT_INSTANCE}
+    restart: unless-stopped
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: metamcp_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: metamcp_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U metamcp_user -d metamcp_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    labels:
+      com.multfinite.mcpkit.instance: ${MCPKIT_INSTANCE}
+    restart: unless-stopped
+volumes:
+  postgres_data:
+    labels:
+      com.multfinite.mcpkit.instance: ${MCPKIT_INSTANCE}
+  uv_cache:
+    labels:
+      com.multfinite.mcpkit.instance: ${MCPKIT_INSTANCE}
+networks:
+  default:
+    labels:
+      com.multfinite.mcpkit.instance: ${MCPKIT_INSTANCE}
