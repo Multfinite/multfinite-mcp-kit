@@ -448,6 +448,39 @@ function Wait-MetaMcp($State) {
     } while ([DateTime]::UtcNow -lt $deadline)
     throw 'MetaMCP did not become ready. Check .\windows\run-local.ps1 logs metamcp; its database and containers were preserved.'
 }
+function Invoke-MetaSeedQuery($State, [string]$Sql, [string]$Encoded, [string]$Mode) {
+    $inputText = "\set local_bundle_b64 '$Encoded'`n\set local_force '$Mode'`n$Sql`n"
+    # The app can be stopped during migration; the owned PostgreSQL container
+    # has psql and its own database credentials. Neither appears in argv.
+    $script = 'PGPASSWORD="$POSTGRES_PASSWORD"; export PGPASSWORD; exec psql -h 127.0.0.1 -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -qAt'
+    $result = Invoke-Docker @('--context', 'desktop-linux', 'exec', '-i', ($State.project + '-postgres'), 'sh', '-c', $script) $inputText 120
+    # SQL input includes the gateway key. Do not echo SQL/stdout/stderr on error.
+    Assert-DockerResult $result 'local server registration; check MetaMCP logs and retry' $false
+    return $result.stdout.Trim()
+}
+function Backup-MetaDatabase($State) {
+    # A transaction protects against partial writes, but consolidation also
+    # removes equivalent duplicate UUIDs. Keep a private pre-change dump in
+    # the existing PostgreSQL volume; it is never copied into the repository.
+    $name = 'mcpkit-pre-seed-v3-' + [DateTime]::UtcNow.ToString('yyyyMMddHHmmss') + '-' + (New-RandomHex 4) + '.dump'
+    $script = @'
+set -eu
+umask 077
+dir="$PGDATA/mcpkit-backups"
+if [ -L "$dir" ]; then exit 1; fi
+if [ ! -d "$dir" ]; then mkdir -m 700 "$dir"; fi
+file="$dir/__BACKUP_NAME__"
+if [ -e "$file" ] || [ -L "$file" ]; then exit 1; fi
+PGPASSWORD="$POSTGRES_PASSWORD"; export PGPASSWORD
+pg_dump -h 127.0.0.1 -p 5432 -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f "$file"
+printf 'backup-ok\n'
+'@
+    $script = $script.Replace('__BACKUP_NAME__', $name)
+    $result = Invoke-Docker @('--context', 'desktop-linux', 'exec', '--user', 'postgres', ($State.project + '-postgres'), 'sh', '-c', $script) '' 600
+    Assert-DockerResult $result 'pre-migration PostgreSQL backup; no migration was attempted' $false
+    if ($result.stdout.Trim() -cne 'backup-ok') { throw 'Could not confirm the PostgreSQL backup; no migration was attempted.' }
+    Write-Host "Database backup: PostgreSQL volume /mcpkit-backups/$name (contains secrets; keep private)."
+}
 function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
     $config = Get-Configuration
     $settings = $config.settings
@@ -461,14 +494,38 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
     $json = ConvertTo-Json -InputObject $bundle -Depth 10 -Compress
     $encoded = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($json))
     $sql = Get-Content -LiteralPath (Join-Path $ScriptDir 'seed-local.sql') -Raw -Encoding UTF8
-    $forceValue = if ($Force) { 'true' } else { 'false' }
-    $inputText = "\set local_bundle_b64 '$encoded'`n\set local_force '$forceValue'`n$sql`n"
-    $script = 'PGPASSWORD="$POSTGRES_PASSWORD"; export PGPASSWORD; exec psql -h "$POSTGRES_HOST" -p "$POSTGRES_PORT" -U "$POSTGRES_USER" -d "$POSTGRES_DB" -X -v ON_ERROR_STOP=1 -qAt'
-    $result = Invoke-Docker @('--context', 'desktop-linux', 'exec', '-i', ($State.project + '-app'), 'sh', '-c', $script) $inputText 120
-    # The input includes a gateway key, so never print SQL/stdout/stderr on an
-    # error. The transaction rolls back if migrations or account checks fail.
-    Assert-DockerResult $result 'local server registration; check MetaMCP logs and retry' $false
-    $parts = $result.stdout.Trim() -split '\|', 6
+    $rawResult = ''
+    $needsApply = $Force
+    if (-not $Force) {
+        # This mode cannot mutate the database, even if a marker disappears
+        # between checks. An initialized database does not restart the app.
+        $rawResult = Invoke-MetaSeedQuery $State $sql $encoded 'skip-only'
+        $needsApply = $rawResult -ceq 'needs-apply|||||'
+    }
+    if ($needsApply) {
+        if (-not (Test-OwnedDockerObject 'container' ($State.project + '-app') $State) -or
+            -not (Test-OwnedDockerObject 'container' ($State.project + '-postgres') $State)) {
+            throw 'The kit MetaMCP containers could not be verified; no migration was attempted.'
+        }
+        # Stopping (not recreating) clears both active sessions and prewarmed
+        # idle servers, and prevents stale tool names during the DB migration.
+        Write-Host 'Temporarily stopping the kit MetaMCP app for a database backup and server-name migration; clients will need to reconnect.'
+        $stop = Invoke-Docker @('--context', 'desktop-linux', 'stop', '--time', '20', ($State.project + '-app')) '' 180
+        Assert-DockerResult $stop 'MetaMCP app stop before local seed'
+        try {
+            Backup-MetaDatabase $State
+            $forceValue = if ($Force) { 'true' } else { 'false' }
+            $rawResult = Invoke-MetaSeedQuery $State $sql $encoded $forceValue
+        } finally {
+            # The same container and writable layer are reused, even if the
+            # backup or transaction failed. A later start can retry safely.
+            $restart = Invoke-Docker @('--context', 'desktop-linux', 'start', ($State.project + '-app')) '' 180
+            Assert-DockerResult $restart 'MetaMCP app restart; run start to retry'
+            Wait-MetaMcp $State
+        }
+        Write-Host 'MetaMCP app restarted without recreating its container. Reconnect MCP clients to refresh server and tool names.'
+    }
+    $parts = $rawResult -split '\|', 6
     if ($parts.Count -ne 6) { throw 'Unexpected local MetaMCP registration result; existing records were not overwritten.' }
     switch ($parts[0]) {
         'missing'   { throw 'The selected MetaMCP account was not found. Register first, then run seed -OwnerEmail <your-email>.' }
@@ -505,8 +562,8 @@ function Invoke-MetaSeed($State, [bool]$Force, [string]$RequestedOwner = '') {
     } elseif ($parts[1]) { throw 'Unexpected MetaMCP account in registration result; existing state was not changed.' }
 
     if ($parts[3]) { Write-Host "[WARN] Unauthenticated endpoint detected or previously blocked group: $($parts[3]). Seed adds no tools while open; existing mappings may already be exposed. Protect all endpoints and run seed again." -ForegroundColor Yellow }
-    if ($parts[4]) { Write-Host "[WARN] Existing names or settings conflict and were not changed: $($parts[4]). Resolve the conflicts and run seed again." -ForegroundColor Yellow }
-    if ($parts[5]) { Write-Host "[WARN] Removed, disabled, or customized legacy servers were not re-exposed: $($parts[5]). Review them before explicitly running seed." -ForegroundColor Yellow }
+    if ($parts[4]) { Write-Host "[WARN] Some records could not be safely merged or linked: $($parts[4]). Conflicting records (including possible old duplicates) were preserved. Review them and run seed again." -ForegroundColor Yellow }
+    if ($parts[5]) { Write-Host "[WARN] Some removed, restricted or incompatible legacy mappings were not added to shared groups: $($parts[5]). Review them before explicitly running seed." -ForegroundColor Yellow }
     if ($parts[0] -eq 'seeded' -and -not ($parts[3] -or $parts[4] -or $parts[5])) {
         Write-Host 'Registered the 13 Windows servers in shared, API-key-protected groups.'
     } elseif ($parts[0] -eq 'seeded') {

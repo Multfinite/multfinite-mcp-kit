@@ -7,7 +7,6 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { prepareDockerFixture } from './fixtures/docker-test-helpers.mjs';
@@ -74,6 +73,14 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     installFakes(base);
     const first = invoke(env, setup.runner, 'start'); success(first);
     assert.match(first.stdout, /Registered the 13 Windows servers in shared/);
+    assert.match(first.stdout, /database backup and server-name migration/i);
+    assert.match(first.stdout, /Reconnect MCP clients/);
+    const firstDocker = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.equal(firstDocker.databaseBackups.length, 1);
+    assert.equal(firstDocker.startCalls, 1, 'the same app container is restarted after the seed');
+    assert.equal(firstDocker.appRecreates || 0, 0);
+    assert.ok(firstDocker.sharedSeed.serverNames.includes('filesystem'));
+    assert.ok(firstDocker.sharedSeed.serverNames.every((name) => !name.startsWith('winpub-')));
     for (const suffix of ['system', 'files', 'code', 'web', 'data', 'memory']) {
       assert.match(first.stdout, new RegExp(`http://localhost:12080/metamcp/local-${settings.hostId}-${suffix}/mcp`));
     }
@@ -126,18 +133,27 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     assert.deepEqual(readJson(settingsFile), settings); assert.deepEqual(readJson(secretsFile), secrets);
     assert.equal(fs.readFileSync(legacy, 'utf8'), 'OTHER=keep\n');
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).upCalls, 3);
+    assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).databaseBackups.length, 2, 'ordinary starts do not back up or restart an initialized app');
+    // A failed backup must not apply the seed and must restart the same app.
+    const beforeBackupFailure = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    const backupFailure = invoke({ ...env, MCP_TEST_BACKUP_FAIL: '1' }, setup.runner, 'seed');
+    assert.notEqual(backupFailure.status, 0);
+    assert.match(backupFailure.stdout, /backup; no migration was attempted/i);
+    const afterBackupFailure = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.equal(afterBackupFailure.running, true);
+    assert.equal(afterBackupFailure.seeds, beforeBackupFailure.seeds);
+    assert.deepEqual(afterBackupFailure.databaseBackups, beforeBackupFailure.databaseBackups);
     success(invoke(env, setup.runner, 'status'));
     success(invoke(env, setup.runner, 'seed'));
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).signupDisabled, true);
     // Partial seed diagnostics must not hide the other usable groups.
     const withWarnings = readJson(setup.env.MCP_TEST_DOCKER_STATE);
-    const publicPrefix = `winpub-${createHash('md5').update(settings.hostId).digest('hex').slice(0, 8)}`;
-    withWarnings.seedWarnings = { blocked: `local-${settings.hostId}-web`, conflicts: `server:${publicPrefix}-git`, deferred: `${publicPrefix}-obsidian` };
+    withWarnings.seedWarnings = { blocked: `local-${settings.hostId}-web`, conflicts: 'server:git', deferred: 'obsidian' };
     writeJson(setup.env.MCP_TEST_DOCKER_STATE, withWarnings);
     const warningResult = invoke(env, setup.runner, 'seed'); success(warningResult);
     assert.match(warningResult.stdout, /unauthenticated endpoint/i);
-    assert.match(warningResult.stdout, /settings conflict/);
-    assert.match(warningResult.stdout, /legacy servers were not re-exposed/);
+    assert.match(warningResult.stdout, /could not be safely merged or linked/);
+    assert.match(warningResult.stdout, /legacy mappings were not added/);
     assert.match(warningResult.stdout, new RegExp(`local-${settings.hostId}-code/mcp`));
     assert.doesNotMatch(warningResult.stdout, new RegExp(`local-${settings.hostId}-web/mcp`));
     const afterWarnings = readJson(setup.env.MCP_TEST_DOCKER_STATE);
@@ -242,7 +258,10 @@ test('legacy bootstrap is disabled without changing accounts, signup, volumes or
     meta.ownerEmail = oldEmail; writeJson(metaFile, meta);
     const previous = readJson(setup.env.MCP_TEST_DOCKER_STATE);
     previous.users = [{ id: 'legacy-id', email: oldEmail }]; previous.signupDisabled = true;
-    delete previous.sharedSeed; // model a database created by the old private seeder
+    // Model the rejected V2 state: old private records plus the second set of
+    // prefixed public records. V3 must run despite the existing V2 marker.
+    previous.sharedSeed = { version: 2, serverCount: 13, owner: null,
+      groups: ['code', 'data', 'files', 'memory', 'system', 'web'].map((suffix) => `local-${settings.hostId}-${suffix}`) };
     previous.seedRecords = { 'legacy-id': { owner: 'legacy-id', group: `local-${settings.hostId}`, serverCount: 13 } };
     previous.appliedAuth = { bootstrap: 'true', email: oldEmail, password: oldPassword, admins: oldEmail };
     const volumes = JSON.stringify(previous.volume);
@@ -254,6 +273,9 @@ test('legacy bootstrap is disabled without changing accounts, signup, volumes or
     assert.equal(docker.sharedSeed.owner, null);
     assert.equal(docker.sharedSeed.serverCount, 13);
     assert.equal(docker.seedRecords['legacy-id'].group, `local-${settings.hostId}`, 'legacy endpoint remains intact');
+    assert.equal(docker.seedRecords['legacy-id'].endpointPublic, true);
+    assert.equal(docker.seedRecords['legacy-id'].serverCount, 0, 'old server duplicates were consolidated');
+    assert.equal(docker.sharedSeed.version, 3);
     assert.match(migrated.stdout, new RegExp(`local-${settings.hostId}-code/mcp`));
     assert.deepEqual(docker.appliedAuth, { bootstrap: 'false', email: '', password: '', admins: oldEmail });
     assert.equal(readJson(metaFile).manualAuthApplied, true);

@@ -115,6 +115,10 @@ async function main() {
     return;
   }
   if (command[0] === 'stop') { state.running = false; state.stopCalls = (state.stopCalls || 0) + 1; save(); return; }
+  if (command[0] === 'start') {
+    if (!state.container[command.at(-1)]) fail('cannot restart an unowned container');
+    state.running = true; state.startCalls = (state.startCalls || 0) + 1; save(); return;
+  }
   if (command[0] === 'commit') {
     const container = command.at(-2); const image = command.at(-1);
     if (!state.container[container] || state.image[image]) fail('cannot snapshot container');
@@ -124,6 +128,14 @@ async function main() {
   if (command[0] === 'logs') { console.log('synthetic MetaMCP log'); return; }
   if (command[0] === 'exec' && command.includes('sh') && command.includes('-c')) {
     const script = command.at(-1);
+    if (script.includes('pg_dump')) {
+      if (state.running || !command.some((arg) => arg.endsWith('-postgres'))) fail('backup must use the owned PostgreSQL container with the app stopped');
+      if (process.env.MCP_TEST_BACKUP_FAIL) fail('simulated backup failure');
+      const name = script.match(/mcpkit-pre-seed-v3-[0-9]{14}-[a-f0-9]{8}\.dump/);
+      if (!name) fail('invalid database backup name');
+      state.databaseBackups ||= []; state.databaseBackups.push(name[0]); save();
+      console.log('backup-ok'); return;
+    }
     if (script.includes('psql')) {
       const text = await input();
       if (text.includes("SELECT 'signup-open'")) {
@@ -139,11 +151,23 @@ async function main() {
       if (bundle.ownerEmail && !matches.length) { console.log('missing|||||'); return; }
       if (bundle.ownerEmail && matches.length !== 1) { console.log('ambiguous|||||'); return; }
       const base = `local-${bundle.hostId}`;
-      const force = text.includes("\\set local_force 'true'");
+      const mode = text.match(/\\set local_force '(true|false|skip-only)'/)?.[1];
+      if (!mode || !command.some((arg) => arg.endsWith('-postgres'))) fail('invalid local seed mode or container');
       const previous = state.sharedSeed;
-      state.sharedSeed ||= { serverCount: 13, owner: null, groups: ['code', 'data', 'files', 'memory', 'system', 'web'].map((suffix) => `${base}-${suffix}`) };
-      state.seeds++; save();
-      const result = previous && !force ? 'skipped' : 'seeded';
+      if (mode === 'skip-only' && previous?.version !== 3) { console.log('needs-apply|||||'); return; }
+      const result = previous?.version === 3 && mode !== 'true' ? 'skipped' : 'seeded';
+      if (result === 'seeded') {
+        if (state.running || !state.databaseBackups?.length) fail('app must be stopped and PostgreSQL backed up before applying seed');
+        state.sharedSeed = { serverCount: 13, owner: null, version: 3,
+          serverNames: ['desktop-commander', 'everything-search', 'filesystem', 'windows-mcp', 'git', 'codegraph',
+            'codebase-memory-mcp', 'serena', 'playwright', 'dbhub', 'simple-files-vectorstore', 'markitdown', 'obsidian'],
+          groups: ['code', 'data', 'files', 'memory', 'system', 'web'].map((suffix) => `${base}-${suffix}`) };
+        for (const legacy of Object.values(state.seedRecords || {})) {
+          legacy.owner = null; legacy.serverCount = 0; legacy.endpointPublic = true;
+        }
+        state.seeds++;
+      }
+      save();
       const warnings = result === 'seeded' ? (state.seedWarnings || {}) : {};
       const groups = state.sharedSeed.groups.filter((group) => !(warnings.blocked || '').split(',').includes(group));
       const owner = matches[0] ? Buffer.from(matches[0].email).toString('base64') : '';

@@ -437,7 +437,7 @@ INSERT INTO namespace_server_mappings (uuid, namespace_uuid, mcp_server_uuid, st
  ('00000000-0000-0000-0000-000000000303', '00000000-0000-0000-0000-000000000102', '00000000-0000-0000-0000-000000000203', 'ACTIVE');
 INSERT INTO endpoints (uuid, name, description, namespace_uuid, enable_api_key_auth, user_id) VALUES
  ('00000000-0000-0000-0000-000000000401', 'global-sse', 'private manual endpoint', '00000000-0000-0000-0000-000000000102', false, 'owner');
-INSERT INTO tools (uuid, mcp_server_uuid, name) VALUES ('00000000-0000-0000-0000-000000000501', '00000000-0000-0000-0000-000000000202', 'manual-tool');
+INSERT INTO tools (uuid, mcp_server_uuid, name, tool_schema) VALUES ('00000000-0000-0000-0000-000000000501', '00000000-0000-0000-0000-000000000202', 'manual-tool', '{\"type\":\"object\"}');
 INSERT INTO namespace_tool_mappings (namespace_uuid, tool_uuid, mcp_server_uuid, status) VALUES ('00000000-0000-0000-0000-000000000101', '00000000-0000-0000-0000-000000000501', '00000000-0000-0000-0000-000000000202', 'INACTIVE');" >/dev/null
 if ! bash "$ROOT/linux/install-global.sh" > "$TMP/manual.out" 2>&1; then
     cat "$TMP/manual.out" >&2; fail 'installation with existing configuration failed'

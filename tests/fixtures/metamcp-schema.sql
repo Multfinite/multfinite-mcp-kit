@@ -70,7 +70,28 @@ CREATE TABLE namespace_server_mappings (
 CREATE TABLE tools (
     uuid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     mcp_server_uuid uuid NOT NULL REFERENCES mcp_servers(uuid) ON DELETE CASCADE,
-    name text NOT NULL
+    name text NOT NULL,
+    description text,
+    tool_schema jsonb NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT tools_unique_tool_name_per_server_idx UNIQUE (mcp_server_uuid, name)
+);
+CREATE TABLE oauth_sessions (
+    uuid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    mcp_server_uuid uuid NOT NULL UNIQUE REFERENCES mcp_servers(uuid) ON DELETE CASCADE,
+    client_information jsonb NOT NULL DEFAULT '{}'::jsonb,
+    tokens jsonb,
+    code_verifier text,
+    expected_state text,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE mcp_request_audit_logs (
+    uuid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    mcp_server_uuid uuid REFERENCES mcp_servers(uuid) ON DELETE SET NULL,
+    mcp_server_name text,
+    tool_name text NOT NULL DEFAULT 'example-tool'
 );
 CREATE TABLE namespace_tool_mappings (
     uuid uuid PRIMARY KEY DEFAULT gen_random_uuid(),
