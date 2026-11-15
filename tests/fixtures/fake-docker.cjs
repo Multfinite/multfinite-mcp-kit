@@ -3,6 +3,7 @@
 // test real Docker networking or build an image. Secrets on stdin are never
 // written to the argument trace.
 const fs = require('node:fs');
+const crypto = require('node:crypto');
 const http = require('node:http');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
@@ -24,6 +25,8 @@ function envFile(file) {
   return Object.fromEntries(fs.readFileSync(file, 'utf8').split(/\r?\n/).filter((line) => /^[A-Z][A-Z0-9_]*=/.test(line)).map((line) => { const i = line.indexOf('='); return [line.slice(0, i), line.slice(i + 1)]; }));
 }
 function writeJson(value) { console.log(JSON.stringify(value)); }
+function imageId(tag) { return `sha256:${crypto.createHash('sha256').update(tag).digest('hex')}`; }
+function imageTags(id) { return Object.keys(state.image).filter((tag) => imageId(tag) === id); }
 function composeConfig(e, clone) {
   const labels = { 'com.multfinite.mcpkit.instance': e.MCPKIT_INSTANCE };
   const appEnv = { ...e,
@@ -104,15 +107,88 @@ async function main() {
     if (operation === 'ps') { console.log(`${project}-app running\n${project}-postgres running`); return; }
     fail('Unexpected compose operation');
   }
+  if (command[0] === 'image' && command[1] === 'ls') {
+    const filter = command[command.indexOf('--filter') + 1] || '';
+    if (filter.startsWith('label=')) {
+      const [key, value] = filter.slice('label='.length).split('=');
+      for (const [tag, labels] of Object.entries(state.image)) if (labels[key] === value) console.log(imageId(tag));
+    }
+    return;
+  }
   if (['container', 'volume', 'network', 'image'].includes(command[0]) && command[1] === 'inspect') {
-    const kind = command[0]; const name = command.at(-1); const labels = state[kind][name];
+    const kind = command[0]; const name = command.at(-1);
+    const format = command[command.indexOf('--format') + 1] || '';
+    if (kind === 'container' && format === '{{.State.Running}}') {
+      if (!state.container[name]) fail(`Error: No such container: ${name}`);
+      console.log(state.running ? 'true' : 'false'); return;
+    }
+    if (kind === 'network' && format === '{{json .Containers}}') {
+      if (!state.network[name]) fail(`Error: No such network: ${name}`);
+      const project = name.replace(/_metamcp-network$/, ''); const attached = {};
+      for (const [container, labels] of Object.entries(state.container)) {
+        if (labels['com.docker.compose.project'] === project) attached[imageId(container)] = { Name: container };
+      }
+      writeJson(attached); return;
+    }
+    if (kind === 'image' && format === '{{json .RepoTags}}') {
+      const tags = imageTags(name);
+      if (!tags.length) fail(`Error: No such image: ${name}`);
+      writeJson(tags); return;
+    }
+    const key = kind === 'image' ? (state.image[name] ? name : imageTags(name)[0]) : name;
+    const labels = state[kind][key];
     if (!labels) fail(`Error: No such ${kind}: ${name}`);
     writeJson(labels); return;
   }
   if (command[0] === 'container' && command[1] === 'ls') {
-    const filter = command[command.indexOf('--filter') + 1]; const project = filter.slice('label=com.docker.compose.project='.length);
-    for (const [name, labels] of Object.entries(state.container)) if (labels['com.docker.compose.project'] === project) console.log(name);
+    const filter = command[command.indexOf('--filter') + 1] || '';
+    if (filter.startsWith('label=com.docker.compose.project=')) {
+      const project = filter.slice('label=com.docker.compose.project='.length);
+      for (const [name, labels] of Object.entries(state.container)) if (labels['com.docker.compose.project'] === project) console.log(name);
+    } else if (filter.startsWith('volume=')) {
+      const volume = filter.slice('volume='.length);
+      for (const [name, labels] of Object.entries(state.container)) {
+        const project = labels['com.docker.compose.project'];
+        if ((volume === `${project}_postgres_data` && name === `${project}-postgres`) ||
+            (volume === `${project}_uv_cache` && name === `${project}-app`)) console.log(name);
+      }
+    } else if (filter.startsWith('ancestor=')) {
+      const id = filter.slice('ancestor='.length);
+      for (const [name, labels] of Object.entries(state.container)) {
+        const project = labels['com.docker.compose.project'];
+        if (name === `${project}-app` && imageTags(id).some((tag) => tag === state.lastAppImage)) console.log(name);
+      }
+    }
     return;
+  }
+  if (command[0] === 'container' && command[1] === 'rm') {
+    const names = command.slice(2);
+    for (const name of names) {
+      if (!state.container[name]) fail(`No such container: ${name}`);
+      if (state.running) fail(`cannot remove running container: ${name}`);
+    }
+    for (const name of names) delete state.container[name];
+    state.removedContainers = [...(state.removedContainers || []), ...names]; save();
+    console.log(names.join('\n')); return;
+  }
+  if (command[0] === 'network' && command[1] === 'rm') {
+    const name = command[2];
+    if (!state.network[name]) fail(`No such network: ${name}`);
+    const project = name.replace(/_metamcp-network$/, '');
+    if (Object.values(state.container).some((labels) => labels['com.docker.compose.project'] === project)) fail(`network is in use: ${name}`);
+    delete state.network[name]; state.removedNetworks = [...(state.removedNetworks || []), name]; save(); console.log(name); return;
+  }
+  if (command[0] === 'volume' && command[1] === 'rm') {
+    const name = command[2];
+    if (!state.volume[name]) fail(`No such volume: ${name}`);
+    delete state.volume[name]; state.removedVolumes = [...(state.removedVolumes || []), name]; save(); console.log(name); return;
+  }
+  if (command[0] === 'image' && command[1] === 'rm') {
+    const id = command[2]; const tags = imageTags(id);
+    if (!tags.length) fail(`No such image: ${id}`);
+    if (tags.some((tag) => tag === state.lastAppImage && Object.keys(state.container).some((name) => name.endsWith('-app')))) fail(`image is in use: ${id}`);
+    for (const tag of tags) delete state.image[tag];
+    state.removedImages = [...(state.removedImages || []), id]; save(); console.log(id); return;
   }
   if (command[0] === 'stop') { state.running = false; state.stopCalls = (state.stopCalls || 0) + 1; save(); return; }
   if (command[0] === 'start') {

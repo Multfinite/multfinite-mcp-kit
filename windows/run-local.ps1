@@ -1,14 +1,18 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Manage the native Windows servers and local MetaMCP in Docker Desktop.
+    Manage native Windows LOCAL servers and the optional legacy local MetaMCP.
+.DESCRIPTION
+    Running without a command starts only the native servers and gateway. The explicit start command manages the legacy Docker Desktop MetaMCP stack.
 .EXAMPLE
-    .\windows\run-local.ps1 start
+    .\windows\run-local.ps1 gateway-start
+    .\windows\run-local.ps1 start  # legacy full stack, including MetaMCP
     .\windows\run-local.ps1 status
     .\windows\run-local.ps1 logs obsidian
     .\windows\run-local.ps1 seed
     .\windows\run-local.ps1 seed -OwnerEmail 'you@example.com'
     .\windows\run-local.ps1 reset-metamcp-records
+    .\windows\run-local.ps1 uninstall-metamcp
     .\windows\run-local.ps1 enable-signup
     .\windows\run-local.ps1 logs metamcp
     .\windows\run-local.ps1 ports
@@ -17,8 +21,8 @@
 [CmdletBinding()]
 param(
     # init is used by the installer; it never replaces existing settings.
-    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'reset-metamcp-records', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
-    [string]$Command = 'start',
+    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'reset-metamcp-records', 'uninstall-metamcp', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
+    [string]$Command = 'gateway-start',
     [string]$Server = '',
     [string]$OwnerEmail = '',
     [ValidateRange(0, 65535)]
@@ -444,6 +448,7 @@ try {
         'credentials'  { Show-MetaCredentials }
         'seed'            { Repair-MetaSeed $OwnerEmail }
         'reset-metamcp-records' { Reset-MetaRecords }
+        'uninstall-metamcp' { Remove-MetaMcp }
         'enable-signup'   { Enable-MetaSignup }
         'ports'           { Show-MetaPorts }
         'set-ports'       {

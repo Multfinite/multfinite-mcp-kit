@@ -102,7 +102,7 @@ function Assert-DockerResult($Result, [string]$Action, [bool]$ShowDetails = $tru
     }
     throw "Docker $Action failed (exit $($Result.code))$details"
 }
-function Ensure-DesktopDocker([switch]$NoStart) {
+function Ensure-DesktopDocker([switch]$NoStart, [switch]$SkipComposeCheck) {
     if (-not (Find-Docker)) { throw 'Docker Desktop is not installed or its CLI is not available. Run .\windows\install-local.ps1 -WithMetaMcp.' }
     $timeout = 120
     if ($env:MCPKIT_DOCKER_START_TIMEOUT -match '^\d{1,3}$') { $timeout = [Math]::Max(1, [Math]::Min(600, [int]$env:MCPKIT_DOCKER_START_TIMEOUT)) }
@@ -120,11 +120,13 @@ function Ensure-DesktopDocker([switch]$NoStart) {
             $info = Invoke-Docker @('--context', 'desktop-linux', 'info', '--format', '{{.OperatingSystem}}|{{.OSType}}')
             if ($info.code -eq 0) {
                 if ($info.stdout.Trim() -ne 'Docker Desktop|linux') { throw 'Docker Desktop must be using Linux containers on this Windows machine.' }
-                $version = Invoke-Docker @('--context', 'desktop-linux', 'compose', 'version', '--short')
-                Assert-DockerResult $version 'Compose version check'
-                $match = [regex]::Match($version.stdout, '\d+\.\d+\.\d+')
-                if (-not $match.Success -or [version]$match.Value -lt [version]$Manifest.metamcp.composeMinimum) {
-                    throw "Docker Compose $($Manifest.metamcp.composeMinimum) or newer is required. Update Docker Desktop."
+                if (-not $SkipComposeCheck) {
+                    $version = Invoke-Docker @('--context', 'desktop-linux', 'compose', 'version', '--short')
+                    Assert-DockerResult $version 'Compose version check'
+                    $match = [regex]::Match($version.stdout, '\d+\.\d+\.\d+')
+                    if (-not $match.Success -or [version]$match.Value -lt [version]$Manifest.metamcp.composeMinimum) {
+                        throw "Docker Compose $($Manifest.metamcp.composeMinimum) or newer is required. Update Docker Desktop."
+                    }
                 }
                 return
             }
@@ -427,6 +429,187 @@ function Test-MetaResources($State) {
     foreach ($name in @(($State.project + '_postgres_data'), ($State.project + '_uv_cache'))) { $null = Test-OwnedDockerObject 'volume' $name $State }
     $null = Test-OwnedDockerObject 'network' ($State.project + '_metamcp-network') $State
 }
+function Get-MetaRemovalPlan($State) {
+    foreach ($file in @($MetaStateFile, $MetaEnvFile)) {
+        if (Test-Path -LiteralPath $file) {
+            $item = Get-Item -LiteralPath $file -Force
+            if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "MetaMCP private path is not a regular file; no Docker resources were changed: $file"
+            }
+        }
+    }
+    Test-MetaResources $State
+    $allowedContainers = @(($State.project + '-app'), ($State.project + '-postgres'))
+    $containers = @()
+    foreach ($name in $allowedContainers) {
+        if (Test-OwnedDockerObject 'container' $name $State) { $containers += $name }
+    }
+    $runningContainers = @()
+    foreach ($name in $containers) {
+        $status = Invoke-Docker @('--context', 'desktop-linux', 'container', 'inspect', '--format', '{{.State.Running}}', $name)
+        Assert-DockerResult $status 'MetaMCP container status'
+        if ($status.stdout.Trim() -ceq 'true') { $runningContainers += $name }
+        elseif ($status.stdout.Trim() -cne 'false') { throw "Cannot confirm whether MetaMCP container $name is running." }
+    }
+
+    $volumes = @()
+    foreach ($name in @(($State.project + '_postgres_data'), ($State.project + '_uv_cache'))) {
+        if (-not (Test-OwnedDockerObject 'volume' $name $State)) { continue }
+        $users = Invoke-Docker @('--context', 'desktop-linux', 'container', 'ls', '--all', '--filter', ('volume=' + $name), '--format', '{{.Names}}')
+        Assert-DockerResult $users 'MetaMCP volume-use inspection'
+        foreach ($user in @($users.stdout -split '\r?\n' | Where-Object { $_ })) {
+            if ($user -cnotin $allowedContainers) { throw "MetaMCP volume $name is also used by unrelated container $user; no data was removed." }
+        }
+        $volumes += $name
+    }
+
+    $network = $State.project + '_metamcp-network'
+    if (-not (Test-OwnedDockerObject 'network' $network $State)) { $network = '' }
+    if ($network) {
+        $attachments = Invoke-Docker @('--context', 'desktop-linux', 'network', 'inspect', '--format', '{{json .Containers}}', $network)
+        Assert-DockerResult $attachments 'MetaMCP network-use inspection'
+        try { $attached = $attachments.stdout | ConvertFrom-Json } catch { throw 'Cannot inspect MetaMCP network attachments; no resources were removed.' }
+        foreach ($entry in @($attached.PSObject.Properties)) {
+            $name = [string]$entry.Value.Name
+            if ($name -and $name -cnotin $allowedContainers) { throw "MetaMCP network $network is also used by unrelated container $name; no resources were removed." }
+        }
+    }
+
+    $images = @()
+    $imageListing = Invoke-Docker @('--context', 'desktop-linux', 'image', 'ls', '--all', '--no-trunc', '--quiet', '--filter', ('label=com.multfinite.mcpkit.instance=' + $State.instanceId))
+    Assert-DockerResult $imageListing 'MetaMCP image inspection'
+    $imageIds = @($imageListing.stdout -split '\r?\n' | ForEach-Object { $_.Trim() } | Where-Object { $_ } | Sort-Object -Unique)
+    $tagPattern = '^' + [regex]::Escape($State.project) + '-(?:metamcp:[^/\s]+|app-backup:\d{14}-[a-f0-9]{8})$'
+    foreach ($id in $imageIds) {
+        if ($id -cnotmatch '^(?:sha256:)?[a-f0-9]{64}$') { throw "Unexpected image identifier returned by Docker; no images were removed: $id" }
+        if (-not (Test-OwnedDockerObject 'image' $id $State)) { throw "Cannot confirm ownership of MetaMCP image $id; no images were removed." }
+        $tagResult = Invoke-Docker @('--context', 'desktop-linux', 'image', 'inspect', '--format', '{{json .RepoTags}}', $id)
+        Assert-DockerResult $tagResult 'MetaMCP image-tag inspection'
+        try { $tags = @($tagResult.stdout | ConvertFrom-Json) } catch { throw "Cannot inspect tags for MetaMCP image $id; no images were removed." }
+        foreach ($tag in $tags) {
+            if ($tag -and $tag -cnotmatch $tagPattern) { throw "MetaMCP image $id has an unrelated tag ($tag); no resources were removed." }
+        }
+        $users = Invoke-Docker @('--context', 'desktop-linux', 'container', 'ls', '--all', '--filter', ('ancestor=' + $id), '--format', '{{.Names}}')
+        Assert-DockerResult $users 'MetaMCP image-use inspection'
+        foreach ($user in @($users.stdout -split '\r?\n' | Where-Object { $_ })) {
+            if ($user -cnotin $allowedContainers) { throw "MetaMCP image $id is also used by unrelated container $user; no resources were removed." }
+        }
+        $images += [pscustomobject]@{ id = $id; tags = @($tags | Where-Object { $_ }) }
+    }
+
+    $cloneDir = ''
+    if (Test-Path -LiteralPath $State.cloneDir) {
+        Assert-MetaClone $State
+        $clone = Get-Item -LiteralPath $State.cloneDir -Force
+        if (-not $clone.PSIsContainer -or ($clone.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "The MetaMCP clone is not a normal kit-owned directory; no resources were removed: $($State.cloneDir)"
+        }
+        $links = @(Get-ChildItem -LiteralPath $State.cloneDir -Force -Recurse -ErrorAction Stop |
+            Where-Object { ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 } | Select-Object -First 1)
+        if ($links.Count) { throw "The MetaMCP clone contains a reparse point; no resources were removed: $($links[0].FullName)" }
+        $cloneDir = [IO.Path]::GetFullPath($State.cloneDir)
+    }
+    return [pscustomobject]@{
+        containers = @($containers)
+        runningContainers = @($runningContainers)
+        volumes = @($volumes)
+        network = $network
+        images = @($images)
+        cloneDir = $cloneDir
+    }
+}
+function Get-MetaRemovalPlanKey($Plan) {
+    $images = @($Plan.images | ForEach-Object { $_.id + '=' + (@($_.tags) -join ',') }) -join "`n"
+    return @(
+        'containers=' + (@($Plan.containers) -join ','),
+        'running=' + (@($Plan.runningContainers) -join ','),
+        'volumes=' + (@($Plan.volumes) -join ','),
+        'network=' + [string]$Plan.network,
+        'images=' + $images,
+        'clone=' + [string]$Plan.cloneDir
+    ) -join "`n"
+}
+function Remove-MetaMcp {
+    Write-KitHeader 'Remove local MetaMCP and all its data'
+    $initial = Get-MetaState
+    if (-not $initial) {
+        if (Test-Path -LiteralPath $MetaEnvFile) { throw "A MetaMCP env file exists without matching kit state; it was preserved for manual review: $MetaEnvFile" }
+        Write-KitInfo 'No kit-managed local MetaMCP state was found; nothing was removed.'
+        return
+    }
+
+    $lock = Enter-MetaLock -RecoverStale
+    try {
+        $state = Get-MetaState
+        if (-not $state -or $state.instanceId -cne $initial.instanceId -or $state.project -cne $initial.project -or $state.cloneDir -cne $initial.cloneDir) {
+            throw 'The local MetaMCP target changed while removal was starting; no Docker resources were changed.'
+        }
+        Ensure-DesktopDocker -NoStart -SkipComposeCheck
+        $plan = Get-MetaRemovalPlan $state
+        Write-KitWarn "This permanently deletes only kit-managed MetaMCP project $($state.project), its database and cache volumes, app images, private MetaMCP files, and owned clone."
+        Write-KitInfo ('Containers: ' + $(if ($plan.containers.Count) { $plan.containers -join ', ' } else { 'none' }))
+        Write-KitInfo ('Volumes: ' + $(if ($plan.volumes.Count) { $plan.volumes -join ', ' } else { 'none' }))
+        Write-KitInfo ('Network: ' + $(if ($plan.network) { $plan.network } else { 'none' }))
+        $imageNames = @($plan.images | ForEach-Object { if ($_.tags.Count) { $_.tags } else { $_.id } })
+        Write-KitInfo ('App images: ' + $(if ($imageNames.Count) { $imageNames -join ', ' } else { 'none' }))
+        Write-KitInfo ('Owned clone: ' + $(if ($plan.cloneDir) { $plan.cloneDir } else { 'not present' }))
+        Write-KitInfo 'The Windows gateway, local MCP runtimes, local-settings.json, secrets.json, user data, Docker Desktop, unrelated containers/images, and the shared postgres:16-alpine image are kept.'
+        Write-KitWarn 'MetaMCP users, API keys, settings, PostgreSQL data, cache, and any unsaved app-container changes will be permanently deleted. No backup is made.'
+        $confirmation = Read-Host 'Type REMOVE LOCAL METAMCP AND ALL DATA to continue'
+        if ($confirmation -cne 'REMOVE LOCAL METAMCP AND ALL DATA') {
+            Write-KitInfo 'MetaMCP removal cancelled; no Docker resources or MetaMCP files were removed.'
+            return
+        }
+
+        $current = Get-MetaState
+        if (-not $current -or $current.instanceId -cne $state.instanceId -or $current.project -cne $state.project -or $current.cloneDir -cne $state.cloneDir) {
+            throw 'The local MetaMCP target changed after confirmation; no resources were removed.'
+        }
+        $verifiedPlan = Get-MetaRemovalPlan $current
+        if ((Get-MetaRemovalPlanKey $verifiedPlan) -cne (Get-MetaRemovalPlanKey $plan)) {
+            throw 'MetaMCP Docker resources changed after confirmation; no resources were removed. Review the new state and retry.'
+        }
+
+        if ($plan.runningContainers.Count) {
+            $stop = Invoke-Docker (@('--context', 'desktop-linux', 'stop', '--time', '20') + $plan.runningContainers) '' 180
+            Assert-DockerResult $stop 'MetaMCP shutdown'
+        }
+        foreach ($name in $plan.containers) {
+            if (Test-OwnedDockerObject 'container' $name $current) {
+                $remove = Invoke-Docker @('--context', 'desktop-linux', 'container', 'rm', $name) '' 180
+                Assert-DockerResult $remove 'MetaMCP container removal'
+            }
+        }
+        if ($plan.network -and (Test-OwnedDockerObject 'network' $plan.network $current)) {
+            $remove = Invoke-Docker @('--context', 'desktop-linux', 'network', 'rm', $plan.network)
+            Assert-DockerResult $remove 'MetaMCP network removal'
+        }
+        foreach ($image in $plan.images) {
+            if (Test-OwnedDockerObject 'image' $image.id $current) {
+                $remove = Invoke-Docker @('--context', 'desktop-linux', 'image', 'rm', $image.id)
+                Assert-DockerResult $remove 'MetaMCP app image removal'
+            }
+        }
+        # Delete the database volume last; it is the only copy of MetaMCP data.
+        foreach ($name in @($plan.volumes | Sort-Object { if ($_ -ceq ($current.project + '_postgres_data')) { 1 } else { 0 } })) {
+            if (Test-OwnedDockerObject 'volume' $name $current) {
+                $remove = Invoke-Docker @('--context', 'desktop-linux', 'volume', 'rm', $name)
+                Assert-DockerResult $remove 'MetaMCP volume removal'
+            }
+        }
+
+        if ($plan.cloneDir -and (Test-Path -LiteralPath $plan.cloneDir)) {
+            Assert-MetaClone $current
+            Remove-Item -LiteralPath $plan.cloneDir -Recurse -Force
+        }
+        if (Test-Path -LiteralPath $MetaEnvFile -PathType Leaf) { Remove-Item -LiteralPath $MetaEnvFile -Force }
+        if (Test-Path -LiteralPath $MetaStateFile -PathType Leaf) { Remove-Item -LiteralPath $MetaStateFile -Force }
+        Write-KitOk 'The kit-managed local MetaMCP and its data were removed. The native Windows MCP servers and gateway were left in place.'
+    } catch {
+        Write-KitWarn 'MetaMCP removal did not finish. Some owned Docker resources may already be gone; if the private state remains, correct the reported issue and retry uninstall-metamcp.'
+        throw
+    } finally { Exit-MetaLock $lock }
+}
 function Ensure-MetaImage($State) {
     $image = Get-MetaImage $State
     if (Test-OwnedDockerObject 'image' $image $State) { return }
@@ -685,10 +868,27 @@ process.stdin.on('end', () => {
     }
     Write-KitOk 'Docker Desktop can reach the authenticated loopback Windows gateway.'
 }
-function Enter-MetaLock {
+function Enter-MetaLock([switch]$RecoverStale) {
     $file = Join-Path $PrivateDir 'metamcp.lock'
     try { return [IO.File]::Open($file, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
-    catch [IO.IOException] { throw "Another MetaMCP operation may be running. If it crashed, inspect and remove $file before retrying." }
+    catch [IO.IOException] {
+        if (-not $RecoverStale) { throw "Another MetaMCP operation may be running. If it crashed, inspect and remove $file before retrying." }
+        if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { throw "The MetaMCP lock changed while removal started. No Docker resources were changed: $file" }
+        $item = Get-Item -LiteralPath $file -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) { throw "The MetaMCP lock is a reparse point; it was not changed: $file" }
+        $staleLock = $null
+        try { $staleLock = [IO.File]::Open($file, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None) }
+        catch [IO.IOException] { throw 'Another MetaMCP operation currently holds the lock. Wait for it to finish; no Docker resources were changed.' }
+        $keepLock = $false
+        try {
+            $confirmation = Read-Host 'No process currently holds the old MetaMCP lock. Type REMOVE STALE METAMCP LOCK to continue'
+            if ($confirmation -cne 'REMOVE STALE METAMCP LOCK') { throw 'Stale-lock recovery cancelled; no Docker resources were changed.' }
+            # Keep this exclusive file handle as the lock. The normal exit path
+            # closes and removes the stale file only after the uninstall ends.
+            $keepLock = $true
+            return $staleLock
+        } finally { if (-not $keepLock -and $staleLock) { $staleLock.Dispose() } }
+    }
 }
 function Exit-MetaLock($Lock) {
     $Lock.Dispose()
