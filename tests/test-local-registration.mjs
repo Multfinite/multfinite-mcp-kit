@@ -60,6 +60,21 @@ test('requires an independent Linux LOCAL marker that matches hostId and directo
   } finally { fs.rmSync(f.base, { recursive: true, force: true }); }
 });
 
+test('resolves a deliberate Windows LOCAL root junction while still validating the target', (t) => {
+  const f = makeLocal({ marker: 'independent' });
+  const alias = path.join(path.dirname(f.base), `mcpkit local alias ${path.basename(f.base)}`);
+  try {
+    try { fs.symlinkSync(f.base, alias, process.platform === 'win32' ? 'junction' : 'dir'); }
+    catch (error) { if (['EPERM', 'EACCES', 'ENOTSUP'].includes(error.code)) { t.skip('directory links are unavailable'); return; } throw error; }
+    const bundle = loadLocalBundle(alias, 'win32');
+    assert.equal(bundle.privateDir, path.join(fs.realpathSync(alias), 'config', 'private'));
+    assert.throws(() => loadLocalBundle(alias, 'linux'), /must not be a link/);
+  } finally {
+    fs.rmSync(alias, { recursive: true, force: true });
+    fs.rmSync(f.base, { recursive: true, force: true });
+  }
+});
+
 test('refuses linked settings and secrets instead of following them', (t) => {
   const f = makeLocal();
   const target = path.join(f.base, 'secrets-target.json');

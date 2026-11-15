@@ -9,12 +9,12 @@ function fail(message) { throw new Error(message); }
 function ordinaryFile(file, label) {
   let stat;
   try { stat = fs.lstatSync(file); } catch { fail(`${label} is missing.`); }
-  if (!stat.isFile() || stat.isSymbolicLink()) fail(`${label} must be a regular file, not a link.`);
+  if (!stat.isFile() || stat.isSymbolicLink()) fail(`${label} must be a regular file, not a link: ${file}`);
 }
 function ordinaryDirectory(dir, label) {
   let stat;
   try { stat = fs.lstatSync(dir); } catch { fail(`${label} is missing.`); }
-  if (!stat.isDirectory() || stat.isSymbolicLink()) fail(`${label} must be a regular directory, not a link.`);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) fail(`${label} must be a regular directory, not a link: ${dir}`);
 }
 function readJson(file) {
   try { return JSON.parse(fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '')); }
@@ -23,7 +23,22 @@ function readJson(file) {
 
 export function loadLocalBundle(directory, platform = process.platform) {
   if (platform !== 'linux' && platform !== 'win32') fail('LOCAL registration supports Windows and Linux only.');
-  const base = path.resolve(directory);
+  const requestedBase = path.resolve(directory);
+  let base = requestedBase;
+  let rootStat;
+  try { rootStat = fs.lstatSync(requestedBase); } catch { fail(`LOCAL installation directory is missing: ${requestedBase}`); }
+  if (rootStat.isSymbolicLink()) {
+    // Windows profiles and kit directories are sometimes deliberately moved
+    // with a junction (for example C:\\Users\\name -> W:\\Users\\name).
+    // Resolve that top-level alias, then keep rejecting links inside config.
+    if (platform !== 'win32') fail(`LOCAL installation directory must not be a link: ${requestedBase}`);
+    let targetStat;
+    try { targetStat = fs.statSync(requestedBase); } catch { fail(`Cannot resolve LOCAL installation directory: ${requestedBase}`); }
+    if (!targetStat.isDirectory()) fail(`LOCAL installation link does not target a directory: ${requestedBase}`);
+    try { base = fs.realpathSync(requestedBase); } catch { fail(`Cannot resolve LOCAL installation directory: ${requestedBase}`); }
+  } else if (!rootStat.isDirectory()) {
+    fail(`LOCAL installation path is not a directory: ${requestedBase}`);
+  }
   ordinaryDirectory(base, 'LOCAL installation directory');
   const config = path.join(base, 'config');
   const privateDir = path.join(config, 'private');
@@ -39,7 +54,7 @@ export function loadLocalBundle(directory, platform = process.platform) {
     ordinaryFile(markerFile, 'LOCAL ownership marker');
     marker = readJson(markerFile);
     if (marker.version !== 1 || (!linux && marker.kind !== 'windows-local') || typeof marker.base !== 'string' ||
-        (linux ? marker.base !== base : marker.base.toLowerCase() !== base.toLowerCase())) {
+        (linux ? marker.base !== base : ![base, requestedBase].some((candidate) => marker.base.toLowerCase() === candidate.toLowerCase()))) {
       fail('Independent LOCAL marker is invalid or belongs to a different directory.');
     }
   } else if (linux) {
