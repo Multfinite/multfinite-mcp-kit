@@ -88,6 +88,12 @@ export function buildServerSpecs(settings, secrets, base = BASE, nodePath = proc
   const dbDsn = secrets.dbhubDsn.trim() || 'sqlite:////./dbhub.sqlite';
   const filesystemEntry = npm('core', '@j0hanz', 'filesystem-mcp', 'dist', 'index.js');
   const watchConfig = path.join(runtime, 'vector-watch.json');
+  // Codebase Memory rejects cache paths whose ancestry contains junctions.
+  // The kit's mcp-local directory may be redirected, so keep this Windows
+  // cache on the user's normal LocalAppData path instead of beneath BASE.
+  const codebaseMemoryEnv = process.platform === 'win32'
+    ? { CBM_CACHE_DIR: path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'codebase-memory-mcp') }
+    : {};
   const specs = [
     nodeSpec('desktop-commander', npm('core', '@wonderwhy-er', 'desktop-commander', 'dist', 'index.js'), ['--no-onboarding'], { DESKTOP_COMMANDER_DISABLE_TELEMETRY: '1' }),
     pythonSpec('everything-search', 'everything-search', 'mcp-server-everything-search', [], { EVERYTHING_SDK_PATH: settings.everythingSdkPath, EVERYTHING_SEARCH_TOOL_NAME: 'everything_search' }, sdkMissing),
@@ -105,7 +111,7 @@ export function buildServerSpecs(settings, secrets, base = BASE, nodePath = proc
     // The upstream shim prunes older fallback bundles. Keep that cache in the
     // kit rather than touching an existing ~/.codegraph installation.
     nodeSpec('codegraph', npm('core', '@colbymchenry', 'codegraph', 'npm-shim.js'), ['serve', '--mcp', '--path', settings.projectsDir], { CODEGRAPH_TELEMETRY: '0', CODEGRAPH_INSTALL_DIR: path.join(runtime, 'codegraph') }, projectsMissing),
-    nodeSpec('codebase-memory-mcp', npm('codebase', 'codebase-memory-mcp', 'bin.js')),
+    nodeSpec('codebase-memory-mcp', npm('codebase', 'codebase-memory-mcp', 'bin.js'), [], codebaseMemoryEnv),
     pythonSpec('serena', 'serena', 'serena', ['start-mcp-server', '--transport', 'stdio', '--enable-web-dashboard', 'false', '--enable-gui-log-window', 'false', '--open-web-dashboard', 'false']),
     nodeSpec('playwright', npm('core', '@playwright', 'mcp', 'cli.js'), ['--headless', '--browser', 'chromium'], { PLAYWRIGHT_MCP_PORT: '', PLAYWRIGHT_MCP_CONFIG: '' }),
     nodeSpec('dbhub', npm('core', '@bytebase', 'dbhub', 'dist', 'index.js'), ['--transport', 'stdio'], { DSN: dbDsn }),
