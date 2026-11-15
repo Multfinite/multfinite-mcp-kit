@@ -630,13 +630,13 @@ async function provisionStagedMeta(ctx, state) {
   let input;
   if (process.stdin.isTTY) {
     console.log(`Setting up administrator ${marker.adminEmail}. Password input is hidden.`);
-    const password = await hiddenInput('Password (12–128 characters): ');
+    const password = await hiddenInput('Password (8–128 characters): ');
     if (password !== await hiddenInput('Repeat password: ')) fail('Passwords do not match.');
     input = { email: marker.adminEmail, password };
   } else {
     try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { fail('Expected private provisioning input on stdin.'); }
   }
-  if (!input || typeof input !== 'object' || input.email !== marker.adminEmail || typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) fail('Invalid provisioning credentials.');
+  if (!input || typeof input !== 'object' || input.email !== marker.adminEmail || typeof input.password !== 'string' || input.password.length < 8 || input.password.length > 128) fail('Invalid provisioning credentials.');
   const script = fs.readFileSync(path.join(root, 'common', 'metamcp-provision.mjs'), 'utf8');
   const result = spawnSync('docker', ['--context', ctx, 'exec', '-i', id, 'node', '--input-type=module', '-e', script], {
     env: cleanEnv(), input: JSON.stringify({ origin: snapshot.appUrl, email: input.email, password: input.password }),

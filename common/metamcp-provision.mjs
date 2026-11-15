@@ -15,7 +15,7 @@ try {
   const { origin, email, password } = JSON.parse(fs.readFileSync(0, 'utf8'));
   const u = new URL(origin);
   if (!['http:', 'https:'].includes(u.protocol) || u.origin !== origin || u.username || u.password ||
-      typeof email !== 'string' || typeof password !== 'string' || !email || password.length < 12 || password.length > 128) fail('Invalid provisioning input.');
+      typeof email !== 'string' || typeof password !== 'string' || !email || password.length < 8 || password.length > 128) fail('Invalid provisioning input.');
   const baseHeaders = { host: u.host, origin };
   async function call(pathname, { payload, cookie, allowError = false } = {}) {
     const headers = { ...baseHeaders, ...(cookie ? { cookie } : {}), ...(payload !== undefined ? { 'content-type': 'application/json' } : {}) };
