@@ -1,10 +1,12 @@
 // Executed INSIDE a staged, unpublished MetaMCP container. Input arrives on
 // stdin; only a private result is returned to the parent, never to the terminal.
 import fs from 'node:fs';
+import http from 'node:http';
 
 function fail(message) { throw new Error(message); }
 function cookies(response) {
-  const lines = typeof response.headers.getSetCookie === 'function' ? response.headers.getSetCookie() : [response.headers.get('set-cookie') || ''];
+  const raw = response.headers['set-cookie'];
+  const lines = Array.isArray(raw) ? raw : [raw || ''];
   return lines.flatMap((line) => line.split(/,\s*(?=[^;,=\s]+=[^;,]*)/)).map((part) => part.split(';', 1)[0].trim()).filter((pair) => /^[^=;\s]+=[^;\r\n]+$/.test(pair)).join('; ');
 }
 function data(body) {
@@ -16,18 +18,41 @@ try {
   const u = new URL(origin);
   if (!['http:', 'https:'].includes(u.protocol) || u.origin !== origin || u.username || u.password ||
       typeof email !== 'string' || typeof password !== 'string' || !email || password.length < 8 || password.length > 128) fail('Invalid provisioning input.');
-  const baseHeaders = { host: u.host, origin };
   async function call(pathname, { payload, cookie, allowError = false } = {}) {
-    const headers = { ...baseHeaders, ...(cookie ? { cookie } : {}), ...(payload !== undefined ? { 'content-type': 'application/json' } : {}) };
-    const response = await fetch(`http://127.0.0.1:12008${pathname}`, {
-      method: payload === undefined ? 'GET' : 'POST', headers,
-      ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
-      redirect: 'error', signal: AbortSignal.timeout(15000),
+    const requestBody = payload === undefined ? undefined : Buffer.from(JSON.stringify(payload));
+    const headers = {
+      host: u.host,
+      origin,
+      ...(cookie ? { cookie } : {}),
+      ...(requestBody ? { 'content-type': 'application/json', 'content-length': requestBody.length } : {}),
+    };
+    // Fetch derives the forbidden Host header from the internal URL. Send the
+    // trusted public origin explicitly while keeping the socket on loopback.
+    const { response, raw } = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: '127.0.0.1', port: 12008, path: pathname,
+        method: requestBody ? 'POST' : 'GET', headers, signal: AbortSignal.timeout(15000),
+      }, (res) => {
+        const chunks = [];
+        let size = 0;
+        res.on('data', (chunk) => {
+          size += chunk.length;
+          if (size > 1024 * 1024) { req.destroy(new Error('Provisioning response is too large.')); return; }
+          chunks.push(chunk);
+        });
+        res.on('end', () => resolve({ response: res, raw: Buffer.concat(chunks).toString('utf8') }));
+        res.on('error', reject);
+      });
+      req.on('error', reject);
+      req.end(requestBody);
     });
     let body;
-    try { body = await response.json(); } catch { fail(`Non-JSON response from ${pathname}.`); }
-    if (!response.ok && !allowError) fail(`Provisioning ${pathname} failed (HTTP ${response.status}).`);
-    return { response, body };
+    try { body = JSON.parse(raw); } catch { fail(`Non-JSON response from ${pathname}.`); }
+    const status = response.statusCode || 0;
+    if (status >= 300 && status < 400) fail(`Unexpected redirect from ${pathname}.`);
+    const result = { ok: status >= 200 && status < 300, status, headers: response.headers };
+    if (!result.ok && !allowError) fail(`Provisioning ${pathname} failed (HTTP ${result.status}).`);
+    return { response: result, body };
   }
   let signed = await call('/api/auth/sign-in/email', { payload: { email, password }, allowError: true });
   if (!signed.response.ok) {
