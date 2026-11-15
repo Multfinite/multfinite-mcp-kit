@@ -6,8 +6,9 @@ import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
 import { GLOBAL_GROUPS, GLOBAL_SERVER_NAMES, GLOBAL_GROUP_NAMES, localGroups, LOCAL_SERVER_NAMES, LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
-import { inspectLiveGlobal, liveGlobalStatus } from './live-global.mjs';
+import { inspectLiveGlobal, startLiveGlobal, enableLiveGlobalRestart, liveGlobalStatus, connectLiveGlobal } from './live-global.mjs';
 
 const [profile, ...rawArgs] = process.argv.slice(2);
 function fail(message) { throw new Error(message); }
@@ -150,7 +151,7 @@ function verifiedLocalMeta(dir, origin) {
       ports.some((binding) => binding?.HostPort !== String(state.port) || !expectedHosts.includes(binding.HostIp)) ||
       expectedHosts.some((host) => ports.filter((binding) => binding?.HostIp === host).length !== 1) ||
       env.length !== 1 || env[0] !== `APP_URL=${origin}`) fail('The selected app identity or host bindings are unexpected.');
-  return { address: `http://127.0.0.1:${state.port}`, containerId: app.Id, context, privateDir };
+  return { address: `http://127.0.0.1:${state.port}`, containerId: app.Id, context, privateDir, state };
 }
 function liveGlobalBundle(project, meta, gateway) {
   const live = inspectLiveGlobal(meta.context, project);
@@ -241,7 +242,11 @@ async function main() {
   if (opts.dir && opts.liveGlobal) fail('Choose either --dir or --live-global, not both.');
   if (!opts.jsonStdin && (!process.stdin.isTTY || !process.stdout.isTTY)) fail('Registration requires an interactive terminal.');
   if (opts.jsonStdin && (profile !== 'global' || !opts.metaDir)) fail('Private stdin registration requires GLOBAL and a local --meta-dir.');
-  if (!opts.jsonStdin && (opts.metaDir || opts.liveGlobal)) fail('--meta-dir and --live-global are only used with --json-stdin.');
+  if (opts.liveGlobal && (profile !== 'global' || !opts.metaDir || !/^mcpkit-global-[a-f0-9]{16}$/.test(opts.liveGlobal))) {
+    fail('An existing GLOBAL project and local MetaMCP directory are required.');
+  }
+  if (!opts.jsonStdin && opts.metaDir && !opts.liveGlobal) fail('Interactive --meta-dir requires --live-global.');
+  const interactiveLive = Boolean(opts.liveGlobal && !opts.jsonStdin);
   let supplied = null;
   if (opts.jsonStdin) {
     try { supplied = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { fail('Invalid private registration input.'); }
@@ -254,19 +259,39 @@ async function main() {
   if (profile === 'local') console.log('WARNING: shared LOCAL servers can expose files, databases, terminals and desktop control to other users.');
   console.log('Existing records are never updated or deleted; conflicting names are not adopted.');
   console.log('The MetaMCP host must be able to reach the gateway URL; it can differ from the address reachable from this terminal.');
-  const target = validateUrl(supplied ? supplied.target : await question('MetaMCP origin (for example https://mcp.example.org): '), false);
-  const gateway = validateUrl(supplied ? supplied.gateway : await question('Gateway base URL as seen FROM MetaMCP: '), true);
+  // For an existing local Docker project, derive both addresses instead of
+  // asking the user to copy credentials, a gateway URL, or an uncertain path.
+  const savedMeta = interactiveLive ? json(path.join(path.resolve(opts.metaDir), '.mcpkit', 'state.json')) : null;
+  const target = validateUrl(supplied ? supplied.target : interactiveLive ? savedMeta.appUrl : await question('MetaMCP origin (for example https://mcp.example.org): '), false);
+  const gateway = validateUrl(supplied ? supplied.gateway : interactiveLive ? `http://${opts.liveGlobal}-gateway:13001` : await question('Gateway base URL as seen FROM MetaMCP: '), true);
+  if (interactiveLive) console.log(`Selected MetaMCP: ${target.base}; existing GLOBAL: ${opts.liveGlobal}.`);
   if (target.insecure || gateway.insecure) {
     console.log('WARNING: non-loopback HTTP sends credentials/keys without transport encryption. Use HTTPS or a separately encrypted private tunnel/VPN.');
     if (!supplied && (await question('Type TRUSTED TUNNEL to confirm this network is protected: ')) !== 'TRUSTED TUNNEL') fail('Cancelled; no records were changed.');
   }
-  const meta = supplied ? verifiedLocalMeta(opts.metaDir, target.base) : null;
+  const meta = opts.metaDir ? verifiedLocalMeta(opts.metaDir, target.base) : null;
   if (meta) localTransport = { origin: target.base, address: meta.address };
-  const bundle = opts.liveGlobal ? liveGlobalBundle(opts.liveGlobal, meta, gateway.base)
+  const existingGlobal = interactiveLive ? inspectLiveGlobal(meta.context, opts.liveGlobal, { requireRunning: false }) : null;
+  let bundle = interactiveLive ? null : opts.liveGlobal ? liveGlobalBundle(opts.liveGlobal, meta, gateway.base)
     : profile === 'local' ? localBundle(base) : globalBundle(base);
   console.log('Use only a MetaMCP instance you trust: its server records will contain the gateway key.');
   const auth = await login(target.base, supplied);
   await requireAdmin(target.base, auth.cookie);
+  if (interactiveLive) {
+    console.log('Starting verified existing GLOBAL containers if necessary; they will not be rebuilt or recreated.');
+    const running = startLiveGlobal(existingGlobal);
+    let statuses = null;
+    const deadline = Date.now() + 90_000;
+    while (!statuses && Date.now() < deadline) {
+      try { statuses = liveGlobalStatus(running); } catch { await delay(2000); }
+    }
+    if (!statuses) fail('The existing GLOBAL gateway did not become ready; no MetaMCP records were created.');
+    console.log(`GLOBAL gateway responded; ${statuses.filter((item) => item.status === 'ready').length}/${statuses.length} servers are ready.`);
+    for (const item of statuses.filter((entry) => entry.status !== 'ready')) console.log(`  ${item.id}: ${item.status}`);
+    enableLiveGlobalRestart(running);
+    connectLiveGlobal(running, meta.state);
+    bundle = liveGlobalBundle(opts.liveGlobal, meta, gateway.base);
+  }
   const expectedOwner = null;
   const publicOwner = { user_id: null };
   const keyHash = digest(bundle.key);

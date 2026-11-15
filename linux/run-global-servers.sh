@@ -10,7 +10,7 @@ case "$command" in
     stop|status|logs|remove) ;;
     *) echo "Usage: $0 {start|stop|status|logs|apply|remove} [DIRECTORY] [SERVER|--delete-volumes]" >&2; exit 2 ;;
 esac
-args=("$command" --dir "$dir")
+args=("$command" --dir "$dir" --expect-type global)
 if [ "$#" -ge 3 ]; then
     if [ "$command" = logs ] && [ "$3" != --delete-volumes ]; then args+=(--server "$3")
     elif [ "$command" = remove ] && [ "$3" = --delete-volumes ]; then args+=(--delete-volumes)

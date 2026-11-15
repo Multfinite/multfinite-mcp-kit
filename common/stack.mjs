@@ -25,7 +25,7 @@ function parseArgs(args) {
     const arg = args[i];
     const flag = { '--delete-volumes': 'deleteVolumes', '--staged': 'staged', '--fresh': 'fresh', '--allow-insecure-lan': 'allowInsecureLan', '--clean-tools': 'cleanTools' }[arg];
     if (flag) { if (result[flag]) fail(`Duplicate argument: ${arg}`); result[flag] = true; continue; }
-    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--lan-ip': 'lanIp', '--admin-email': 'adminEmail', '--meta-dir': 'metaDir', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile' }[arg];
+    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--lan-ip': 'lanIp', '--admin-email': 'adminEmail', '--meta-dir': 'metaDir', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile', '--expect-type': 'expectType' }[arg];
     if (!key || i + 1 >= args.length || args[i + 1].startsWith('--') || result[key] !== undefined) fail(`Invalid argument: ${arg}`);
     result[key] = args[++i];
   }
@@ -588,7 +588,38 @@ function metaContainerSnapshot(ctx, state, { stopped = false } = {}) {
   return { appId, postgresId, password, secret, appUrl, admins: app.METAMCP_ADMIN_EMAILS,
     extraOrigins: app.EXTRA_TRUSTED_ORIGINS.slice(trustedPrefix.length) };
 }
-function provisionStagedMeta(ctx, state) {
+function hiddenInput(prompt) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) fail('An interactive terminal is required for a hidden password.');
+  return new Promise((resolve, reject) => {
+    let value = '';
+    let settled = false;
+    const previouslyRaw = Boolean(process.stdin.isRaw);
+    process.stdout.write(prompt);
+    const finish = (error) => {
+      if (settled) return;
+      settled = true;
+      process.stdin.off('data', onData);
+      process.stdin.setRawMode(previouslyRaw);
+      process.stdin.pause();
+      process.stdout.write('\n');
+      if (error) reject(error); else resolve(value);
+    };
+    const onData = (chunk) => {
+      for (const char of String(chunk)) {
+        if (char === '\u0003' || char === '\u0004') return finish(new Error('Cancelled.'));
+        if (char === '\r' || char === '\n') return finish();
+        if (char === '\u007f' || char === '\b') value = Array.from(value).slice(0, -1).join('');
+        else if (char >= ' ') value += char;
+        if (value.length > 128) return finish(new Error('Password must be at most 128 characters.'));
+      }
+    };
+    process.stdin.setEncoding('utf8');
+    process.stdin.setRawMode(true);
+    process.stdin.on('data', onData);
+    process.stdin.resume();
+  });
+}
+async function provisionStagedMeta(ctx, state) {
   const marker = setupMarker(state);
   if (!marker) fail('Provisioning is only available for an unpublished staged MetaMCP.');
   const id = requireRunningMetaApp(ctx, state, null, { staged: true });
@@ -597,8 +628,15 @@ function provisionStagedMeta(ctx, state) {
     fail('Staged container or administrator settings changed; no account was created.');
   }
   let input;
-  try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { fail('Expected private provisioning input on stdin.'); }
-  if (input.email !== marker.adminEmail || typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) fail('Invalid provisioning credentials.');
+  if (process.stdin.isTTY) {
+    console.log(`Setting up administrator ${marker.adminEmail}. Password input is hidden.`);
+    const password = await hiddenInput('Password (12–128 characters): ');
+    if (password !== await hiddenInput('Repeat password: ')) fail('Passwords do not match.');
+    input = { email: marker.adminEmail, password };
+  } else {
+    try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { fail('Expected private provisioning input on stdin.'); }
+  }
+  if (!input || typeof input !== 'object' || input.email !== marker.adminEmail || typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) fail('Invalid provisioning credentials.');
   const script = fs.readFileSync(path.join(root, 'common', 'metamcp-provision.mjs'), 'utf8');
   const result = spawnSync('docker', ['--context', ctx, 'exec', '-i', id, 'node', '--input-type=module', '-e', script], {
     env: cleanEnv(), input: JSON.stringify({ origin: snapshot.appUrl, email: input.email, password: input.password }),
@@ -1498,6 +1536,7 @@ try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
   if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
   const opts = parseArgs(argv);
+  if (opts.expectType && !['meta', 'global'].includes(opts.expectType)) fail('Unknown expected kit type.');
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
   if (opts.metaDir && !['link', 'unlink', 'share-global'].includes(action)) fail('--meta-dir is only valid for link/unlink/share-global.');
   if (opts.server && action !== 'logs') fail('--server is only valid for logs.');
@@ -1505,6 +1544,7 @@ try {
   if (opts.registrationFile && action !== 'share-registration') fail('--registration-file is only valid for share-registration.');
   if (!opts.dir) fail('--dir is required.');
   const isInit = action === 'init-meta' || action === 'init-global';
+  if (isInit && opts.expectType && opts.expectType !== (action === 'init-meta' ? 'meta' : 'global')) fail('The requested and expected kit types differ.');
   if (!isInit && (opts.port || opts.appUrl)) fail('Ports and APP_URL are only accepted for new installations.');
   if (action === 'init-global' && opts.appUrl) fail('--app-url is only for MetaMCP.');
   if (action !== 'init-meta' && (opts.staged || opts.fresh || opts.lanIp || opts.adminEmail || opts.allowInsecureLan || opts.cleanTools)) fail('Staging, fresh-install, clean-tool and LAN options are only available for init-meta.');
@@ -1514,6 +1554,7 @@ try {
   const saved = isInit ? initialize(action === 'init-meta' ? 'meta' : 'global', opts) :
     originState(base, { allowRelocated: isSharing || action === 'relocate' });
   const state = isSharing ? sharingState(saved, base) : saved;
+  if (opts.expectType && state.type !== opts.expectType) fail(`Expected a ${opts.expectType} project at ${base}; no Docker resource was changed.`);
   if (opts.server && state.type !== 'global') fail('--server is only available for GLOBAL logs.');
   // Stopping, basic status and the explicit recovery path can operate without
   // credentials; creation, start, apply and removal still validate them.
@@ -1525,7 +1566,7 @@ try {
   if (isInit || action === 'start') await start(ctx, state);
   else if (action === 'provision-meta') {
     if (state.type !== 'meta') fail('provision-meta is only for a MetaMCP.');
-    provisionStagedMeta(ctx, state);
+    await provisionStagedMeta(ctx, state);
   } else if (action === 'activate-meta') {
     if (state.type !== 'meta') fail('activate-meta is only for a MetaMCP.');
     await activateStagedMeta(ctx, state);
