@@ -55,7 +55,7 @@ function validateSettings(settings, secrets) {
 }
 
 function loadConfig() {
-  if (!fs.existsSync(SETTINGS_FILE) || !fs.existsSync(SECRETS_FILE)) throw new Error('Run install-local.ps1 first.');
+  if (!fs.existsSync(SETTINGS_FILE) || !fs.existsSync(SECRETS_FILE)) throw new Error('Run install-local-server.ps1 first.');
   const settings = readJson(SETTINGS_FILE);
   const secrets = readJson(SECRETS_FILE);
   validateSettings(settings, secrets);
@@ -74,7 +74,13 @@ export function buildServerSpecs(settings, secrets, base = BASE, nodePath = proc
   const writingMissing = !fs.existsSync(settings.writingDir) ? 'writingDir does not exist.' : '';
   const commonPath = [path.dirname(nodePath), path.join(core, '.bin'), process.env.PATH || process.env.Path || ''].join(path.delimiter);
   const commonEnv = { PATH: commonPath, Path: commonPath };
-  const sdkMissing = process.platform === 'win32' && !fs.existsSync(settings.everythingSdkPath) ? 'Everything SDK DLL is missing; rerun installation or set everythingSdkPath.' : '';
+  const linux = process.platform === 'linux' && process.env.MCPKIT_NATIVE_LINUX === '1';
+  const hasExecutable = (names) => (process.env.PATH || '').split(path.delimiter).some((dir) => names.some((name) => {
+    try { fs.accessSync(path.join(dir, name), fs.constants.X_OK); return true; } catch { return false; }
+  }));
+  const sdkMissing = linux && (!hasExecutable(['plocate', 'locate']) || !hasExecutable(['which']))
+    ? 'Install plocate/locate and which, and initialize the search database.'
+    : process.platform === 'win32' && !fs.existsSync(settings.everythingSdkPath) ? 'Everything SDK DLL is missing; rerun installation or set everythingSdkPath.' : '';
   const obsidianMissing = secrets.obsidianApiKey.trim() ? '' : 'Set obsidianApiKey in config/private/secrets.json and restart.';
   // DBHub's SQLite parser does not URL-decode percent escapes. A relative DSN
   // plus cwd preserves spaces, Unicode, # and UNC profile paths without ever
@@ -82,16 +88,30 @@ export function buildServerSpecs(settings, secrets, base = BASE, nodePath = proc
   const dbDsn = secrets.dbhubDsn.trim() || 'sqlite:////./dbhub.sqlite';
   const filesystemEntry = npm('core', '@j0hanz', 'filesystem-mcp', 'dist', 'index.js');
   const watchConfig = path.join(runtime, 'vector-watch.json');
+  // Codebase Memory rejects cache paths whose ancestry contains junctions.
+  // The kit's mcp-local directory may be redirected, so keep this Windows
+  // cache on the user's normal LocalAppData path instead of beneath BASE.
+  const codebaseMemoryEnv = process.platform === 'win32'
+    ? { CBM_CACHE_DIR: path.join(process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local'), 'codebase-memory-mcp') }
+    : {};
   const specs = [
     nodeSpec('desktop-commander', npm('core', '@wonderwhy-er', 'desktop-commander', 'dist', 'index.js'), ['--no-onboarding'], { DESKTOP_COMMANDER_DISABLE_TELEMETRY: '1' }),
     pythonSpec('everything-search', 'everything-search', 'mcp-server-everything-search', [], { EVERYTHING_SDK_PATH: settings.everythingSdkPath, EVERYTHING_SEARCH_TOOL_NAME: 'everything_search' }, sdkMissing),
     nodeSpec('filesystem', path.join(HERE, 'filesystem-launcher.mjs'), [filesystemEntry, settings.projectsDir, settings.writingDir], { FS_PORT: '' }, projectsMissing || writingMissing),
-    pythonSpec('windows-mcp', 'windows-mcp', 'windows-mcp', ['serve', '--transport', 'stdio'], { ANONYMIZED_TELEMETRY: 'false' }, process.platform === 'win32' ? '' : 'Windows-MCP requires an interactive Windows desktop.'),
+    linux
+      ? pythonSpec('linux-desktop', 'linux-desktop', 'universal-computer-control', ['--config', path.join(base, 'config', 'computer-control.yaml')], {
+        // Pass an explicit kit-local config path even when absent, so upstream
+        // does not silently load another application's ~/.universal-computer
+        // settings (which could enable additional capabilities).
+        UCC_PERSISTENCE__HOME: JSON.stringify(path.join(base, 'data', 'computer-control')),
+        UCC_LOGGING__CONSOLE: 'false',
+      }, process.env.DISPLAY ? '' : 'An interactive X11/XWayland desktop and DISPLAY are required.')
+      : pythonSpec('windows-mcp', 'windows-mcp', 'windows-mcp', ['serve', '--transport', 'stdio'], { ANONYMIZED_TELEMETRY: 'false' }, process.platform === 'win32' ? '' : 'Windows-MCP requires an interactive Windows desktop.'),
     pythonSpec('git', 'git', 'mcp-server-git'),
     // The upstream shim prunes older fallback bundles. Keep that cache in the
     // kit rather than touching an existing ~/.codegraph installation.
     nodeSpec('codegraph', npm('core', '@colbymchenry', 'codegraph', 'npm-shim.js'), ['serve', '--mcp', '--path', settings.projectsDir], { CODEGRAPH_TELEMETRY: '0', CODEGRAPH_INSTALL_DIR: path.join(runtime, 'codegraph') }, projectsMissing),
-    nodeSpec('codebase-memory-mcp', npm('codebase', 'codebase-memory-mcp', 'bin.js')),
+    nodeSpec('codebase-memory-mcp', npm('codebase', 'codebase-memory-mcp', 'bin.js'), [], codebaseMemoryEnv),
     pythonSpec('serena', 'serena', 'serena', ['start-mcp-server', '--transport', 'stdio', '--enable-web-dashboard', 'false', '--enable-gui-log-window', 'false', '--open-web-dashboard', 'false']),
     nodeSpec('playwright', npm('core', '@playwright', 'mcp', 'cli.js'), ['--headless', '--browser', 'chromium'], { PLAYWRIGHT_MCP_PORT: '', PLAYWRIGHT_MCP_CONFIG: '' }),
     nodeSpec('dbhub', npm('core', '@bytebase', 'dbhub', 'dist', 'index.js'), ['--transport', 'stdio'], { DSN: dbDsn }),
@@ -101,7 +121,8 @@ export function buildServerSpecs(settings, secrets, base = BASE, nodePath = proc
   ];
   specs.find((spec) => spec.id === 'dbhub').cwd = path.join(base, 'data');
   for (const spec of specs) spec.env = { ...commonEnv, ...spec.env };
-  if (specs.map((s) => s.id).join(',') !== MANIFEST.servers.join(',')) throw new Error('Server manifest does not match runtime definitions.');
+  const expected = linux ? MANIFEST.servers.map((id) => id === 'windows-mcp' ? 'linux-desktop' : id) : MANIFEST.servers;
+  if (specs.map((s) => s.id).join(',') !== expected.join(',')) throw new Error('Server manifest does not match runtime definitions.');
   return specs;
 }
 

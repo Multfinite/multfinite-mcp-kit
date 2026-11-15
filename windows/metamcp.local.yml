@@ -29,6 +29,9 @@ services:
       BOOTSTRAP_RECREATE_USER: "false"
       BOOTSTRAP_DELETE_OTHER_USERS: "false"
       METAMCP_ADMIN_EMAILS: "${MCPKIT_METAMCP_ADMIN_EMAILS:-}"
+      # The upstream default trust list omits user-selected frontend ports.
+      # Keep additional origins from the existing private env file.
+      EXTRA_TRUSTED_ORIGINS: "http://localhost:${MCPKIT_METAMCP_PORT},${EXTRA_TRUSTED_ORIGINS:-}"
     ports: !override
       - "127.0.0.1:${MCPKIT_METAMCP_PORT}:12008"
     # Docker Desktop supplies its own host.docker.internal DNS entry. Do not

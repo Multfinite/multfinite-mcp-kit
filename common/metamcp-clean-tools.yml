@@ -1,0 +1,9 @@
+# Opt-in: expose native MCP tool names for namespaces containing one server.
+# Internal MetaMCP routing/filtering continues to use the upstream identities.
+services:
+  app:
+    build:
+      labels:
+        com.multfinite.mcpkit.clean-tools-patch: "1"
+    environment:
+      MCPKIT_CLEAN_TOOL_NAMES: "true"

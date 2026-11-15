@@ -42,7 +42,7 @@ export function prepareDockerFixture(root, bin, windowsDir = path.join(root, 'ch
   return {
     windowsDir,
     runner: path.join(windowsDir, 'run-local.ps1'),
-    installer: path.join(windowsDir, 'install-local.ps1'),
+    installer: path.join(windowsDir, 'install-local-server.ps1'),
     manifestFile,
     env: {
       MCP_TEST_DOCKER_STATE: path.join(root, 'fake-docker-state.json'),

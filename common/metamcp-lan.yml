@@ -1,0 +1,15 @@
+# Opt-in HTTP access on one explicitly configured private IPv4 address.
+# The base Compose file also publishes this app on host loopback. Compose
+# merges the two distinct IP bindings; staging subsequently resets both.
+services:
+  app:
+    build:
+      labels:
+        com.multfinite.mcpkit.lan-patch: "1"
+    environment:
+      MCPKIT_MULTI_AUTH_ORIGINS: "${MCPKIT_LAN_ORIGINS}"
+      MCPKIT_COOKIE_PREFIX: "mcpkit-${MCPKIT_INSTANCE}"
+      NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN: "true"
+      EXTRA_TRUSTED_ORIGINS: "${MCPKIT_LAN_ORIGINS},${EXTRA_TRUSTED_ORIGINS:-}"
+    ports:
+      - "${MCPKIT_LAN_IP}:${MCPKIT_PORT}:12008"

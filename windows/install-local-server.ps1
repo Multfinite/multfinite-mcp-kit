@@ -1,18 +1,18 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Install the native Windows LOCAL servers and local Docker Desktop MetaMCP.
+    Install the native Windows LOCAL servers and gateway.
 .DESCRIPTION
-    Uses isolated, pinned runtimes under %USERPROFILE%\mcp-local. Existing
+    Installs only native Windows LOCAL servers and the gateway. It never
+    installs, configures, or starts MetaMCP or Docker Desktop. Existing
     .env, mcp-local.json, user data, and global npm/Python packages are kept.
-    MetaMCP is cloned and built into a separate Docker Desktop project.
-    Run from an interactive Windows user session, not as a Windows service.
+    Run from an interactive Windows user session.
 #>
 [CmdletBinding()]
 param(
+    [Parameter(Position=0)][string]$Directory = $(if ($env:MCP_LOCAL_DIR) { $env:MCP_LOCAL_DIR } else { Join-Path $env:USERPROFILE 'mcp-local' }),
+    [Parameter(Position=1)][ValidateRange(1, 65535)][int]$GatewayPort = 13001,
     [switch]$NonInteractive,
-    # Add local Docker MetaMCP to an already installed native LOCAL stack.
-    [switch]$MetaMcpOnly,
     [switch]$InstallBuildTools,
     [switch]$SkipEverything,
     [switch]$SkipBrowserDownload
@@ -20,7 +20,7 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$BaseDir = if ($env:MCP_LOCAL_DIR) { [IO.Path]::GetFullPath($env:MCP_LOCAL_DIR) } else { Join-Path $env:USERPROFILE 'mcp-local' }
+$BaseDir = [IO.Path]::GetFullPath($Directory)
 $Runtime = Join-Path $BaseDir 'runtime'
 $PrivateDir = Join-Path $BaseDir 'config\private'
 $Manifest = Get-Content -LiteralPath (Join-Path $ScriptDir 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -45,8 +45,8 @@ function Invoke-Native([string]$Executable, [string[]]$Arguments) {
     & $Executable @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$(Split-Path -Leaf $Executable) failed with exit code $LASTEXITCODE" }
 }
-function Invoke-Runner([string]$Command) {
-    & (Join-Path $ScriptDir 'run-local.ps1') $Command
+function Invoke-Runner([string]$Command, [object[]]$Arguments = @()) {
+    & (Join-Path $ScriptDir 'run-local.ps1') $Command -Directory $BaseDir @Arguments
     if ($LASTEXITCODE -ne 0) { throw "run-local.ps1 $Command failed with exit code $LASTEXITCODE" }
 }
 function Install-Winget([string]$Id, [string[]]$Extra = @()) {
@@ -62,21 +62,6 @@ function Ensure-GitPrerequisite {
     if (-not $git) { Install-Winget 'Git.Git'; $git = Find-Application 'git.exe' }
     if (-not $git) { throw 'Git was installed but is not in PATH. Reopen PowerShell and retry.' }
     Ok "Git: $git"
-}
-function Ensure-DockerPrerequisite {
-    Step 'Docker Desktop'
-    $docker = Find-Application 'docker.exe'
-    $desktop = Join-Path $env:ProgramFiles 'Docker\Docker\Docker Desktop.exe'
-    $desktopCli = Join-Path $env:ProgramFiles 'Docker\Docker\resources\bin\docker.exe'
-    if (-not $docker -and (Test-Path -LiteralPath $desktopCli -PathType Leaf)) { $docker = $desktopCli }
-    if (-not $docker -and -not (Test-Path -LiteralPath $desktop -PathType Leaf)) {
-        Note 'Docker Desktop may require administrator approval, WSL 2 setup, and a Windows reboot.'
-        Install-Winget 'Docker.DockerDesktop'
-        $docker = Find-Application 'docker.exe'
-        if (-not $docker -and (Test-Path -LiteralPath $desktopCli -PathType Leaf)) { $docker = $desktopCli }
-    }
-    if (-not $docker) { throw 'Docker Desktop was found or installed, but its CLI is not available yet. Complete its setup/reboot, reopen PowerShell, and retry.' }
-    Ok "Docker CLI: $docker (the runner checks the local Docker Desktop Linux engine)"
 }
 function Get-UvVersion([string]$Executable) {
     if (-not $Executable) { return $null }
@@ -181,27 +166,12 @@ Protect-PrivateDirectory (Join-Path $BaseDir 'logs')
 Protect-PrivateDirectory $Runtime
 Refresh-Path
 
-if ($MetaMcpOnly) {
-    if (-not (Test-Path -LiteralPath (Join-Path $BaseDir 'config\local-settings.json') -PathType Leaf) -or
-        -not (Test-Path -LiteralPath (Join-Path $PrivateDir 'secrets.json') -PathType Leaf)) {
-        throw 'The native LOCAL stack is not initialized. Run install-local.ps1 without -MetaMcpOnly first.'
-    }
-    # Do not reinstall npm/Python packages or stop an already-running gateway.
-    Ensure-GitPrerequisite
-    Ensure-DockerPrerequisite
-    Step 'Starting local MetaMCP and connecting existing Windows servers'
-    Invoke-Runner 'start'
-    Ok 'MetaMCP is running. Shared Windows groups are initialized automatically; register in the UI and create an API key.'
-    exit 0
-}
-
-Step 'Preparing the kit for updates'
+Step 'Preparing the native LOCAL server kit'
 # Windows may lock running executables and packages. Stop only this kit's
 # authenticated gateway before touching its runtimes; never kill a port owner.
 Invoke-Runner 'gateway-stop'
 
 Ensure-GitPrerequisite
-try { Ensure-DockerPrerequisite } catch { Fail "Docker Desktop: $($_.Exception.Message)" }
 
 Step 'Node.js bootstrap'
 $nodeDir = Join-Path $Runtime 'node'
@@ -243,7 +213,7 @@ if ($LASTEXITCODE -ne 0 -or $nodeArch -ne 'x64') { throw 'The isolated Node runt
 Ok "Isolated Node.js $nodeVersion ($nodeArch)"
 
 Step 'Configuration'
-Invoke-Runner 'init'
+Invoke-Runner 'init' @('-GatewayPort', [string]$GatewayPort)
 
 Step 'uv and Python interpreters'
 $uv = Find-Application 'uv.exe'
@@ -372,24 +342,22 @@ if (-not $SkipBrowserDownload) {
 # this installer's temporary node-gyp selection.
 [Environment]::SetEnvironmentVariable('npm_config_python', $originalNpmPython, 'Process')
 [Environment]::SetEnvironmentVariable('NODE_GYP_FORCE_PYTHON', $originalNodeGypPython, 'Process')
-Step 'Starting LOCAL servers and Docker Desktop MetaMCP'
-# Even if one native server fails, the runner still starts MetaMCP and
-# registers the other servers, then reports the incomplete status.
-try { Invoke-Runner 'start' }
-catch { Fail "LOCAL stack: $($_.Exception.Message)" }
+Step 'Starting native LOCAL servers only'
+try { Invoke-Runner 'gateway-start' }
+catch { Fail "LOCAL servers: $($_.Exception.Message)" }
 
 Write-KitHeader 'Windows LOCAL configuration'
 Write-KitInfo "Settings: $BaseDir\config\local-settings.json"
 Write-KitInfo "Secrets:  $PrivateDir\secrets.json (keep private)"
-Write-KitInfo 'MetaMCP: register in the UI and create an API key. Shared server groups are set up automatically. Disable signup yourself in MetaMCP Settings.'
-Write-KitInfo 'Commands: .\windows\run-local.ps1 status | logs | restart | stop | ports'
-Write-KitInfo 'Change existing MetaMCP ports: .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009'
+Write-KitInfo 'This installer does not install or start Docker Desktop or MetaMCP.'
+Write-KitInfo 'Commands: .\windows\run-local.ps1 gateway-status | gateway-start | gateway-restart | gateway-stop'
+Write-KitInfo 'Optional autostart: .\windows\run-local.ps1 register-service'
 Note 'Obsidian requires its Local REST API plugin and key; the server waits until configured.'
 if ($Failures.Count -gt 0) {
     Write-KitError 'Installation is incomplete. Fix the errors above and rerun this script; existing configuration and data are preserved.'
     exit 1
 }
-Ok 'Installation completed. Open local MetaMCP and check server-specific prerequisites as described above.'
+Ok 'Native LOCAL servers installed. MetaMCP was not installed or started.'
 } finally {
     # Restore the caller's PATH, node-gyp Python and TLS protocol settings.
     [Environment]::SetEnvironmentVariable('Path', $originalPath, 'Process')

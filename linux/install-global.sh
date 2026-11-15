@@ -21,10 +21,19 @@ header()  { echo -e "\n${BOLD}${CYAN}═══ $* ═══${NC}"; }
 
 # ── Пути ─────────────────────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=linux/docker-common.sh
+source "$SCRIPT_DIR/docker-common.sh"
 BASE_DIR="${HOME}/mcp-global"
 CONFIG_DIR="${BASE_DIR}/config"
 DATA_DIR="${BASE_DIR}/data"
 METAMCP_DIR="${BASE_DIR}/metamcp"
+
+# This combined installer is retained for existing installations only. New
+# installations use the independent scripts, which require an instance port.
+# Do not silently turn an incomplete or user-owned directory into a new stack.
+if [ ! -f "${METAMCP_DIR}/.env" ]; then
+    error "Объединённый Linux-установщик сохранён только для существующего MetaMCP. Для новой установки используйте linux/install-metamcp.sh и linux/install-global-servers.sh отдельно; прежние файлы не изменены."
+fi
 
 # ── 0. Проверка ОС ───────────────────────────────────────────────────────────
 header "Проверка окружения"
@@ -120,8 +129,8 @@ if ! command -v docker &>/dev/null; then
     info "Docker не найден; установка официальных Docker Engine и Compose plugin..."
     install_missing_docker
 fi
-if ! command -v docker &>/dev/null || ! docker info &>/dev/null; then
-    error "Docker недоступен текущему пользователю. Запустите Docker, при необходимости заново войдите после добавления в группу docker, и настройте доступ без sudo."
+if ! mcpkit_require_docker; then
+    error "Docker недоступен текущему пользователю. Исправьте указанную выше причину и повторите установку."
 fi
 success "Docker работает ($(docker --version))"
 

@@ -2,6 +2,8 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=linux/docker-common.sh
+source "$SCRIPT_DIR/docker-common.sh"
 BASE_DIR="$HOME/mcp-global"
 CONFIG_DIR="$BASE_DIR/config"
 METAMCP_DIR="$BASE_DIR/metamcp"
@@ -29,7 +31,7 @@ credential_value() {
 
 check_docker() {
     header "Docker"
-    if ! docker info >/dev/null 2>&1; then
+    if ! mcpkit_require_docker; then
         error "Docker не запущен или недоступен текущему пользователю"
         return 1
     fi
@@ -551,5 +553,17 @@ case "${1:-start}" in
     status)         cmd_status ;;
     logs)           compose logs -f app ;;
     services-logs)  services_compose logs -f ;;
-    *) error "Использование: $0 {start|seed|apply-services|apply-metamcp-config|stop|restart|status|logs|services-logs}"; exit 2 ;;
+    register-service)
+        [ "$#" -eq 1 ] || { error 'register-service does not accept extra arguments'; exit 2; }
+        if [ ! -f "$CONFIG_ENV" ] || [ ! -f "$METAMCP_DIR/.env" ]; then
+            error "Сначала завершите установку существующего GLOBAL-стека; не найден $CONFIG_ENV или $METAMCP_DIR/.env"
+            exit 1
+        fi
+        source "$SCRIPT_DIR/service-registration.sh"
+        mcpkit_register_service global-legacy "$SCRIPT_DIR/run-global.sh" "$BASE_DIR" start stop no ;;
+    unregister-service)
+        [ "$#" -eq 1 ] || { error 'unregister-service does not accept extra arguments'; exit 2; }
+        source "$SCRIPT_DIR/service-registration.sh"
+        mcpkit_unregister_service global-legacy "$BASE_DIR" ;;
+    *) error "Использование: $0 {start|seed|apply-services|apply-metamcp-config|stop|restart|status|logs|services-logs|register-service|unregister-service}"; exit 2 ;;
 esac

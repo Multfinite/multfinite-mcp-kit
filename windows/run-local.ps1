@@ -1,14 +1,18 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Manage the native Windows servers and local MetaMCP in Docker Desktop.
+    Manage native Windows LOCAL servers and the optional legacy local MetaMCP.
+.DESCRIPTION
+    Running without a command starts only the native servers and gateway. The explicit start command manages the legacy Docker Desktop MetaMCP stack.
 .EXAMPLE
-    .\windows\run-local.ps1 start
+    .\windows\run-local.ps1 gateway-start
+    .\windows\run-local.ps1 start  # legacy full stack, including MetaMCP
     .\windows\run-local.ps1 status
     .\windows\run-local.ps1 logs obsidian
     .\windows\run-local.ps1 seed
     .\windows\run-local.ps1 seed -OwnerEmail 'you@example.com'
     .\windows\run-local.ps1 reset-metamcp-records
+    .\windows\run-local.ps1 uninstall-metamcp
     .\windows\run-local.ps1 enable-signup
     .\windows\run-local.ps1 logs metamcp
     .\windows\run-local.ps1 ports
@@ -17,19 +21,23 @@
 [CmdletBinding()]
 param(
     # init is used by the installer; it never replaces existing settings.
-    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'reset-metamcp-records', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
-    [string]$Command = 'start',
+    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'reset-metamcp-records', 'uninstall-metamcp', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status', 'register-service', 'unregister-service')]
+    [string]$Command = 'gateway-start',
     [string]$Server = '',
     [string]$OwnerEmail = '',
     [ValidateRange(0, 65535)]
     [int]$WebPort = 0,
     [ValidateRange(0, 65535)]
-    [int]$BackendPort = 0
+    [int]$BackendPort = 0,
+    # Used only for the create-only independent LOCAL initialization.
+    [ValidateRange(1, 65535)]
+    [int]$GatewayPort = 13001,
+    [string]$Directory = $(if ($env:MCP_LOCAL_DIR) { $env:MCP_LOCAL_DIR } else { Join-Path $env:USERPROFILE 'mcp-local' })
 )
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'This script must be run in a Windows user session.' }
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$BaseDir = if ($env:MCP_LOCAL_DIR) { [IO.Path]::GetFullPath($env:MCP_LOCAL_DIR) } else { Join-Path $env:USERPROFILE 'mcp-local' }
+$BaseDir = [IO.Path]::GetFullPath($Directory)
 $ConfigDir = Join-Path $BaseDir 'config'
 $PrivateDir = Join-Path $ConfigDir 'private'
 $Runtime = Join-Path $BaseDir 'runtime'
@@ -40,6 +48,7 @@ $StateFile = Join-Path $PrivateDir 'gateway-state.json'
 $Node = Join-Path $Runtime 'node\node_modules\node\bin\node.exe'
 $Manifest = Get-Content -LiteralPath (Join-Path $ScriptDir 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 . (Join-Path $ScriptDir 'local-common.ps1')
+. (Join-Path $ScriptDir 'service-registration.ps1')
 
 function New-RandomHex([int]$ByteCount) {
     $bytes = New-Object byte[] $ByteCount
@@ -105,7 +114,7 @@ function Initialize-Configuration {
         version = 1
         hostId = "$name-$(New-RandomHex 3)"
         listenHost = '127.0.0.1'
-        port = 13001
+        port = $GatewayPort
         tlsCertFile = ''
         tlsKeyFile = ''
         allowInsecureLan = $false
@@ -151,7 +160,7 @@ function Test-Settings($Settings, $Secrets) {
     }
 }
 function Get-Configuration {
-    if (-not (Test-Path -LiteralPath $SettingsFile) -or -not (Test-Path -LiteralPath $SecretsFile)) { throw 'Run install-local.ps1 first.' }
+    if (-not (Test-Path -LiteralPath $SettingsFile) -or -not (Test-Path -LiteralPath $SecretsFile)) { throw 'Run install-local-server.ps1 first.' }
     $settings = Read-Json $SettingsFile
     $secrets = Read-Json $SecretsFile
     Test-Settings $settings $secrets
@@ -257,11 +266,11 @@ function Start-Gateway {
     Write-KitHeader 'Windows LOCAL MCP servers'
     $config = Get-Configuration
     $settings = $config.settings
-    if (-not (Test-Path -LiteralPath $Node -PathType Leaf)) { throw 'The kit Node runtime is missing. First run install-local.ps1.' }
+    if (-not (Test-Path -LiteralPath $Node -PathType Leaf)) { throw 'The kit Node runtime is missing. First run install-local-server.ps1.' }
     $lockFile = Join-Path $PrivateDir 'start.lock'
     try { $lock = [IO.File]::Open($lockFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
     catch [IO.IOException] {
-        if (Test-Path -LiteralPath $lockFile) { throw "Another start may be in progress. If it crashed, inspect and remove $lockFile before retrying." }
+        if (Test-Path -LiteralPath $lockFile) { throw "Another gateway lifecycle action may be in progress. If it crashed, inspect and remove $lockFile before retrying." }
         throw
     }
     try {
@@ -340,18 +349,32 @@ function Start-Gateway {
 }
 function Stop-Gateway {
     Write-KitHeader 'Stopping Windows gateway'
-    $current = Get-RunningState
-    if (-not $current) { Write-KitInfo 'Gateway is not running.'; return }
-    $null = Invoke-Control $current.state 'stop'
-    for ($i = 0; $i -lt 60; $i++) {
-        Start-Sleep -Milliseconds 250
-        if (-not (Test-ProcessAlive $current.state.pid)) {
-            Remove-StateIfMatching $current.state.instanceId
-            Write-KitOk 'Gateway and its child servers stopped; data and configuration were kept.'
-            return
-        }
+    if (-not (Test-Path -LiteralPath $PrivateDir -PathType Container)) { Write-KitInfo 'Gateway is not running.'; return }
+    # Serialize the state-changing part of stop with an acquired start lock,
+    # rather than reporting an in-progress launch as already stopped.
+    $lockFile = Join-Path $PrivateDir 'start.lock'
+    try { $lock = [IO.File]::Open($lockFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
+    catch [IO.IOException] {
+        if (Test-Path -LiteralPath $lockFile) { throw "Another gateway lifecycle action may be in progress. If it crashed, inspect and remove $lockFile before retrying." }
+        throw
     }
-    throw 'Shutdown was not confirmed. Inspect logs gateway; no unrelated process was killed.'
+    try {
+        $current = Get-RunningState
+        if (-not $current) { Write-KitInfo 'Gateway is not running.'; return }
+        $null = Invoke-Control $current.state 'stop'
+        for ($i = 0; $i -lt 60; $i++) {
+            Start-Sleep -Milliseconds 250
+            if (-not (Test-ProcessAlive $current.state.pid)) {
+                Remove-StateIfMatching $current.state.instanceId
+                Write-KitOk 'Gateway and its child servers stopped; data and configuration were kept.'
+                return
+            }
+        }
+        throw 'Shutdown was not confirmed. Inspect logs gateway; no unrelated process was killed.'
+    } finally {
+        $lock.Dispose()
+        Remove-Item -LiteralPath $lockFile -Force -ErrorAction SilentlyContinue
+    }
 }
 function Get-GatewayStatus {
     Write-KitHeader 'Windows gateway status'
@@ -416,6 +439,7 @@ function Get-LocalStackStatus {
 
 try {
     if ($PSBoundParameters.ContainsKey('OwnerEmail') -and $Command -ne 'seed') { throw 'OwnerEmail is only accepted by the seed command.' }
+    if ($PSBoundParameters.ContainsKey('GatewayPort') -and $Command -ne 'init') { throw 'GatewayPort is only accepted by create-only init.' }
     switch ($Command) {
         'init'      { Initialize-Configuration }
         'start'        { Start-LocalStack }
@@ -426,6 +450,7 @@ try {
         'credentials'  { Show-MetaCredentials }
         'seed'            { Repair-MetaSeed $OwnerEmail }
         'reset-metamcp-records' { Reset-MetaRecords }
+        'uninstall-metamcp' { Remove-MetaMcp }
         'enable-signup'   { Enable-MetaSignup }
         'ports'           { Show-MetaPorts }
         'set-ports'       {
@@ -435,6 +460,12 @@ try {
             Set-MetaPorts $WebPort $BackendPort
             Start-LocalStack
         }
+        'register-service' {
+            # Autostart only the native gateway; never the optional legacy MetaMCP stack.
+            $null = Get-Configuration
+            Register-McpKitScheduledTask -Kind local -Directory $BaseDir -ScriptPath $PSCommandPath -StartArguments @('gateway-start', '-Directory', $BaseDir)
+        }
+        'unregister-service' { Unregister-McpKitScheduledTask -Kind local -Directory $BaseDir }
         'gateway-start'   { Start-Gateway }
         'gateway-stop'    { Stop-Gateway }
         'gateway-restart' { Stop-Gateway; Start-Gateway }

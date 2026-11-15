@@ -46,15 +46,16 @@ async function unusedLoopbackPort() {
   return port;
 }
 
-async function proxyIsReady(port, key) {
+async function proxyIsReady(port, key, host = '127.0.0.1', pathname = '/mcp') {
   // A listening socket alone does not mean the upstream MCP server initialized.
   // Use the per-proxy secret to initialize a disposable session and close it.
   const call = (method, body, session) => new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : '';
-    const headers = { 'X-API-Key': key, Accept: 'application/json, text/event-stream' };
+    const headers = { Accept: 'application/json, text/event-stream' };
+    if (key) headers['X-API-Key'] = key;
     if (body) { headers['Content-Type'] = 'application/json'; headers['Content-Length'] = Buffer.byteLength(data); }
     if (session) headers['Mcp-Session-Id'] = session;
-    const req = http.request({ host: '127.0.0.1', port, path: '/mcp', method, headers, timeout: 5000 }, (res) => {
+    const req = http.request({ host, port, path: pathname, method, headers, timeout: 5000 }, (res) => {
       let response = '';
       res.setEncoding('utf8');
       res.on('data', (part) => { response += part; if (response.length > 200000) req.destroy(); });
@@ -114,6 +115,10 @@ export async function startGateway({ settings, gatewayKey, controlKey, instanceI
   const records = new Map();
   for (const spec of specs) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(spec.id) || records.has(spec.id)) throw new Error(`Invalid or duplicate server id: ${spec.id}`);
+    // HTTP sidecars are fixed, trusted kit configuration, never client input.
+    if (spec.upstream && (!/^[a-z0-9-]+$/.test(spec.upstream.host) || !Number.isInteger(spec.upstream.port) || spec.upstream.port < 1 || spec.upstream.port > 65535 || spec.upstream.path !== '/mcp')) {
+      throw new Error(`Invalid internal upstream for ${spec.id}.`);
+    }
     records.set(spec.id, { spec, status: spec.waitReason ? 'waiting' : 'starting', detail: spec.waitReason || '', child: null, timer: null, port: null, internalKey: null });
   }
   let shuttingDown = false;
@@ -147,12 +152,14 @@ export async function startGateway({ settings, gatewayKey, controlKey, instanceI
     // forwarding a client's `Connection: close` into a pooled local socket
     // can make the next MCP notification fail with HTTP 400.
     const headers = withoutHopByHop(req.headers);
-    headers.host = `127.0.0.1:${record.port}`;
-    headers['x-api-key'] = record.internalKey;
+    const target = record.spec.upstream || { host: '127.0.0.1', port: record.port, path: '/mcp' };
+    headers.host = `${target.host}:${target.port}`;
+    if (record.spec.upstream) delete headers['x-api-key'];
+    else headers['x-api-key'] = record.internalKey;
     // Do not forward another principal's bearer token or a control credential.
     delete headers.authorization;
     delete headers['x-mcpkit-control'];
-    const upstream = http.request({ host: '127.0.0.1', port: record.port, path: '/mcp', method: req.method, headers }, (response) => {
+    const upstream = http.request({ host: target.host, port: target.port, path: target.path, method: req.method, headers }, (response) => {
       res.writeHead(response.statusCode || 502, withoutHopByHop(response.headers));
       response.pipe(res);
     });
@@ -176,9 +183,23 @@ export async function startGateway({ settings, gatewayKey, controlKey, instanceI
   async function launch(record) {
     if (shuttingDown || record.spec.waitReason) return;
     const { spec } = record;
+    if (spec.upstream) {
+      // The sidecar has no public port. Probe it on its private Compose
+      // network before advertising it through the authenticated gateway.
+      record.port = spec.upstream.port;
+      record.status = 'starting';
+      if (await proxyIsReady(spec.upstream.port, '', spec.upstream.host, spec.upstream.path)) {
+        if (!shuttingDown) { record.status = 'ready'; record.detail = ''; }
+      } else if (!shuttingDown) {
+        record.detail = 'Waiting for the internal MCP service.';
+        record.timer = setTimeout(() => { record.timer = null; void launch(record); }, retryMs);
+        record.timer.unref();
+      }
+      return;
+    }
     if (!fs.existsSync(spec.command) || (spec.entry && !fs.existsSync(spec.entry))) {
       record.status = 'error';
-      record.detail = 'Package is not installed; rerun install-local.ps1.';
+      record.detail = 'Package is not installed; rerun install-local-server.ps1.';
       return;
     }
     record.status = 'starting';
@@ -195,12 +216,12 @@ export async function startGateway({ settings, gatewayKey, controlKey, instanceI
         // every server. Windows environment names are case-insensitive; strip
         // all spellings before adding only this server's explicit credentials.
         const env = { ...process.env };
-        const replacedNames = new Set(['MCPKIT_GATEWAY_KEY', 'MCPKIT_CONTROL_KEY', 'OBSIDIAN_API_KEY', 'DBHUB_DSN', 'DSN', 'PYTHONUNBUFFERED', 'PYTHONUTF8', 'PYTHONIOENCODING']);
+        const replacedNames = new Set(['MCPKIT_GATEWAY_KEY', 'MCPKIT_CONTROL_KEY', 'OBSIDIAN_API_KEY', 'DBHUB_DSN', 'DSN', 'NEO4J_PASSWORD', 'LLM_API_KEY', 'CONTEXT7_API_KEY', 'PYTHONUNBUFFERED', 'PYTHONUTF8', 'PYTHONIOENCODING']);
         for (const name of Object.keys(env)) {
           const upper = name.toUpperCase();
           // Other MCP_PROXY_* options can change the internal listener or TLS;
           // an unrelated proxy configuration must not affect this kit.
-          if (replacedNames.has(upper) || upper.startsWith('MCP_PROXY_')) delete env[name];
+          if (replacedNames.has(upper) || upper.startsWith('MCP_PROXY_') || upper.startsWith('UCC_')) delete env[name];
         }
         // PYTHONIOENCODING takes precedence over PYTHONUTF8, so override both
         // for MCP's UTF-8 stdio even if the caller uses a legacy code page.

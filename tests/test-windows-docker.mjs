@@ -76,6 +76,11 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     writeJson(settingsFile, settings);
     const secretsFile = path.join(base, 'config/private/secrets.json'); const secrets = readJson(secretsFile);
     installFakes(base);
+    const bareRunner = invoke(env, setup.runner); success(bareRunner);
+    assert.match(bareRunner.stdout, /Gateway listening on/);
+    assert.equal(fs.existsSync(path.join(base, 'config/private/metamcp-state.json')), false, 'bare run-local.ps1 starts only native MCP servers');
+    assert.equal(fs.existsSync(setup.env.MCP_TEST_DOCKER_STATE), false, 'bare run-local.ps1 must not invoke Docker');
+    success(invoke(env, setup.runner, 'gateway-stop'));
     const first = invoke(env, setup.runner, 'start'); success(first);
     // Console decoration is host output, not part of returned status/seed data.
     const firstPlain = first.stdout.replace(/\x1b\[[0-9;]*m/g, '');
@@ -286,6 +291,43 @@ test('local Docker setup is isolated, automatic, retryable and preserves existin
     success(invoke(env, setup.runner, 'start'));
     assert.equal(readJson(setup.env.MCP_TEST_DOCKER_STATE).appRecreates, 1);
     success(invoke(env, setup.runner, 'stop'));
+    success(invoke(env, setup.runner, 'gateway-start'));
+
+    // Full removal is opt-in, scopes Docker cleanup to the owned MetaMCP
+    // project, and preserves native Windows MCP configuration and runtimes.
+    const dockerBeforeRemoval = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    dockerBeforeRemoval.image['postgres:16-alpine'] = { 'com.example.shared': 'keep' };
+    writeJson(setup.env.MCP_TEST_DOCKER_STATE, dockerBeforeRemoval);
+    const cancelledRemoval = invokeInteractive(env, setup.runner, 'NO', 'uninstall-metamcp'); success(cancelledRemoval);
+    assert.match(cancelledRemoval.stdout, /removal cancelled/i);
+    assert.deepEqual(readJson(setup.env.MCP_TEST_DOCKER_STATE), dockerBeforeRemoval);
+    assert.equal(fs.existsSync(metaFile), true); assert.equal(fs.existsSync(metaEnvFile), true);
+    assert.equal(fs.existsSync(meta.cloneDir), true);
+
+    const foreignContainer = `${meta.project}-unrelated`;
+    dockerBeforeRemoval.container[foreignContainer] = { ...dockerBeforeRemoval.container[`${meta.project}-app`] };
+    writeJson(setup.env.MCP_TEST_DOCKER_STATE, dockerBeforeRemoval);
+    const protectedRemoval = invokeInteractive(env, setup.runner, 'REMOVE LOCAL METAMCP AND ALL DATA', 'uninstall-metamcp');
+    assert.notEqual(protectedRemoval.status, 0); assert.match(protectedRemoval.stdout, /different container already uses this Compose project/i);
+    assert.deepEqual(readJson(setup.env.MCP_TEST_DOCKER_STATE), dockerBeforeRemoval);
+    delete dockerBeforeRemoval.container[foreignContainer];
+    writeJson(setup.env.MCP_TEST_DOCKER_STATE, dockerBeforeRemoval);
+
+    const staleLock = path.join(base, 'config/private/metamcp.lock'); fs.writeFileSync(staleLock, '');
+    const removal = invokeInteractive(env, setup.runner,
+      'REMOVE STALE METAMCP LOCK\nREMOVE LOCAL METAMCP AND ALL DATA', 'uninstall-metamcp');
+    success(removal);
+    assert.match(removal.stdout, /local MetaMCP and its data were removed/i);
+    assert.equal(fs.existsSync(metaFile), false); assert.equal(fs.existsSync(metaEnvFile), false);
+    assert.equal(fs.existsSync(meta.cloneDir), false); assert.equal(fs.existsSync(staleLock), false);
+    assert.equal(fs.readFileSync(path.join(existingClone, 'do-not-touch.txt'), 'utf8'), 'existing user clone');
+    assert.deepEqual(readJson(settingsFile), settings); assert.deepEqual(readJson(secretsFile), secrets);
+    success(invoke(env, setup.runner, 'gateway-status'));
+    assert.equal(fs.existsSync(path.join(base, 'runtime/npm/core/node_modules/@playwright/mcp/cli.js')), true);
+    const removedDocker = readJson(setup.env.MCP_TEST_DOCKER_STATE);
+    assert.deepEqual(removedDocker.container, {}); assert.deepEqual(removedDocker.volume, {});
+    assert.deepEqual(removedDocker.network, {});
+    assert.deepEqual(Object.keys(removedDocker.image), ['postgres:16-alpine']);
   } finally {
     try { invoke(env, setup.runner, 'stop'); } catch { /* fixture cleanup */ }
     fs.rmSync(root, { recursive: true, force: true });
