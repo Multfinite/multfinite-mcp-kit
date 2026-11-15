@@ -13,8 +13,10 @@
 ### Linux
 
 ```sh
-# Примеры для конкретных каталогов; выберите нужный экземпляр.
+# Если для GLOBAL регистрировали автозапуск — сначала снимите его.
+bash linux/run-global-servers.sh unregister-service "$HOME/mcp-kit/global"
 bash linux/run-global-servers.sh status "$HOME/mcp-kit/global"
+bash linux/run-global-servers.sh stop   "$HOME/mcp-kit/global"
 bash linux/run-global-servers.sh remove "$HOME/mcp-kit/global"
 
 bash linux/run-metamcp.sh status "$HOME/mcp-kit/metamcp/global"
@@ -24,7 +26,10 @@ bash linux/run-metamcp.sh remove "$HOME/mcp-kit/metamcp/global"
 ### Windows
 
 ```powershell
+# Если для GLOBAL регистрировали автозапуск — сначала снимите его.
+.\windows\run-global-servers.ps1 unregister-service "$env:USERPROFILE\mcp-kit\global"
 .\windows\run-global-servers.ps1 status "$env:USERPROFILE\mcp-kit\global"
+.\windows\run-global-servers.ps1 stop   "$env:USERPROFILE\mcp-kit\global"
 .\windows\run-global-servers.ps1 remove "$env:USERPROFILE\mcp-kit\global"
 
 .\windows\run-metamcp.ps1 status "$env:USERPROFILE\mcp-kit\metamcp\global"
@@ -65,8 +70,8 @@ bash linux/run-local-servers.sh stop   "$HOME/mcp-kit/local"
 ### Windows LOCAL
 
 ```powershell
-.\windows\run-servers.ps1 status
-.\windows\run-servers.ps1 stop
+.\windows\run-local-servers.ps1 status "$env:USERPROFILE\mcp-kit\local"
+.\windows\run-local-servers.ps1 stop "$env:USERPROFILE\mcp-kit\local"
 ```
 
 Для нового независимого LOCAL проверьте `%USERPROFILE%\mcp-kit\local` либо `$env:MCPKIT_LOCAL_DIR`/выбранный `-Directory`, пути `projectsDir`/`writingDir` и резервные копии. В каталоге могут находиться собственные данные, секреты, runtime и журналы; данные за его пределами не удаляются. Затем удалите только проверенный каталог в Проводнике. Если у вас **прежний связанный MetaMCP** в другом каталоге, сначала разберите его по следующему разделу: удаление его каталога раньше контейнеров/томов может лишить вас состояния и ключей. Пакеты, установленные глобально через WinGet, Python-интерпретаторы, кэши Chromium/uv и Everything могут использоваться другими программами; комплект их не удаляет. Удаляйте их штатными средствами системы только убедившись, что они больше никому не нужны.

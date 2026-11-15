@@ -199,7 +199,7 @@ export async function startGateway({ settings, gatewayKey, controlKey, instanceI
     }
     if (!fs.existsSync(spec.command) || (spec.entry && !fs.existsSync(spec.entry))) {
       record.status = 'error';
-      record.detail = 'Package is not installed; rerun install-local.ps1.';
+      record.detail = 'Package is not installed; rerun install-local-server.ps1.';
       return;
     }
     record.status = 'starting';

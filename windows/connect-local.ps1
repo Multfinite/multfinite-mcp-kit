@@ -3,8 +3,8 @@
 .SYNOPSIS
     Register this machine's native LOCAL MCP servers in a selected MetaMCP.
 .DESCRIPTION
-    Supports both the current native-only install-local.ps1 directory and the
-    independent install-servers.ps1 directory. New records use the same names
+    Supports both the current native-only install-local-server.ps1 directory and the
+    independent install-local-servers.ps1 directory. New records use the same names
     and per-server namespace/endpoint layout as GLOBAL. The MetaMCP host must
     be able to reach the supplied LOCAL gateway URL.
 .EXAMPLE
@@ -21,7 +21,7 @@ $Here = Split-Path -Parent $MyInvocation.MyCommand.Path
 . (Join-Path $Here 'independent-common.ps1')
 $base = [IO.Path]::GetFullPath($Directory)
 # The registrar validates either the independent LOCAL marker or the native-
-# only config created by install-local.ps1. It refuses a linked legacy MetaMCP.
+# only config created by install-local-server.ps1. It refuses a linked legacy MetaMCP.
 $node = Get-IndependentNode $base
 & $node (Join-Path $Here '..\common\register.mjs') local --dir $base
 exit $LASTEXITCODE

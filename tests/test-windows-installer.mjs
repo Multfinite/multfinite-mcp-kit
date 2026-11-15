@@ -29,6 +29,12 @@ function execute(env, file, ...args) {
   return result;
 }
 function success(result) { assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`); }
+
+test('uses only the new native Windows LOCAL installer filename', () => {
+  assert.equal(fs.existsSync(path.join(windowsDir, 'install-local-server.ps1')), true);
+  assert.equal(fs.existsSync(path.join(windowsDir, 'install-local.ps1')), false);
+});
+
 async function freePort() {
   const server = net.createServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -115,7 +121,7 @@ test('PowerShell installer preserves settings, reports an incomplete venv, and s
     assert.equal(secrets.obsidianApiKey, 'existing-secret');
     prepareSyntheticNodeBootstrap(base, root, bin, 'direct');
     const first = execute(env, driver, installer); success(first);
-    assert.match(first.stdout, /LOCAL servers installed\. This run did not install or start MetaMCP\./);
+    assert.match(first.stdout, /Native LOCAL servers installed\. MetaMCP was not installed or started\./);
     assert.equal(fs.existsSync(setup.env.MCP_TEST_DOCKER_TRACE), false, 'default LOCAL installation must not invoke Docker');
     assert.equal(fs.readFileSync(path.join(root, 'node-bootstrap.log'), 'utf8'), 'direct\n');
     const vectorPackage = readJson(path.join(base, 'runtime/npm/vectorstore/package.json'));
@@ -143,7 +149,7 @@ test('PowerShell installer preserves settings, reports an incomplete venv, and s
 
     fs.rmSync(git, { recursive: true }); // test fixture only: user must back up/remove manually
     const retry = execute(env, driver, installer); success(retry);
-    assert.match(retry.stdout, /LOCAL servers installed\. This run did not install or start MetaMCP\./);
+    assert.match(retry.stdout, /Native LOCAL servers installed\. MetaMCP was not installed or started\./);
     assert.equal(fs.existsSync(setup.env.MCP_TEST_DOCKER_TRACE), false, 'retry must not invoke Docker by default');
     assert.deepEqual(readJson(settingsFile), settings);
     assert.deepEqual(readJson(secretsFile), secrets);
@@ -181,7 +187,7 @@ test('PowerShell bootstraps a hash-verified uv without replacing an older uv', {
   manifest.uvBootstrap = { version: '0.13.8', wheelUrl: 'https://example.invalid/test-only', wheelSha256: '0'.repeat(64), exeSha256: hash(fakeExe) };
   writeJson(manifestFile, manifest);
   const localRunner = path.join(repoWindows, 'run-local.ps1');
-  const localInstaller = path.join(repoWindows, 'install-local.ps1');
+  const localInstaller = path.join(repoWindows, 'install-local-server.ps1');
   const env = { ...process.env, ...setup.env, OS: 'Windows_NT', PROCESSOR_ARCHITECTURE: 'AMD64', MCP_LOCAL_DIR: base,
     MCP_TEST_ROOT: root, MCP_TEST_NODE: process.execPath, MCP_TEST_FIXTURE: fixture, MCP_TEST_UV_WHEEL: wheel, USERPROFILE: home, HOME: home,
     LOCALAPPDATA: root, ProgramFiles: root, 'ProgramFiles(x86)': programs, TEMP: root, npm_config_python: 'keep-original', NODE_GYP_FORCE_PYTHON: 'keep-forced-python',

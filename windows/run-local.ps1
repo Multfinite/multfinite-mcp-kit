@@ -21,7 +21,7 @@
 [CmdletBinding()]
 param(
     # init is used by the installer; it never replaces existing settings.
-    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'reset-metamcp-records', 'uninstall-metamcp', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status')]
+    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'reset-metamcp-records', 'uninstall-metamcp', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status', 'register-service', 'unregister-service')]
     [string]$Command = 'gateway-start',
     [string]$Server = '',
     [string]$OwnerEmail = '',
@@ -31,12 +31,13 @@ param(
     [int]$BackendPort = 0,
     # Used only for the create-only independent LOCAL initialization.
     [ValidateRange(1, 65535)]
-    [int]$GatewayPort = 13001
+    [int]$GatewayPort = 13001,
+    [string]$Directory = $(if ($env:MCP_LOCAL_DIR) { $env:MCP_LOCAL_DIR } else { Join-Path $env:USERPROFILE 'mcp-local' })
 )
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'This script must be run in a Windows user session.' }
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$BaseDir = if ($env:MCP_LOCAL_DIR) { [IO.Path]::GetFullPath($env:MCP_LOCAL_DIR) } else { Join-Path $env:USERPROFILE 'mcp-local' }
+$BaseDir = [IO.Path]::GetFullPath($Directory)
 $ConfigDir = Join-Path $BaseDir 'config'
 $PrivateDir = Join-Path $ConfigDir 'private'
 $Runtime = Join-Path $BaseDir 'runtime'
@@ -47,6 +48,7 @@ $StateFile = Join-Path $PrivateDir 'gateway-state.json'
 $Node = Join-Path $Runtime 'node\node_modules\node\bin\node.exe'
 $Manifest = Get-Content -LiteralPath (Join-Path $ScriptDir 'manifest.json') -Raw -Encoding UTF8 | ConvertFrom-Json
 . (Join-Path $ScriptDir 'local-common.ps1')
+. (Join-Path $ScriptDir 'service-registration.ps1')
 
 function New-RandomHex([int]$ByteCount) {
     $bytes = New-Object byte[] $ByteCount
@@ -158,7 +160,7 @@ function Test-Settings($Settings, $Secrets) {
     }
 }
 function Get-Configuration {
-    if (-not (Test-Path -LiteralPath $SettingsFile) -or -not (Test-Path -LiteralPath $SecretsFile)) { throw 'Run install-local.ps1 first.' }
+    if (-not (Test-Path -LiteralPath $SettingsFile) -or -not (Test-Path -LiteralPath $SecretsFile)) { throw 'Run install-local-server.ps1 first.' }
     $settings = Read-Json $SettingsFile
     $secrets = Read-Json $SecretsFile
     Test-Settings $settings $secrets
@@ -264,7 +266,7 @@ function Start-Gateway {
     Write-KitHeader 'Windows LOCAL MCP servers'
     $config = Get-Configuration
     $settings = $config.settings
-    if (-not (Test-Path -LiteralPath $Node -PathType Leaf)) { throw 'The kit Node runtime is missing. First run install-local.ps1.' }
+    if (-not (Test-Path -LiteralPath $Node -PathType Leaf)) { throw 'The kit Node runtime is missing. First run install-local-server.ps1.' }
     $lockFile = Join-Path $PrivateDir 'start.lock'
     try { $lock = [IO.File]::Open($lockFile, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None) }
     catch [IO.IOException] {
@@ -458,6 +460,12 @@ try {
             Set-MetaPorts $WebPort $BackendPort
             Start-LocalStack
         }
+        'register-service' {
+            # Autostart only the native gateway; never the optional legacy MetaMCP stack.
+            $null = Get-Configuration
+            Register-McpKitScheduledTask -Kind local -Directory $BaseDir -ScriptPath $PSCommandPath -StartArguments @('gateway-start', '-Directory', $BaseDir)
+        }
+        'unregister-service' { Unregister-McpKitScheduledTask -Kind local -Directory $BaseDir }
         'gateway-start'   { Start-Gateway }
         'gateway-stop'    { Stop-Gateway }
         'gateway-restart' { Stop-Gateway; Start-Gateway }

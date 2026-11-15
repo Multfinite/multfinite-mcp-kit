@@ -13,7 +13,7 @@ cd multfinite-mcp-kit
 
 ## Новая раздельная установка
 
-**Полный порядок, настройки и безопасность:** [независимая установка и подключение](docs/independent-installation.md). Для односторонней регистрации endpoint одного MetaMCP в другом с исправлением Docker-сети используйте [link-metamcp](docs/independent-installation.md#metamcp-to-metamcp); это не команда подключения MetaMCP к GLOBAL. Для описанной отдельной переустановки трёх MetaMCP с сохранением существующего GLOBAL см. [процедуру для Linux](docs/reinstall-three-linux.md). Для каждого нового MetaMCP установщик спрашивает порт; непустые чужие каталоги и существующие базы не перезаписываются. Нужны Git, Node.js и Docker/Compose для контейнерных частей; Linux LOCAL дополнительно требует Python, npm и средства сборки. Запуск Linux пытается поднять локальную службу Docker; Windows запускает Docker Desktop, если требуется.
+**Полный порядок, настройки и безопасность:** [независимая установка и подключение](docs/independent-installation.md). Для односторонней регистрации endpoint одного MetaMCP в другом с исправлением Docker-сети используйте [link-metamcp](docs/independent-installation.md#metamcp-to-metamcp); это не команда подключения MetaMCP к GLOBAL. Для управления уже установленными тремя MetaMCP в одной WSL и диагностики их автозапуска см. [инструкцию для Linux/WSL](docs/reinstall-three-linux.md). Для каждого нового MetaMCP установщик спрашивает порт; непустые чужие каталоги и существующие базы не перезаписываются. Нужны Git, Node.js и Docker/Compose для контейнерных частей; Linux LOCAL дополнительно требует Python, npm и средства сборки. Запуск Linux пытается поднять локальную службу Docker; Windows запускает Docker Desktop, если требуется.
 
 ```sh
 # Linux: каждая команда независима; при установке спрашиваются порты.
@@ -28,7 +28,7 @@ bash linux/connect-local.sh
 # Windows: соответствующие отдельные установщики и регистраторы.
 .\windows\install-metamcp.ps1
 .\windows\install-global-servers.ps1
-.\windows\install-servers.ps1
+.\windows\install-local-servers.ps1
 .\windows\connect-global.ps1
 .\windows\connect-local.ps1
 ```
@@ -86,7 +86,7 @@ bash linux/connect-local.sh
 <a id="installation-and-run"></a>
 ## Прежние объединённые установки
 
-Раздел сохранён для уже существующих установок; используйте [новые раздельные скрипты](docs/independent-installation.md) для новых проектов. Автоматической миграции нет. Прежние `seed`-скрипты из этого раздела сохраняют старые правила имён и видимости (в том числе приватную регистрацию через `linux/register-local.sh`) и **не** используют новый регистратор. Прежний `linux/install-global.sh` теперь продолжает только существующую установку с `~/mcp-global/metamcp/.env`, а не создаёт новый связанный MetaMCP. Windows `install-local.ps1` по умолчанию устанавливает только нативные LOCAL-серверы и шлюз; старый связанный MetaMCP теперь включается только явным `-WithMetaMcp`.
+Раздел сохранён для уже существующих установок; используйте [новые раздельные скрипты](docs/independent-installation.md) для новых проектов. Автоматической миграции нет. Прежние `seed`-скрипты из этого раздела сохраняют старые правила имён и видимости (в том числе приватную регистрацию через `linux/register-local.sh`) и **не** используют новый регистратор. Прежний `linux/install-global.sh` теперь продолжает только существующую установку с `~/mcp-global/metamcp/.env`, а не создаёт новый связанный MetaMCP. На Windows основной установщик `windows/install-local-server.ps1` устанавливает только нативные LOCAL-серверы и шлюз и никогда не устанавливает/не запускает MetaMCP.
 
 <a id="global-on-linux"></a>
 ### GLOBAL на Linux
@@ -139,6 +139,12 @@ bash linux/run-global.sh seed
 | `logs` / `services-logs` | Показывают журнал приложения или журналы всех вспомогательных сервисов с отслеживанием новых строк; выход — Ctrl+C. |
 | `apply-services` | Для применения конфигурации пересоздаёт только Graphiti и Cognee; именованные тома сохраняются. |
 | `apply-metamcp-config` | Применяет непустой публичный URL; при необходимости пересоздаёт только приложение MetaMCP. |
+| `register-service` / `unregister-service` | Регистрируют или снимают пользовательскую systemd-службу для автозапуска прежнего GLOBAL-стека; требуется работающий `systemctl --user`. Снятие регистрации не останавливает уже запущенный стек. |
+
+```sh
+bash linux/run-global.sh register-service
+bash linux/run-global.sh unregister-service
+```
 
 При обычном запуске приложение и вспомогательные сервисы используют `--no-recreate`, кроме случаев, когда ожидается изменение URL приложения или его запущенное окружение устарело. Перед возможным пересозданием сохраните файлы, созданные вручную в записываемом слое приложения. При запуске также проверяются права на том кэша MetaMCP `uv` и при необходимости исправляется владелец; приложение не запускается от root. После подключения сетей вспомогательных сервисов `start` сбрасывает `Error Status` у **общих записей с определёнными именами по умолчанию**, в том числе у существовавших ранее записей с такими именами; точный список приведён в [справочнике](docs/configuration.md). `METAMCP_START_TIMEOUT` задаёт время ожидания готовности в секундах (по умолчанию 180).
 
@@ -188,29 +194,24 @@ Graphiti использует настроенную БД Neo4j (каталог 
 
 ### LOCAL на Windows
 
-Для нативных Windows LOCAL-серверов нужны Windows 10/11 x64, 64-битный PowerShell 5.1+ и интерактивный сеанс. **Docker Desktop, WSL 2 и MetaMCP для установки самих серверов не нужны.** Рекомендуемый раздельный сценарий описан в [руководстве](docs/independent-installation.md#3-отдельный-local). Старый `install-local.ps1` использует `%USERPROFILE%\mcp-local` и теперь тоже по умолчанию устанавливает только нативные серверы и шлюз. Его дополнительный локальный MetaMCP запускается только при явном `-WithMetaMcp` и тогда требует Docker Desktop с Linux-контейнерами и Compose 2.24.4+.
-
-Если текущий Windows LOCAL **уже установлен** и содержит `config\local-settings.json`, `config\private\secrets.json` и необходимые пакеты среды выполнения, из корня обновлённого репозитория выполните:
+Для нативных Windows LOCAL-серверов нужны Windows 10/11 x64, 64-битный PowerShell 5.1+ и интерактивный сеанс. **Docker Desktop, WSL 2 и MetaMCP для установки или запуска серверов не нужны.** Основной установщик — `windows/install-local-server.ps1`; он использует `%USERPROFILE%\mcp-local` (или `$env:MCP_LOCAL_DIR`), устанавливает нативные MCP-серверы и запускает только шлюз:
 
 ```powershell
 Set-ExecutionPolicy -Scope Process Bypass
-.\windows\install-local.ps1 -MetaMcpOnly
+.\windows\install-local-server.ps1
 ```
 
-Этот режим явно проверяет Git и Docker и запускает уже существующий шлюз вместе с локальным MetaMCP, но не переустанавливает npm/Python-серверы. Для прежней конфигурации требуются `config\local-settings.json` и `config\private\secrets.json`; одних `config\.env` или `config\mcp-local.json` недостаточно. Если серверы ещё не установлены, сначала выполните установку LOCAL без `-MetaMcpOnly`. Откройте Docker Desktop и повторите команду, если установка попросила перезапуск.
-
-Для установки только нативных Windows LOCAL-серверов и шлюза:
+Для другого каталога и начального порта шлюза передайте `-Directory` и `-GatewayPort`; повторная установка сохраняет уже записанный порт:
 
 ```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-.\windows\install-local.ps1
+.\windows\install-local-server.ps1 -Directory "$env:USERPROFILE\mcp-kit\local-work" -GatewayPort 13101
 ```
 
-MetaMCP — отдельная часть и в этой команде не устанавливается. Для прежней связанной установки его можно явно включить ключом `-WithMetaMcp`; для нового раздельного LOCAL используйте `windows/install-servers.ps1` и команды из [руководства](docs/independent-installation.md).
+Установщик использует WinGet для недостающих Git, Node и Everything и устанавливает 13 нативных серверов с изолированными пакетами среды выполнения, Everything SDK и Chromium. Он **не устанавливает и не запускает Docker Desktop или MetaMCP**. Параметры: `-NonInteractive` пропускает вопрос о C++ Build Tools; `-InstallBuildTools` явно разрешает их установку; `-SkipEverything` пропускает Everything и SDK; `-SkipBrowserDownload` — загрузку Chromium. Подробнее о версиях и параметрах — в [справочнике](docs/configuration.md#windows-local-настройки-и-секреты). Для новых независимых каталогов используйте канонические [`install-local-servers.ps1` и `run-local-servers.ps1`](docs/independent-installation.md#3-отдельный-local).
 
-Установщик использует WinGet для недостающих Git, Node и Everything и устанавливает 13 серверов с изолированными пакетами среды выполнения, Everything SDK и Chromium. Docker Desktop проверяется/запускается только при явном `-WithMetaMcp` или `-MetaMcpOnly`. `-NonInteractive` пропускает вопрос о C++ Build Tools, а `-InstallBuildTools` явно разрешает их установку; `-SkipEverything` пропускает Everything и SDK, `-SkipBrowserDownload` — загрузку Chromium. Подробнее о параметрах и версиях — в [справочнике](docs/configuration.md#windows-local-настройки-и-секреты).
+Чтобы запустить только нативный шлюз уже установленного набора, используйте `windows/run-local.ps1 gateway-start`; сервисные команды `register-service` и `unregister-service` управляют автозапуском только этого шлюза. Старые явные команды `windows/run-local.ps1 start`/`stop` продолжают обслуживать существующий связанный LOCAL MetaMCP, но новый установщик их не вызывает.
 
-Общие записи, пространства имён и конечные точки локального MetaMCP создаются только в явно запрошенном связанном режиме. Без него установщик запускает только нативный шлюз Windows; MetaMCP выбирается и настраивается отдельно.
+Новая регистрация LOCAL в выбранном MetaMCP выполняется отдельным `windows/connect-local.ps1`: она использует короткие имена серверов без машинных префиксов и создаёт одноимённые namespace/endpoint для каждого сервера, как GLOBAL. Таблица ниже относится только к старой схеме уже существовавшего связанного Windows MetaMCP и не используется новым установщиком или регистратором.
 
 | Пространство имён и конечная точка | Точные имена серверов в MetaMCP |
 | --- | --- |
@@ -221,7 +222,7 @@ MetaMCP — отдельная часть и в этой команде не у�
 | `data` | `dbhub` |
 | `memory` | `simple-files-vectorstore`, `obsidian` |
 
-После первого запуска связанной установки:
+Для уже существовавшей связанной установки после явного запуска старого LOCAL MetaMCP:
 
 1. Откройте адрес, выведенный скриптом (например, `http://localhost:13008`, если выбран порт 13008) и **самостоятельно зарегистрируйтесь**. Скрипт не создаёт учётную запись и не выбирает пароль.
 2. В MetaMCP откройте **Настройки → Настройки авторизации** и включите **«Отключить регистрацию через форму»**. При необходимости отдельно отключите регистрацию через SSO. Скрипт не изменяет эти настройки при перезапуске.
@@ -236,6 +237,8 @@ MetaMCP — отдельная часть и в этой команде не у�
 .\windows\run-local.ps1 gateway-status
 .\windows\run-local.ps1 gateway-restart
 .\windows\run-local.ps1 gateway-stop
+.\windows\run-local.ps1 register-service   # Task Scheduler: только шлюз, текущий пользователь
+.\windows\run-local.ps1 unregister-service # снять автозапуск; работающий шлюз не останавливается
 ```
 
 Чтобы зарегистрировать серверы этой Windows-машины в отдельном MetaMCP, запустите:
@@ -329,15 +332,15 @@ Select-String -Path .\windows\metamcp-local.ps1 -Pattern '\$shortGroups =|\$Rese
 .\windows\run-local.ps1 ports
 ```
 
-Для отключения прямого доступа к серверной части укажите `-BackendPort 0`. Для новой установки можно до первого запуска задать `$env:MCPKIT_METAMCP_PORT` и `$env:MCPKIT_METAMCP_BACKEND_PORT`; после создания установки используйте `set-ports`, а не редактирование внутренних файлов. Например, для новой установки с интерфейсом на 14008 и без опубликованной серверной части:
+Для отключения прямого доступа к серверной части укажите `-BackendPort 0`. В прежней связанной Windows-интеграции для нового MetaMCP можно до явной команды запуска задать `$env:MCPKIT_METAMCP_PORT` и `$env:MCPKIT_METAMCP_BACKEND_PORT`; после создания используйте `set-ports`, а не редактирование внутренних файлов. Например, для старой интеграции с интерфейсом на 14008 и без опубликованной серверной части:
 
 ```powershell
 $env:MCPKIT_METAMCP_PORT = '14008'
 $env:MCPKIT_METAMCP_BACKEND_PORT = '0'
-.\windows\install-local.ps1 -WithMetaMcp
+.\windows\run-local.ps1 start
 ```
 
-В этом примере интерфейс и конечные точки используют `http://localhost:14008`. `set-ports` сохраняет порты в `config\private\metamcp-state.json` и применяет их к `APP_URL`; значения портов, оставшиеся в `metamcp.env` после первоначальной установки, не определяют действующие порты.
+В этом примере явно вызванная legacy-команда `run-local.ps1 start` использует `http://localhost:14008`; основной установщик `install-local-server.ps1` при этом не участвует и не запускает MetaMCP. `set-ports` сохраняет порты в `config\private\metamcp-state.json` и применяет их к `APP_URL`; значения портов, оставшиеся в `metamcp.env` после первоначальной настройки, не определяют действующие порты.
 
 Изменение портов, применение ручной регистрации к старой установке или добавление администратора останавливает и пересоздаёт **только** контейнер приложения: его записываемый слой сохраняется в локальном Docker-образе и используется новым контейнером. PostgreSQL, тома, учётные данные и другие контейнеры не удаляются и не пересоздаются. Такой образ может содержать секреты — не публикуйте его. Если применение прервано, исправьте причину и повторите `start`: изменение останется ожидающим. При смене портов MCP-клиентам понадобится новый URL; активные сессии могут потребовать повторного входа.
 
@@ -390,7 +393,7 @@ git log -1 --oneline
 git pull --ff-only
 ```
 
-Если обновление невозможно из-за локальных правок или расхождения веток, сначала разберите и сохраните их; не используйте `git reset --hard` или `git clean` как способ установки. Для копии из ZIP вместо `git pull` распакуйте новую версию в отдельный каталог и перенесите только согласованные пользовательские изменения, сохранив конфигурацию и данные. Затем из обновлённого каталога на Linux выполните `bash linux/run-global.sh start`, на Windows — `.\windows\run-local.ps1 gateway-start` для нативных серверов; старый полный стек MetaMCP запускайте только явно командой `start`. Windows `install-local.ps1` обновляет зависимости нативных серверов и останавливает шлюз на время работы; локальный MetaMCP затрагивается только при явном `-WithMetaMcp`, а `-MetaMcpOnly` не переустанавливает пакеты. Обычный запуск или повтор установщика не обновляет автоматически уже существующий клон MetaMCP; на Windows существующий управляемый образ также сохраняется. Не считайте обновление комплекта обновлением исходного приложения.
+Если обновление невозможно из-за локальных правок или расхождения веток, сначала разберите и сохраните их; не используйте `git reset --hard` или `git clean` как способ установки. Для копии из ZIP вместо `git pull` распакуйте новую версию в отдельный каталог и перенесите только согласованные пользовательские изменения, сохранив конфигурацию и данные. Затем из обновлённого каталога на Linux выполните `bash linux/run-global.sh start`, на Windows — `.\windows\run-local.ps1 gateway-start` для нативных серверов; старый полный стек MetaMCP запускайте только явно командой `start`. Windows `install-local-server.ps1` обновляет зависимости только нативных серверов и останавливает шлюз на время работы; он никогда не устанавливает и не запускает MetaMCP. Обычный запуск или повтор установщика не обновляет автоматически уже существующий клон MetaMCP; на Windows существующий управляемый образ также сохраняется. Не считайте обновление комплекта обновлением исходного приложения.
 
 ### Независимые копии и восстановление
 
@@ -410,6 +413,12 @@ TEST_DATABASE_URL='postgresql://user:password@localhost:5432/test_db' bash tests
 TEST_DATABASE_URL='postgresql://user:password@localhost:5432/test_db' bash tests/test-local-seed.sh
 TEST_DATABASE_URL='postgresql://user:password@localhost:5432/test_db' bash tests/test-windows-seed.sh
 TEST_DATABASE_URL='postgresql://user:password@localhost:5432/test_db' bash tests/test-windows-reset.sh
+```
+
+Пользовательскую регистрацию Linux-служб можно проверить без systemd и Docker: тест создаёт временные user-unit файлы и использует заглушку `systemctl`.
+
+```sh
+bash tests/test-linux-service-registration.sh
 ```
 
 Для тестов шлюза, установщика и управления жизненным циклом нужны Node 24 и установленный `mcp-proxy@6.10.0`. Тестам PowerShell также нужны PowerShell Core и Python 3 на POSIX-хосте; они запускают реальные скрипты с имитациями установщиков и исполняемых MCP-файлов POSIX:

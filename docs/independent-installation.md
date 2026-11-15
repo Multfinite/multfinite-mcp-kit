@@ -122,6 +122,10 @@ bash linux/run-global-servers.sh stop   "$HOME/mcp-kit/global"
 bash linux/run-global-servers.sh start  "$HOME/mcp-kit/global"
 bash linux/run-global-servers.sh logs   "$HOME/mcp-kit/global"
 bash linux/run-global-servers.sh logs   "$HOME/mcp-kit/global" fetch
+
+# Optional: register/start the per-user systemd service, or remove registration.
+bash linux/run-global-servers.sh register-service "$HOME/mcp-kit/global"
+bash linux/run-global-servers.sh unregister-service "$HOME/mcp-kit/global"
 ```
 
 ```powershell
@@ -133,9 +137,15 @@ bash linux/run-global-servers.sh logs   "$HOME/mcp-kit/global" fetch
 .\windows\run-global-servers.ps1 start  "$env:USERPROFILE\mcp-kit\global"
 .\windows\run-global-servers.ps1 logs   "$env:USERPROFILE\mcp-kit\global"
 .\windows\run-global-servers.ps1 logs   "$env:USERPROFILE\mcp-kit\global" fetch
+
+# Optional: register a per-user Task Scheduler logon task, or remove it.
+.\windows\run-global-servers.ps1 register-service "$env:USERPROFILE\mcp-kit\global"
+.\windows\run-global-servers.ps1 unregister-service "$env:USERPROFILE\mcp-kit\global"
 ```
 
 GLOBAL включает перечисленные в README Sequential Thinking, Graphiti, Cognee, Memory Bank, Context7, DuckDuckGo, Fetch, GitHub, draw.io, MCP Compass и GDrive, а также прежние Neo4j, Qdrant и Playwright. GitHub — удалённый сервис, а не контейнер на этой машине. Остальные работают за одним шлюзом с отдельным ключом; контейнеры БД и внутренних сервисов не публикуют порты на хосте. Шлюз опубликован **только на loopback**. Не открывайте его в LAN без защищённого доступа.
+
+Регистрация автозапуска необязательна. Linux-команда создаёт пользовательскую systemd-службу, запускает её сразу и включает для входа пользователя; нужен доступный `systemctl --user` (обычно systemd-enabled Linux/WSL user session). Windows-команда регистрирует задачу Task Scheduler для входа текущего пользователя и запрашивает немедленный запуск. `unregister-service` удаляет только регистрацию автозапуска; уже работающий стек остаётся запущенным. GLOBAL-команды запускают только выбранный independent GLOBAL-каталог и не запускают MetaMCP.
 
 `status` показывает контейнеры и состояния отдельных MCP-серверов; `ready` означает только успешный MCP `initialize`. При первом запуске пакеты могут ещё загружаться, а серверы без учётных данных могут оставаться в `waiting` или `starting`. Python-серверы запускаются в раздельных окружениях: Fetch закреплён на MCP SDK 1.26.0 из-за несовместимых изменений SDK 2, а другие пакеты могут использовать свои версии. Общая команда `logs` показывает журналы Compose; `logs <каталог> <server-id>` показывает соответствующий журнал сервера (для stdio-серверов шлюз должен работать). Журналы могут содержать секреты и личные данные.
 
@@ -157,18 +167,22 @@ bash linux/run-global-servers.sh apply "$HOME/mcp-kit/global"
 
 ```powershell
 # Установит только нативные серверы и шлюз, без Docker/MetaMCP.
-.\windows\install-servers.ps1
-.\windows\run-servers.ps1 status
-.\windows\run-servers.ps1 logs filesystem
-.\windows\run-servers.ps1 stop
-.\windows\run-servers.ps1 start
+.\windows\install-local-servers.ps1
+.\windows\run-local-servers.ps1 status
+.\windows\run-local-servers.ps1 logs "$env:USERPROFILE\mcp-kit\local" filesystem
+.\windows\run-local-servers.ps1 stop
+.\windows\run-local-servers.ps1 start
 
 # Ещё один набор: укажите другой каталог и свободный порт шлюза.
-.\windows\install-servers.ps1 "$env:USERPROFILE\mcp-kit\local-work" -Port 13101
-.\windows\run-servers.ps1 status -Directory "$env:USERPROFILE\mcp-kit\local-work"
+.\windows\install-local-servers.ps1 "$env:USERPROFILE\mcp-kit\local-work" -Port 13101
+.\windows\run-local-servers.ps1 status "$env:USERPROFILE\mcp-kit\local-work"
+
+# Optional per-user Task Scheduler autostart; only the native gateway is managed.
+.\windows\run-local-servers.ps1 register-service "$env:USERPROFILE\mcp-kit\local"
+.\windows\run-local-servers.ps1 unregister-service "$env:USERPROFILE\mcp-kit\local"
 ```
 
-По умолчанию используется **новый** `%USERPROFILE%\mcp-kit\local`, отдельно от прежнего `%USERPROFILE%\mcp-local`. Для другого набора передайте его пустой каталог в `install-servers.ps1`, затем используйте `-Directory <каталог>` в `run-servers.ps1` и тот же каталог в `connect-local.ps1`; либо задайте `$env:MCPKIT_LOCAL_DIR` для всех трёх команд. Параметр `-Port` действует только при создании настроек: повторная установка сохраняет прежний порт. Непустой каталог без собственного маркера и каталог со старым связанным MetaMCP не принимаются. Существующие установки не перезаписываются. Установщик может предложить WinGet, Everything, C++ Build Tools и загрузить Python/Chromium; флаги `-NonInteractive`, `-InstallBuildTools`, `-SkipEverything` и `-SkipBrowserDownload` описаны в [прежнем справочнике](configuration.md#windows-local-настройки-и-секреты). Всё, что зависит от рабочего стола, запускайте из интерактивного сеанса Windows.
+По умолчанию используется **новый** `%USERPROFILE%\mcp-kit\local`, отдельно от прежнего `%USERPROFILE%\mcp-local`. Для другого набора передайте его пустой каталог в `install-local-servers.ps1`, затем используйте тот же каталог как позиционный аргумент в `run-local-servers.ps1` и в `connect-local.ps1`; либо задайте `$env:MCPKIT_LOCAL_DIR` для команд по умолчанию. Параметр `-Port` действует только при создании настроек: повторная установка сохраняет прежний порт. Непустой каталог без собственного маркера и каталог со старым связанным MetaMCP не принимаются. Существующие установки не перезаписываются. Установщик может предложить WinGet, Everything, C++ Build Tools и загрузить Python/Chromium; флаги `-NonInteractive`, `-InstallBuildTools`, `-SkipEverything` и `-SkipBrowserDownload` описаны в [справочнике](configuration.md#windows-local-настройки-и-секреты). Всё, что зависит от рабочего стола, запускайте из интерактивного сеанса Windows. `install-servers.ps1` и `run-servers.ps1` сохранены как совместимые старые имена.
 
 ### Linux
 
@@ -183,9 +197,13 @@ bash linux/run-local-servers.sh status "$HOME/mcp-kit/local"
 bash linux/run-local-servers.sh logs   "$HOME/mcp-kit/local" filesystem
 bash linux/run-local-servers.sh stop   "$HOME/mcp-kit/local"
 bash linux/run-local-servers.sh start  "$HOME/mcp-kit/local"
+
+# Optional per-user systemd autostart; register also starts the gateway now.
+bash linux/run-local-servers.sh register-service "$HOME/mcp-kit/local"
+bash linux/run-local-servers.sh unregister-service "$HOME/mcp-kit/local"
 ```
 
-Пакеты ставятся в собственные npm-каталоги и отдельные Python venv. На Debian/Ubuntu может потребоваться самостоятельно установить `python3-venv`, `python3-pip`, `build-essential` и системные библиотеки Chromium. Если venv был прерван и не содержит `bin/python`, скрипт его не очищает: сохраните и проверьте каталог перед повтором. Чтобы пропустить загрузку Chromium, задайте `MCPKIT_SKIP_BROWSER_DOWNLOAD=1`; сервер Playwright тогда потребует браузер отдельно.
+Пакеты ставятся в собственные npm-каталоги и отдельные Python venv. На Debian/Ubuntu может потребоваться самостоятельно установить `python3-venv`, `python3-pip`, `build-essential` и системные библиотеки Chromium. Если venv был прерван и не содержит `bin/python`, скрипт его не очищает: сохраните и проверьте каталог перед повтором. Чтобы пропустить загрузку Chromium, задайте `MCPKIT_SKIP_BROWSER_DOWNLOAD=1`; сервер Playwright тогда потребует браузер отдельно. Регистрация `register-service` создаёт пользовательскую systemd-службу и запускает gateway; нужен доступный `systemctl --user`. `unregister-service` снимает автозапуск, не останавливая уже работающий gateway.
 
 - Вместо Windows Everything используется **тот же `mcp-server-everything-search` с Linux-поиском через `locate/plocate`**. Установите `plocate` и `which`, затем инициализируйте индекс средствами вашей системы; `sudo updatedb` обходит файловую систему и выполняется только по вашему решению. Возможности и актуальность результатов отличаются от Windows Everything.
 - Вместо Windows-MCP установлен **Universal Computer Control** (`linux-desktop`). Это другой сервер с другим набором инструментов: для управления экраном нужен интерактивный X11/XWayland-сеанс и `DISPLAY`, а доступность конкретных приложений зависит от сессии, библиотек и прав. Для управления окнами нужны `wmctrl` и/или `xdotool`; некоторые возможности требуют AT-SPI, OCR и дополнительных системных библиотек. Python-окружение изолировано и не обязательно видит системный пакет `python3-pyatspi`; доступность каждого backend проверяйте отдельно. Нативный Wayland/безголовый сервер не обещается. Необязательная собственная конфигурация аналога — `config/computer-control.yaml`; настройки другого `~/.universal-computer` не подхватываются. Инструменты могут управлять реальным рабочим столом, выполнять действия и передавать снимки экрана клиенту/модели. Рассмотрите отдельный сеанс или ВМ и ограничьте доверенных клиентов.
@@ -215,7 +233,7 @@ bash linux/connect-global.sh "$HOME/mcp-kit/global"
 .\windows\connect-global.ps1 "$env:USERPROFILE\mcp-kit\global"
 ```
 
-Регистратор Windows LOCAL поддерживает и native-only каталог от `windows/install-local.ps1`, и независимый каталог от `windows/install-servers.ps1`. Он откажет для старого связанного каталога с `metamcp-state.json`. Выберите MetaMCP, предназначенный для этой LOCAL-машины: URL шлюза в серверных записях должен указывать на неё и открываться **из хоста/контейнера приложения MetaMCP**. Регистратор создаёт записи, но не настраивает LAN-маршруты, TLS, VPN или брандмауэр.
+Регистратор Windows LOCAL поддерживает native-only каталог от `windows/install-local-server.ps1` и независимый каталог от `windows/install-local-servers.ps1`. Он откажет для старого связанного каталога с `metamcp-state.json`. Выберите MetaMCP, предназначенный для этой LOCAL-машины: URL шлюза в серверных записях должен указывать на неё и открываться **из хоста/контейнера приложения MetaMCP**. Регистратор создаёт записи, но не настраивает LAN-маршруты, TLS, VPN или брандмауэр. Команды `run-local-servers.ps1 register-service`/`unregister-service` управляют только автозапуском нативного шлюза через Task Scheduler текущего пользователя; они не запускают MetaMCP.
 
 Регистратор поддерживает frontend API MetaMCP закреплённой ревизии; совместимость с другими версиями не гарантирована. Для **обоих** наборов войдите под администратором: новые серверы, пространства имён и конечные точки создаются **общими для всех пользователей MetaMCP**. Имена серверов берутся из проекта/README, без префикса комплекта или случайного идентификатора, например `sequentialthinking`, `github-mcp-server`, `DesktopCommanderMCP`, `filesystem-mcp`, `playwright-mcp`. Для `io.draw` используется официальное имя репозитория `drawio-mcp`: MetaMCP не допускает точку в имени. Linux-замена Windows-MCP называется `universal-computer-control`. Точные соответствия приведены в `common/registration-manifest.mjs`.
 

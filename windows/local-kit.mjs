@@ -55,7 +55,7 @@ function validateSettings(settings, secrets) {
 }
 
 function loadConfig() {
-  if (!fs.existsSync(SETTINGS_FILE) || !fs.existsSync(SECRETS_FILE)) throw new Error('Run install-local.ps1 first.');
+  if (!fs.existsSync(SETTINGS_FILE) || !fs.existsSync(SECRETS_FILE)) throw new Error('Run install-local-server.ps1 first.');
   const settings = readJson(SETTINGS_FILE);
   const secrets = readJson(SECRETS_FILE);
   validateSettings(settings, secrets);
