@@ -61,8 +61,13 @@ function Register-McpKitScheduledTask(
         throw "The existing MCP Kit task belongs to another Windows account: $($identity.TaskName)"
     }
 
-    $powershell = Join-Path $PSHOME 'powershell.exe'
-    if (-not (Test-Path -LiteralPath $powershell -PathType Leaf)) { throw 'Windows PowerShell 5.1 was not found.' }
+    $engineName = if ($PSVersionTable.PSEdition -eq 'Core') { 'pwsh.exe' } else { 'powershell.exe' }
+    $powershell = Join-Path $PSHOME $engineName
+    if (-not (Test-Path -LiteralPath $powershell -PathType Leaf)) {
+        $engine = Get-Command $engineName -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($engine) { $powershell = $engine.Source }
+        else { throw "PowerShell executable '$engineName' was not found in PSHOME or PATH." }
+    }
     $arguments = @('-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + @($StartArguments)
     $argumentLine = (($arguments | ForEach-Object { ConvertTo-McpKitCommandLineArgument ([string]$_) }) -join ' ')
     $action = New-ScheduledTaskAction -Execute $powershell -Argument $argumentLine -WorkingDirectory (Split-Path -Parent $ScriptPath)
