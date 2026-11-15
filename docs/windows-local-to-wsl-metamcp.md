@@ -1,6 +1,6 @@
 # Windows LOCAL: подключение шлюза к MetaMCP в WSL 2
 
-Это руководство описывает один конкретный маршрут: нативные Windows LOCAL-серверы и шлюз на Windows-хосте, а MetaMCP запущен в контейнере нативного Docker Engine внутри WSL 2. Примеры адресов соответствуют одной конфигурации с внутренним коммутатором Hyper-V `NATSwitch`: WSL `192.168.100.10`, Windows-хост `192.168.100.1`, шлюз `13001`. **Это не стандартные адреса и не готовая настройка сети: подставляйте адреса, фактически проверенные в своей среде.**
+Это руководство описывает один конкретный маршрут текущего независимого Windows LOCAL: LOCAL-серверы и шлюз работают на Windows-хосте, а MetaMCP — в контейнере нативного Docker Engine внутри WSL 2. Примеры адресов соответствуют одной конфигурации с внутренним коммутатором Hyper-V `NATSwitch`: WSL `192.168.100.10`, Windows-хост `192.168.100.1`, шлюз `13001`. **Это не стандартные адреса и не готовая настройка сети: подставляйте адреса, фактически проверенные в своей среде.**
 
 > **Важно про WSL-сеть.** Руководство по [сети Hyper-V и WSL](wsl-hyperv-network.md) отмечает, что подключение WSL к пользовательскому `NATSwitch` через прежний режим `bridged` устарело и не гарантируется. Не рассчитывайте, что WSL получит адрес `.10` или подключится к этому коммутатору. Этот документ применим только если маршрут от контейнера MetaMCP до адреса Windows-хоста уже подтверждён. Он не создаёт NATSwitch и не меняет конфигурацию WSL.
 
@@ -36,21 +36,25 @@ Windows-шлюз по умолчанию слушает только `127.0.0.1:
 
 ## 3. Настройка Windows-шлюза
 
-Ниже путь для стандартной native-only установки `%USERPROFILE%\mcp-local`. Если выбран независимый LOCAL, замените путь на `%USERPROFILE%\mcp-kit\local` или фактический каталог; используйте одну и ту же установку во всех командах. В PowerShell из корня репозитория задайте каталог (пример по умолчанию — `mcp-local`):
+Используйте Windows LOCAL, установленный текущим `windows/install-local-servers.ps1`. Каталог по умолчанию — `%USERPROFILE%\mcp-kit\local`; для нескольких наборов выбирайте нужный путь и передавайте его всем командам одинаково. В PowerShell из корня репозитория задайте каталог:
 
 ```powershell
-$localDir = if ($env:MCP_LOCAL_DIR) { $env:MCP_LOCAL_DIR } else { Join-Path $env:USERPROFILE 'mcp-local' }
+$localDir = if ($env:MCPKIT_LOCAL_DIR) { $env:MCPKIT_LOCAL_DIR } else { Join-Path $env:USERPROFILE 'mcp-kit\local' }
 ```
 
-`run-local.ps1` использует `MCP_LOCAL_DIR` или параметр `-Directory`; если у вас задан только `MCPKIT_LOCAL_DIR`, укажите каталог явно в `$localDir`.
-
-Сначала остановите текущий шлюз из корня репозитория, чтобы он не оставался доступным на прежнем listener во время настройки брандмауэра:
+Если LOCAL ещё не установлен, установите его в выбранный каталог. Установщик запускает шлюз после установки:
 
 ```powershell
-.\windows\run-local.ps1 gateway-stop -Directory $localDir
+.\windows\install-local-servers.ps1 $localDir
 ```
 
-В `config\local-settings.json` **измените существующие поля**, не заменяя весь файл и не удаляя остальные настройки. Привязывайте шлюз к конкретному IPv4-адресу Windows, который доступен из WSL; в примере это `.1`:
+Перед изменением listener остановите только этот шлюз:
+
+```powershell
+.\windows\run-local-servers.ps1 stop $localDir
+```
+
+В `$localDir\config\local-settings.json` **измените существующие поля**, не заменяя весь файл и не удаляя остальные настройки. Привязывайте шлюз к конкретному IPv4-адресу Windows, который доступен из WSL; в примере это `.1`:
 
 ```json
 "listenHost": "192.168.100.1",
@@ -93,8 +97,8 @@ $rule | Get-NetFirewallPortFilter
 Только после создания этого правила запустите шлюз:
 
 ```powershell
-.\windows\run-local.ps1 gateway-restart -Directory $localDir
-.\windows\run-local.ps1 gateway-status -Directory $localDir
+.\windows\run-local-servers.ps1 restart $localDir
+.\windows\run-local-servers.ps1 status $localDir
 Get-NetTCPConnection -LocalPort 13001 -State Listen |
   Select-Object LocalAddress, LocalPort, OwningProcess
 ```
@@ -164,13 +168,13 @@ APP_IDS="$(docker ps \
 APP_ID="$APP_IDS"
 ```
 
-Оставайтесь в том же WSL-терминале, где задан `APP_ID`. Укажите фактический каталог Windows LOCAL. Пример ниже — стандартный native-only `%USERPROFILE%\mcp-local` при профиле Windows на диске `C:`; замените `your-windows-user` и путь, если используется независимая установка, другой профиль или корень automount. Ключ считывается в переменную Bash и передаётся контейнеру через stdin — **не** как аргумент `docker exec`:
+Оставайтесь в том же WSL-терминале, где задан `APP_ID`. Укажите каталог текущего Windows LOCAL. Пример ниже подходит для `%USERPROFILE%\mcp-kit\local` при профиле на диске `C:` и стандартном WSL automount; замените `your-windows-user`, диск или путь при другой конфигурации. Для другого LOCAL укажите его фактический путь. Ключ считывается в переменную Bash и передаётся контейнеру через stdin — **не** как аргумент `docker exec`:
 
 ```sh
 (
   set -euo pipefail
   WIN_USER='your-windows-user'
-  SEC="/mnt/c/Users/$WIN_USER/mcp-local/config/private/secrets.json"
+  SEC="/mnt/c/Users/$WIN_USER/mcp-kit/local/config/private/secrets.json"
   test -r "$SEC" || { echo "Cannot read $SEC; set the actual Windows LOCAL secrets path." >&2; exit 1; }
   KEY="$(node -e 'const fs=require("node:fs");const s=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));if(!/^[a-f0-9]{64}$/.test(s.gatewayApiKey||""))process.exit(1);process.stdout.write(s.gatewayApiKey)' "$SEC")"
   trap 'unset KEY' EXIT
@@ -252,8 +256,8 @@ bash linux/connect-global.sh "$HOME/mcp-kit/global"
 | `curl` показывает `000`, timeout или connection refused | Нет маршрута, listener не слушает адрес Windows или брандмауэр блокирует соединение. Проверьте `Get-NetTCPConnection`, IP Windows/WSL, firewall-правила и повторите тест из app-контейнера. |
 | `401` | Маршрут работает, но отсутствует/неверен `X-API-Key`. Нужен `gatewayApiKey` именно этой Windows-установки, не API-ключ MetaMCP. |
 | `404` | Путь или внутренний ID сервера неверен. Для файлового сервера шлюза ID — `filesystem`, даже если запись в MetaMCP называется `filesystem-mcp`. |
-| `503 server_not_ready` | Сервер шлюза ещё запускается, ждёт конфигурации или находится в ошибке. Проверьте `gateway-status` и `.\windows\run-local.ps1 logs filesystem -Directory $localDir`. |
-| `502 upstream_unavailable` | Upstream-процесс остановился между проверками готовности и запросом. Проверьте `.\windows\run-local.ps1 logs filesystem -Directory $localDir` и статус сервера. |
+| `503 server_not_ready` | Сервер шлюза ещё запускается, ждёт конфигурации или находится в ошибке. Проверьте `status` и `.\windows\run-local-servers.ps1 logs $localDir filesystem`. |
+| `502 upstream_unavailable` | Upstream-процесс остановился между проверками готовности и запросом. Проверьте `.\windows\run-local-servers.ps1 logs $localDir filesystem` и статус сервера. |
 | `400 No valid session ID provided` при `initialize` | Тело запроса — не корректный JSON-RPC `initialize`. Формируйте его через `ConvertTo-Json`, как в §5. |
 | `Session not found` на следующем MCP-запросе | Используйте `mcp-session-id` именно из ответа `initialize`. В PowerShell 5.1 перечисляйте `$response.Headers.GetEnumerator()` и сравнивайте имя заголовка без учёта регистра. |
 | `NET FAIL: ENOTFOUND host.docker.internal` | Имя не указывает на Windows-хост в этой конфигурации нативного Docker в WSL. Используйте только проверенный адрес, доступный из app-контейнера. |
@@ -271,7 +275,7 @@ bash linux/connect-global.sh "$HOME/mcp-kit/global"
 Если настраивали TLS, очистите `tlsCertFile` и `tlsKeyFile` только если они были добавлены исключительно для этой схемы. Перезапустите шлюз и удалите только созданное правило брандмауэра:
 
 ```powershell
-.\windows\run-local.ps1 gateway-restart -Directory $localDir
+.\windows\run-local-servers.ps1 restart $localDir
 Remove-NetFirewallRule -DisplayName 'mcpkit gateway (WSL only)'
 ```
 
