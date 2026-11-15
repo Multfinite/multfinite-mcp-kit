@@ -13,7 +13,8 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { GLOBAL_SERVER_NAMES, LOCAL_SERVER_NAMES, LEGACY_GLOBAL_GROUPS, LEGACY_GLOBAL_GROUP_NAMES, legacyLocalGroups, LEGACY_LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
 import { ensurePatchedSource, LAN_PATCH_VERSION, CLEAN_TOOLS_PATCH_VERSION } from './metamcp-lan-source.mjs';
 import { readLiveGlobalLink, assertLiveGlobalNetwork } from './live-global.mjs';
-import { readLiveMetaPeerLinks, liveMetaPeerComposeFile, assertLiveMetaPeerNetworks, linkMetaPeers, unlinkMetaPeers } from './live-metamcp.mjs';
+import { readLiveMetaPeerLinks, liveMetaPeerComposeFile, assertLiveMetaPeerNetworks, assertMetaPeerAppsRunning, linkMetaPeers, probeMetaPeerEndpoint, unlinkMetaPeers } from './live-metamcp.mjs';
+import { prepareMetaPeerRegistration, commitMetaPeerRegistration } from './metamcp-peer-registration.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const revision = '05818ec2767b946f98d280ae9cefa401f0362d62';
@@ -26,7 +27,7 @@ function parseArgs(args) {
     const arg = args[i];
     const flag = { '--delete-volumes': 'deleteVolumes', '--staged': 'staged', '--fresh': 'fresh', '--allow-insecure-lan': 'allowInsecureLan', '--clean-tools': 'cleanTools' }[arg];
     if (flag) { if (result[flag]) fail(`Duplicate argument: ${arg}`); result[flag] = true; continue; }
-    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--lan-ip': 'lanIp', '--admin-email': 'adminEmail', '--meta-dir': 'metaDir', '--peer-dir': 'peerDir', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile', '--expect-type': 'expectType' }[arg];
+    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--lan-ip': 'lanIp', '--admin-email': 'adminEmail', '--meta-dir': 'metaDir', '--peer-dir': 'peerDir', '--endpoint': 'endpoint', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile', '--expect-type': 'expectType' }[arg];
     if (!key || i + 1 >= args.length || args[i + 1].startsWith('--') || result[key] !== undefined) fail(`Invalid argument: ${arg}`);
     result[key] = args[++i];
   }
@@ -1552,6 +1553,8 @@ try {
   if (opts.metaDir && !['link', 'unlink', 'share-global'].includes(action)) fail('--meta-dir is only valid for link/unlink/share-global.');
   if (opts.peerDir && !['link-metamcp', 'unlink-metamcp'].includes(action)) fail('--peer-dir is only valid for link-metamcp/unlink-metamcp.');
   if (['link-metamcp', 'unlink-metamcp'].includes(action) !== Boolean(opts.peerDir)) fail('link-metamcp/unlink-metamcp require --peer-dir.');
+  if (opts.endpoint && action !== 'link-metamcp') fail('--endpoint is only valid for link-metamcp.');
+  if ((action === 'link-metamcp') !== Boolean(opts.endpoint)) fail('link-metamcp requires --endpoint to select an endpoint on the first MetaMCP.');
   if (opts.server && action !== 'logs') fail('--server is only valid for logs.');
   if (opts.registration && action !== 'share-global') fail('--registration is only valid for share-global.');
   if (opts.registrationFile && action !== 'share-registration') fail('--registration-file is only valid for share-registration.');
@@ -1577,8 +1580,8 @@ try {
       fail('--peer-dir must select a different independent kit MetaMCP; no Docker resource was changed.');
     }
   }
-  // Stopping, status, recovery, relocation and network-only peer links can
-  // operate without credentials; lifecycle and data operations still validate them.
+  // The peer-link operation uses the MetaMCP frontend API and Docker ownership
+  // checks, but does not need to read the project's Compose secrets.
   let envError = null;
   if (action === 'status') {
     try { readEnv(state.base, state.type); } catch (error) { envError = error; }
@@ -1596,7 +1599,15 @@ try {
   else if (action === 'recover-env') await recoverMetaEnv(ctx, state);
   else if (action === 'relocate') await relocateKit(ctx, saved, base);
   else if (action === 'link' || action === 'unlink') connectLocalProjects(ctx, state, opts.metaDir, action === 'unlink');
-  else if (action === 'link-metamcp') linkMetaPeers(ctx, state, peerState);
+  else if (action === 'link-metamcp') {
+    // Argument order is directional: A is the first/source instance, B the
+    // second/target. Only B receives a remote MCP server, namespace and endpoint.
+    assertMetaPeerAppsRunning(ctx, state, peerState);
+    const registration = await prepareMetaPeerRegistration(state, peerState, opts.endpoint);
+    linkMetaPeers(ctx, state, peerState);
+    probeMetaPeerEndpoint(ctx, state, peerState, registration.sourceUrl, registration.sourceApiKey);
+    await commitMetaPeerRegistration(registration);
+  }
   else if (action === 'unlink-metamcp') unlinkMetaPeers(ctx, state, peerState);
   else if (action === 'share-global') await shareGlobalRegistration(ctx, state, saved, opts.metaDir, opts.registration);
   else if (action === 'share-registration') await shareRegistrationFile(ctx, state, saved, opts.registrationFile);

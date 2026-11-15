@@ -3,6 +3,7 @@
 // container labels and network membership; it never talks to a real daemon.
 const fs = require('node:fs');
 const crypto = require('node:crypto');
+const { spawnSync } = require('node:child_process');
 const args = process.argv.slice(2);
 const stateFile = process.env.MCP_TEST_META_LINK_STATE;
 const traceFile = process.env.MCP_TEST_META_LINK_TRACE;
@@ -38,6 +39,29 @@ if (command[0] === 'compose') {
   const subcommand = command.find((item) => ['ps', 'up', 'down', 'config'].includes(item));
   if (subcommand === 'ps') { output('synthetic MetaMCP containers\n'); process.exit(0); }
   fail(`unexpected Compose command: ${command.join(' ')}`);
+}
+if (command[0] === 'exec') {
+  if (command[1] !== '-i') fail('peer endpoint probe must pass credentials over stdin');
+  const targetId = command[2];
+  const target = state.containers[targetId];
+  if (!target || target.State?.Running !== true) fail('peer endpoint probe target is not running');
+  const evalAt = command.indexOf('-e');
+  if (evalAt < 0 || typeof command[evalAt + 1] !== 'string') fail('peer endpoint probe script is missing');
+  const syntax = spawnSync(process.execPath, ['--check'], { input: command[evalAt + 1], encoding: 'utf8' });
+  if (syntax.error || syntax.status !== 0) fail(`invalid peer endpoint probe script: ${(syntax.stderr || '').slice(-300)}`);
+  let input;
+  try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { fail('invalid peer endpoint probe input'); }
+  let endpoint;
+  try { endpoint = new URL(input.url); } catch { fail('invalid peer endpoint probe URL'); }
+  const networkName = Object.keys(target.NetworkSettings?.Networks || {}).find((name) => name.startsWith('mcpkit-meta-peer-'));
+  const network = networkName && state.networks[networkName];
+  const peer = network && Object.values(state.containers).find((item) => item.Id !== targetId &&
+    item.NetworkSettings?.Networks?.[networkName]?.Aliases?.includes(endpoint.hostname));
+  if (!network || !peer) fail('peer DNS alias is unreachable from target app');
+  state.probes ||= [];
+  state.probes.push({ targetId, peerId: peer.Id, url: input.url, hasApiKey: Boolean(input.apiKey) });
+  if (process.env.MCP_TEST_META_LINK_PROBE_FAIL === '1') fail('MCP endpoint check failed: HTTP 401', 43);
+  save(); output(JSON.stringify({ ok: true }) + String.fromCharCode(10)); process.exit(0);
 }
 if (command[0] === 'container' && command[1] === 'ls') {
   const filters = [];

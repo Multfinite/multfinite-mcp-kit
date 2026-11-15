@@ -170,9 +170,10 @@ function cleanDockerEnv() {
   }
   return env;
 }
-function docker(ctx, args, { allowFailure = false } = {}) {
+function docker(ctx, args, { allowFailure = false, input, timeout = 30000 } = {}) {
   const result = spawnSync('docker', ['--context', ctx, ...args], {
-    env: cleanDockerEnv(), encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true, maxBuffer: 8 * 1024 * 1024,
+    env: cleanDockerEnv(), encoding: 'utf8', stdio: input === undefined ? ['ignore', 'pipe', 'pipe'] : ['pipe', 'pipe', 'pipe'],
+    ...(input === undefined ? {} : { input }), timeout, windowsHide: true, maxBuffer: 8 * 1024 * 1024,
   });
   if (result.error) fail(`Cannot start Docker: ${result.error.message}`);
   if (result.status !== 0 && !allowFailure) {
@@ -364,6 +365,42 @@ function connectApp(ctx, identity, apps, project) {
   if (attached) docker(ctx, ['network', 'disconnect', identity.network, app.Id]);
   docker(ctx, ['network', 'connect', '--alias', peerAlias(id), identity.network, app.Id]);
 }
+export function assertMetaPeerAppsRunning(ctx, source, target) {
+  assertMetaState(source); assertMetaState(target);
+  const identity = pairIdentity(source.project, target.project);
+  pairApps(ctx, identity, source, target, { requireRunning: true });
+}
+export function probeMetaPeerEndpoint(ctx, source, target, sourceUrl, apiKey = null) {
+  assertMetaState(source); assertMetaState(target);
+  const identity = pairIdentity(source.project, target.project);
+  const apps = pairApps(ctx, identity, source, target, { requireRunning: true });
+  const network = validatePairNetwork(ctx, identity, apps, { requireAliases: true });
+  if (!network || network.Id !== readLiveMetaPeerLinks(source).find((item) => item.peerProject === target.project)?.networkId ||
+      network.Id !== readLiveMetaPeerLinks(target).find((item) => item.peerProject === source.project)?.networkId) {
+    fail('The saved MetaMCP peer network is missing or has changed; the MCP endpoint was not registered.');
+  }
+  for (const instance of [source, target]) {
+    const app = apps.get(instance.project);
+    if (!app || !Object.hasOwn(network.Containers || {}, app.Id)) fail(`The running ${instance.project} app is not attached to the peer network.`);
+  }
+  let url;
+  try { url = new URL(sourceUrl); } catch { fail('The source MCP endpoint URL is invalid.'); }
+  if (url.origin !== `http://${peerAlias(source.id)}:12008` ||
+      !/^\/metamcp\/[a-zA-Z0-9_-]{1,64}\/mcp$/.test(url.pathname) || url.search || url.hash || url.username || url.password) {
+    fail('The source MCP endpoint must resolve through the selected MetaMCP peer alias.');
+  }
+  if (apiKey !== null && (typeof apiKey !== 'string' || apiKey.length > 8192 || /[\r\n\0]/.test(apiKey))) {
+    fail('The source MCP API key contains invalid characters.');
+  }
+  const script = `const fs=require('node:fs');const input=JSON.parse(fs.readFileSync(0,'utf8'));(async()=>{try{const headers={accept:'application/json, text/event-stream','content-type':'application/json'};if(input.apiKey)headers['X-API-Key']=input.apiKey;const response=await fetch(input.url,{method:'POST',headers,body:JSON.stringify({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2024-11-05',capabilities:{},clientInfo:{name:'mcpkit-peer-link',version:'1.0.0'}}}),redirect:'error',signal:AbortSignal.timeout(15000)});const text=await response.text();if(!response.ok)throw new Error('HTTP '+response.status);let message=null;if((response.headers.get('content-type')||'').includes('text/event-stream')){for(const line of text.split(/\\r?\\n/)){if(line.startsWith('data:')){try{const value=JSON.parse(line.slice(5).trim());if(value&&value.id===1)message=value;}catch{}}}}else{try{message=JSON.parse(text);}catch{}}if(!message||message.jsonrpc!=='2.0'||message.id!==1||!message.result||typeof message.result.protocolVersion!=='string'||!message.result.serverInfo)throw new Error('unexpected MCP initialize response');process.stdout.write(JSON.stringify({ok:true}));}catch(error){console.error('MCP endpoint check failed: '+String(error&&error.message||'request failed').slice(0,120));process.exitCode=1;}})();`;
+  const result = docker(ctx, ['exec', '-i', apps.get(target.project).Id, 'node', '-e', script], {
+    input: JSON.stringify({ url: sourceUrl, apiKey }), timeout: 25000,
+  });
+  let checked;
+  try { checked = JSON.parse(result.stdout); } catch { fail('Could not verify the source MCP endpoint from the target MetaMCP container; no server record was created.'); }
+  if (checked?.ok !== true) fail('The source MCP endpoint did not complete an MCP initialize request; no server record was created.');
+  console.log(`Verified MCP endpoint connectivity from ${target.project} to ${source.project}.`);
+}
 function pairRecordFrom(links, peerProject) { return links.find((link) => link.peerProject === peerProject) || null; }
 
 export function linkMetaPeers(ctx, left, right) {
@@ -403,10 +440,8 @@ export function linkMetaPeers(ctx, left, right) {
   replacePeerLink(right, left.project, linkRecord(right, left, finalNetwork.Id));
   liveMetaPeerComposeFile(left);
   liveMetaPeerComposeFile(right);
-  console.log(`Saved the ${left.project} ↔ ${right.project} link on internal Docker network ${identity.network}.`);
-  console.log(`From ${left.project}, peer MCP URL: http://${peerAlias(right.id)}:12008/metamcp/all/mcp`);
-  console.log(`From ${right.project}, peer MCP URL: http://${peerAlias(left.id)}:12008/metamcp/all/mcp`);
-  console.log('The private link is saved in both kit states and is restored by the normal MetaMCP Compose lifecycle. MCP records and API authentication were not changed.');
+  console.log(`Saved the transport network for ${left.project} → ${right.project} on ${identity.network}.`);
+  console.log('Docker network metadata is stored in both kit states for lifecycle repair; the MCP server registration direction is first MetaMCP → second MetaMCP.');
   return finalNetwork;
 }
 
@@ -460,13 +495,13 @@ export function assertLiveMetaPeerNetworks(ctx, state) {
     const network = validatePairNetwork(ctx, identity, apps, { requireAliases: true });
     if (!network || network.Id !== link.networkId) {
       const command = process.platform === 'win32'
-        ? '.\\windows\\link-metamcp.ps1 META_DIRECTORY PEER_DIRECTORY'
-        : 'bash linux/link-metamcp.sh META_DIRECTORY PEER_DIRECTORY';
-      fail(`Saved MetaMCP peer network ${link.network} is missing or was replaced; run ${command} for this pair to repair it, or unlink it before continuing.`);
+        ? '.\\windows\\link-metamcp.ps1 SOURCE_DIRECTORY TARGET_DIRECTORY -Endpoint ENDPOINT'
+        : 'bash linux/link-metamcp.sh SOURCE_DIRECTORY TARGET_DIRECTORY --endpoint ENDPOINT';
+      fail(`Saved MetaMCP peer network ${link.network} is missing or was replaced; rerun the original directional ${command} command for this pair to repair it, or unlink it before continuing.`);
     }
     for (const [project, app] of apps) {
       if (app?.State?.Running === true && !Object.hasOwn(network.Containers || {}, app.Id)) {
-        fail(`Running MetaMCP ${project} is detached from its saved peer network; rerun link-metamcp for this pair.`);
+        fail(`Running MetaMCP ${project} is detached from its saved peer network; rerun the original directional link-metamcp command with its --endpoint value.`);
       }
     }
   }

@@ -13,7 +13,7 @@ cd multfinite-mcp-kit
 
 ## Новая раздельная установка
 
-**Полный порядок, настройки и безопасность:** [независимая установка и подключение](docs/independent-installation.md). Для отдельной сетевой связи MetaMCP↔MetaMCP в WSL/Linux используйте [link-metamcp](docs/independent-installation.md#metamcp-to-metamcp); это не команда подключения MetaMCP к GLOBAL. Для описанной отдельной переустановки трёх MetaMCP с сохранением существующего GLOBAL см. [процедуру для Linux](docs/reinstall-three-linux.md). Для каждого нового MetaMCP установщик спрашивает порт; непустые чужие каталоги и существующие базы не перезаписываются. Нужны Git, Node.js и Docker/Compose для контейнерных частей; Linux LOCAL дополнительно требует Python, npm и средства сборки. Запуск Linux пытается поднять локальную службу Docker; Windows запускает Docker Desktop, если требуется.
+**Полный порядок, настройки и безопасность:** [независимая установка и подключение](docs/independent-installation.md). Для односторонней регистрации endpoint одного MetaMCP в другом с исправлением Docker-сети используйте [link-metamcp](docs/independent-installation.md#metamcp-to-metamcp); это не команда подключения MetaMCP к GLOBAL. Для описанной отдельной переустановки трёх MetaMCP с сохранением существующего GLOBAL см. [процедуру для Linux](docs/reinstall-three-linux.md). Для каждого нового MetaMCP установщик спрашивает порт; непустые чужие каталоги и существующие базы не перезаписываются. Нужны Git, Node.js и Docker/Compose для контейнерных частей; Linux LOCAL дополнительно требует Python, npm и средства сборки. Запуск Linux пытается поднять локальную службу Docker; Windows запускает Docker Desktop, если требуется.
 
 ```sh
 # Linux: каждая команда независима; при установке спрашиваются порты.

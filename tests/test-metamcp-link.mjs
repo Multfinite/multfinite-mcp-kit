@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const runner = path.join(root, 'linux/link-metamcp.sh');
@@ -77,9 +77,17 @@ function newFixture() {
   fs.writeFileSync(env.MCP_TEST_META_LINK_TRACE, '');
   return { temp, env, instances, stateFile: env.MCP_TEST_META_LINK_STATE, traceFile: env.MCP_TEST_META_LINK_TRACE };
 }
-function invoke(fixture, left, right, unlink = false) {
-  const args = [runner, left.base, right.base, ...(unlink ? ['--unlink'] : [])];
-  return spawnSync('bash', args, { cwd: root, env: fixture.env, encoding: 'utf8', timeout: 30000 });
+function invoke(fixture, left, right, unlink = false, probe = false) {
+  const moduleUrl = pathToFileURL(path.join(root, 'common/live-metamcp.mjs')).href;
+  const leftState = JSON.stringify(left.state);
+  const rightState = JSON.stringify(right.state);
+  const endpointUrl = `http://mcpkit-meta-${left.state.id}:12008/metamcp/all/mcp`;
+  const work = unlink
+    ? `unlinkMetaPeers('default', left, right);`
+    : `linkMetaPeers('default', left, right);${probe ? `probeMetaPeerEndpoint('default', left, right, ${JSON.stringify(endpointUrl)}, 'test-source-api-key');` : ''}`;
+  const script = `import { linkMetaPeers, unlinkMetaPeers, probeMetaPeerEndpoint } from ${JSON.stringify(moduleUrl)};const left=${leftState};const right=${rightState};${work}`;
+  return spawnSync(process.execPath, ['--input-type=module', '-e', script],
+    { cwd: root, env: fixture.env, encoding: 'utf8', timeout: 30000 });
 }
 function success(result) { assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`); }
 function trace(fixture) { return fs.readFileSync(fixture.traceFile, 'utf8').trim().split(/\r?\n/).filter(Boolean).map(JSON.parse); }
@@ -94,10 +102,23 @@ function pairNetworkName(left, right) {
 }
 function cleanup(fixture) { fs.rmSync(fixture.temp, { recursive: true, force: true }); }
 
-test('links only the two app containers, persists both directions, and is idempotent', { skip: process.platform === 'win32' }, () => {
+test('Linux link wrapper requires a source endpoint for registration', { skip: process.platform === 'win32' }, () => {
+  const fixture = newFixture(); const [source, target] = fixture.instances;
+  try {
+    const missing = spawnSync('bash', [runner, source.base, target.base], { cwd: root, env: fixture.env, encoding: 'utf8', timeout: 30000 });
+    assert.equal(missing.status, 2);
+    assert.match(missing.stderr, /--endpoint/);
+    const unlinkWithEndpoint = spawnSync('bash', [runner, source.base, target.base, '--unlink', '--endpoint', 'all'],
+      { cwd: root, env: fixture.env, encoding: 'utf8', timeout: 30000 });
+    assert.equal(unlinkWithEndpoint.status, 2);
+    assert.match(unlinkWithEndpoint.stderr, /cannot be combined/);
+  } finally { cleanup(fixture); }
+});
+
+test('links the two app containers, persists lifecycle metadata both sides, and probes A from B', { skip: process.platform === 'win32' }, () => {
   const fixture = newFixture(); const [left, right] = fixture.instances;
   try {
-    const linked = invoke(fixture, left, right); success(linked);
+    const linked = invoke(fixture, left, right, false, true); success(linked);
     const networkName = pairNetworkName(left, right);
     const state = readJson(fixture.stateFile);
     const network = state.networks[networkName];
@@ -111,9 +132,12 @@ test('links only the two app containers, persists both directions, and is idempo
     assert.equal(a.length, 1); assert.equal(b.length, 1);
     assert.equal(a[0].peerProject, right.state.project); assert.equal(b[0].peerProject, left.state.project);
     assert.equal(a[0].networkId, network.Id); assert.equal(b[0].networkId, network.Id);
-    assert.match(linked.stdout, new RegExp(`http://mcpkit-meta-${right.state.id}:12008/metamcp/all/mcp`));
-    assert.match(linked.stdout, new RegExp(`http://mcpkit-meta-${left.state.id}:12008/metamcp/all/mcp`));
-    assert.doesNotMatch(linked.stdout, /127\.0\.0\.1/);
+    assert.match(linked.stdout, /Verified MCP endpoint connectivity from/);
+    assert.doesNotMatch(linked.stdout, /127\.0\.0\.1|peer MCP URL/);
+    assert.deepEqual(state.probes, [{
+      targetId: idFor(`${right.state.project}:app`), peerId: idFor(`${left.state.project}:app`),
+      url: `http://mcpkit-meta-${left.state.id}:12008/metamcp/all/mcp`, hasApiKey: true,
+    }], 'the target B container probes only the selected source A endpoint');
     for (const [instance, peer] of [[left, right], [right, left]]) {
       const overlay = fs.readFileSync(path.join(instance.priv, 'metamcp-live-peers.yml'), 'utf8');
       assert.match(overlay, new RegExp(`name: "${networkName}"`));
@@ -236,7 +260,7 @@ test('refuses unowned apps, non-kit state and a same-named foreign network befor
     } finally { cleanup(clean); }
 
     const legacy = path.join(fixture.temp, 'legacy'); fs.mkdirSync(legacy);
-    const noState = spawnSync('bash', [runner, legacy, right.base], { cwd: root, env: fixture.env, encoding: 'utf8', timeout: 30000 });
+    const noState = spawnSync('bash', [runner, legacy, right.base, '--endpoint', 'all'], { cwd: root, env: fixture.env, encoding: 'utf8', timeout: 30000 });
     assert.notEqual(noState.status, 0); assert.match(noState.stderr, /Independent kit state not found/);
   } finally { cleanup(fixture); }
 });
