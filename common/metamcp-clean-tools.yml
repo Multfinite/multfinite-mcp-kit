@@ -1,4 +1,5 @@
-# Opt-in: expose native MCP tool names for namespaces containing one server.
+# Optional presentation feature: expose native tool/prompt names.
+# The one-server-per-endpoint restriction is enabled independently in the base Compose file.
 # Internal MetaMCP routing/filtering continues to use the upstream identities.
 services:
   app:
