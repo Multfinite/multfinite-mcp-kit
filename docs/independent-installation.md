@@ -206,10 +206,16 @@ bash linux/connect-global.sh "$HOME/mcp-kit/global"
 ```
 
 ```powershell
-# Windows: для LOCAL по умолчанию используется MCPKIT_LOCAL_DIR или mcp-kit\local.
+# Windows LOCAL: использует MCPKIT_LOCAL_DIR / MCP_LOCAL_DIR; иначе выбирает
+# native-only %USERPROFILE%\mcp-local; иначе mcp-kit\local.
 .\windows\connect-local.ps1
+# Укажите каталог явно, если установок LOCAL несколько.
+.\windows\connect-local.ps1 "$env:USERPROFILE\mcp-local"
+.\windows\connect-local.ps1 "$env:USERPROFILE\mcp-kit\local"
 .\windows\connect-global.ps1 "$env:USERPROFILE\mcp-kit\global"
 ```
+
+Регистратор Windows LOCAL поддерживает и native-only каталог от `windows/install-local.ps1`, и независимый каталог от `windows/install-servers.ps1`. Он откажет для старого связанного каталога с `metamcp-state.json`. Выберите MetaMCP, предназначенный для этой LOCAL-машины: URL шлюза в серверных записях должен указывать на неё и открываться **из хоста/контейнера приложения MetaMCP**. Регистратор создаёт записи, но не настраивает LAN-маршруты, TLS, VPN или брандмауэр.
 
 Регистратор поддерживает frontend API MetaMCP закреплённой ревизии; совместимость с другими версиями не гарантирована. Для **обоих** наборов войдите под администратором: новые серверы, пространства имён и конечные точки создаются **общими для всех пользователей MetaMCP**. Имена серверов берутся из проекта/README, без префикса комплекта или случайного идентификатора, например `sequentialthinking`, `github-mcp-server`, `DesktopCommanderMCP`, `filesystem-mcp`, `playwright-mcp`. Для `io.draw` используется официальное имя репозитория `drawio-mcp`: MetaMCP не допускает точку в имени. Linux-замена Windows-MCP называется `universal-computer-control`. Точные соответствия приведены в `common/registration-manifest.mjs`.
 

@@ -7,7 +7,8 @@ import path from 'node:path';
 import readline from 'node:readline';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
-import { GLOBAL_GROUPS, GLOBAL_SERVER_NAMES, GLOBAL_GROUP_NAMES, localGroups, LOCAL_SERVER_NAMES, LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
+import { GLOBAL_GROUPS, GLOBAL_SERVER_NAMES, GLOBAL_GROUP_NAMES } from './registration-manifest.mjs';
+import { loadLocalBundle } from './local-registration.mjs';
 import { inspectLiveGlobal, startLiveGlobal, enableLiveGlobalRestart, liveGlobalStatus, connectLiveGlobal } from './live-global.mjs';
 
 const [profile, ...rawArgs] = process.argv.slice(2);
@@ -79,22 +80,6 @@ function validateUrl(text, allowPath) {
   const base = `${u.origin}${allowPath ? u.pathname.replace(/\/$/, '') : ''}`;
   const insecure = u.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
   return { base, insecure };
-}
-function localBundle(base) {
-  const config = path.join(base, 'config');
-  const privateDir = path.join(config, 'private');
-  const linux = process.platform === 'linux';
-  if (!linux && process.platform !== 'win32') fail('LOCAL registration supports Windows and Linux only.');
-  const marker = json(path.join(privateDir, linux ? 'linux-kit.json' : 'independent-windows-kit.json'));
-  if (marker.version !== 1 || (!linux && marker.kind !== 'windows-local') || typeof marker.base !== 'string' ||
-      (linux ? marker.base !== base : marker.base.toLowerCase() !== base.toLowerCase())) fail('Independent LOCAL marker is invalid.');
-  if (!linux && fs.existsSync(path.join(privateDir, 'metamcp-state.json'))) fail('A legacy-linked LOCAL directory is not adopted.');
-  const settings = json(path.join(config, 'local-settings.json'));
-  const secrets = json(path.join(privateDir, 'secrets.json'));
-  if (settings.version !== 1 || typeof settings.hostId !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(settings.hostId) || settings.hostId.length > 32 ||
-      (linux && marker.hostId !== settings.hostId) || !/^[a-f0-9]{64}$/.test(secrets.gatewayApiKey || '')) fail('Invalid LOCAL settings or gateway key; run the LOCAL installer first.');
-  return { id: settings.hostId, key: secrets.gatewayApiKey, privateDir,
-    groups: localGroups(linux), serverNames: LOCAL_SERVER_NAMES, groupNames: LOCAL_GROUP_NAMES };
 }
 function globalBundle(base) {
   const privateDir = path.join(base, '.mcpkit');
@@ -273,7 +258,7 @@ async function main() {
   if (meta) localTransport = { origin: target.base, address: meta.address };
   const existingGlobal = interactiveLive ? inspectLiveGlobal(meta.context, opts.liveGlobal, { requireRunning: false }) : null;
   let bundle = interactiveLive ? null : opts.liveGlobal ? liveGlobalBundle(opts.liveGlobal, meta, gateway.base)
-    : profile === 'local' ? localBundle(base) : globalBundle(base);
+    : profile === 'local' ? loadLocalBundle(base) : globalBundle(base);
   console.log('Use only a MetaMCP instance you trust: its server records will contain the gateway key.');
   const auth = await login(target.base, supplied);
   await requireAdmin(target.base, auth.cookie);
