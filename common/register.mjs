@@ -439,7 +439,8 @@ async function main() {
     }
     console.log('\nRegistration complete. Existing records and user changes were not updated or deleted.');
     for (const group of Object.keys(bundle.groups)) console.log(`${group}: ${target.base}/metamcp/${bundle.groupNames[group]}/mcp`);
-    if (supplied) console.log(`Use the PRIVATE client key stored at ${path.join(meta.privateDir, 'client-api-key')}.`);
+    const clientKeyFile = meta && path.join(meta.privateDir, 'client-api-key');
+    if (clientKeyFile && fs.existsSync(clientKeyFile)) console.log(`Use the PRIVATE client key stored at ${clientKeyFile}.`);
     else console.log('Create a PRIVATE API key in the MetaMCP UI for this account and use it with these endpoints.');
     console.log('Any valid MetaMCP API key can access a shared endpoint; issue keys only to trusted clients.');
     if (profile === 'global') console.log('GitHub MCP requires its own token; set it manually in the newly created GitHub server in MetaMCP.');
