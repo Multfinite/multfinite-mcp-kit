@@ -89,7 +89,7 @@ function Invoke-KitProcess {
 }
 function Invoke-Docker([string[]]$DockerArguments, [string]$InputText = '', [int]$TimeoutSeconds = 60, [hashtable]$ExtraEnvironment = @{}) {
     $docker = Find-Docker
-    if (-not $docker) { throw 'Docker Desktop CLI was not found. Run install-local.ps1, then start Docker Desktop.' }
+    if (-not $docker) { throw 'Docker Desktop CLI was not found. Run .\windows\install-local.ps1 -WithMetaMcp, then start Docker Desktop.' }
     return Invoke-KitProcess $docker $DockerArguments $InputText $TimeoutSeconds $ExtraEnvironment
 }
 function Assert-DockerResult($Result, [string]$Action, [bool]$ShowDetails = $true) {
@@ -103,7 +103,7 @@ function Assert-DockerResult($Result, [string]$Action, [bool]$ShowDetails = $tru
     throw "Docker $Action failed (exit $($Result.code))$details"
 }
 function Ensure-DesktopDocker([switch]$NoStart) {
-    if (-not (Find-Docker)) { throw 'Docker Desktop is not installed or its CLI is not available. Run install-local.ps1.' }
+    if (-not (Find-Docker)) { throw 'Docker Desktop is not installed or its CLI is not available. Run .\windows\install-local.ps1 -WithMetaMcp.' }
     $timeout = 120
     if ($env:MCPKIT_DOCKER_START_TIMEOUT -match '^\d{1,3}$') { $timeout = [Math]::Max(1, [Math]::Min(600, [int]$env:MCPKIT_DOCKER_START_TIMEOUT)) }
     $deadline = [DateTime]::UtcNow.AddSeconds($timeout)
@@ -319,7 +319,7 @@ function Invoke-Compose($State, [string[]]$Subcommand, [int]$TimeoutSeconds = 60
 function Invoke-Git([string[]]$GitArguments, [int]$TimeoutSeconds = 300) {
     $git = Get-Command 'git.exe' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $git -and [IO.Path]::DirectorySeparatorChar -ne '\') { $git = Get-Command 'git' -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1 }
-    if (-not $git) { throw 'Git is required to clone MetaMCP. Run install-local.ps1.' }
+    if (-not $git) { throw 'Git is required to clone MetaMCP. Run .\windows\install-local.ps1 -WithMetaMcp.' }
     $result = Invoke-KitProcess $git.Source $GitArguments '' $TimeoutSeconds
     if ($result.code -ne 0) { throw "Git failed (exit $($result.code)): $($result.stderr.Trim())" }
     return $result.stdout.Trim()

@@ -115,7 +115,8 @@ test('PowerShell installer preserves settings, reports an incomplete venv, and s
     assert.equal(secrets.obsidianApiKey, 'existing-secret');
     prepareSyntheticNodeBootstrap(base, root, bin, 'direct');
     const first = execute(env, driver, installer); success(first);
-    assert.match(first.stdout, /Installation completed/);
+    assert.match(first.stdout, /LOCAL servers installed\. This run did not install or start MetaMCP\./);
+    assert.equal(fs.existsSync(setup.env.MCP_TEST_DOCKER_TRACE), false, 'default LOCAL installation must not invoke Docker');
     assert.equal(fs.readFileSync(path.join(root, 'node-bootstrap.log'), 'utf8'), 'direct\n');
     const vectorPackage = readJson(path.join(base, 'runtime/npm/vectorstore/package.json'));
     assert.equal(vectorPackage.overrides['@xenova/transformers'].sharp, '0.33.5');
@@ -142,7 +143,8 @@ test('PowerShell installer preserves settings, reports an incomplete venv, and s
 
     fs.rmSync(git, { recursive: true }); // test fixture only: user must back up/remove manually
     const retry = execute(env, driver, installer); success(retry);
-    assert.match(retry.stdout, /Installation completed/);
+    assert.match(retry.stdout, /LOCAL servers installed\. This run did not install or start MetaMCP\./);
+    assert.equal(fs.existsSync(setup.env.MCP_TEST_DOCKER_TRACE), false, 'retry must not invoke Docker by default');
     assert.deepEqual(readJson(settingsFile), settings);
     assert.deepEqual(readJson(secretsFile), secrets);
     success(execute(env, runner, 'stop'));

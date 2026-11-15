@@ -13,6 +13,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { GLOBAL_SERVER_NAMES, LOCAL_SERVER_NAMES, LEGACY_GLOBAL_GROUPS, LEGACY_GLOBAL_GROUP_NAMES, legacyLocalGroups, LEGACY_LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
 import { ensurePatchedSource, LAN_PATCH_VERSION, CLEAN_TOOLS_PATCH_VERSION } from './metamcp-lan-source.mjs';
 import { readLiveGlobalLink, assertLiveGlobalNetwork } from './live-global.mjs';
+import { readLiveMetaPeerLinks, liveMetaPeerComposeFile, assertLiveMetaPeerNetworks, linkMetaPeers, unlinkMetaPeers } from './live-metamcp.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const revision = '05818ec2767b946f98d280ae9cefa401f0362d62';
@@ -25,7 +26,7 @@ function parseArgs(args) {
     const arg = args[i];
     const flag = { '--delete-volumes': 'deleteVolumes', '--staged': 'staged', '--fresh': 'fresh', '--allow-insecure-lan': 'allowInsecureLan', '--clean-tools': 'cleanTools' }[arg];
     if (flag) { if (result[flag]) fail(`Duplicate argument: ${arg}`); result[flag] = true; continue; }
-    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--lan-ip': 'lanIp', '--admin-email': 'adminEmail', '--meta-dir': 'metaDir', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile', '--expect-type': 'expectType' }[arg];
+    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--lan-ip': 'lanIp', '--admin-email': 'adminEmail', '--meta-dir': 'metaDir', '--peer-dir': 'peerDir', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile', '--expect-type': 'expectType' }[arg];
     if (!key || i + 1 >= args.length || args[i + 1].startsWith('--') || result[key] !== undefined) fail(`Invalid argument: ${arg}`);
     result[key] = args[++i];
   }
@@ -272,11 +273,18 @@ function composeArgs(ctx, state, command, { staging = Boolean(setupMarker(state)
   if (state.type === 'meta' && state.lanIp) args.push('-f', path.join(root, 'common', 'metamcp-lan.yml'));
   if (state.type === 'meta' && state.cleanTools) args.push('-f', path.join(root, 'common', 'metamcp-clean-tools.yml'));
   if (state.type === 'meta' && readLiveGlobalLink(state)) args.push('-f', path.join(root, 'common', 'metamcp-live-global.yml'));
+  if (state.type === 'meta') {
+    const peerOverlay = liveMetaPeerComposeFile(state);
+    if (peerOverlay) args.push('-f', peerOverlay);
+  }
   if (state.type === 'meta' && staging) args.push('-f', path.join(root, 'common', 'metamcp-staging.yml'));
   return [...args, ...command];
 }
 function compose(ctx, state, args, capture = false, overrides = {}) {
-  if (state.type === 'meta' && readLiveGlobalLink(state)) assertLiveGlobalNetwork(ctx, state);
+  if (state.type === 'meta') {
+    if (readLiveGlobalLink(state)) assertLiveGlobalNetwork(ctx, state);
+    assertLiveMetaPeerNetworks(ctx, state);
+  }
   return run('docker', composeArgs(ctx, state, args, overrides), { capture, env: cleanEnv(config(state)) });
 }
 function inspect(ctx, kind, name) {
@@ -546,6 +554,7 @@ function requireRunningMetaApp(ctx, state, expectedId = null, { staged = false }
     try { networks = JSON.parse(result.stdout); } catch { fail('Cannot inspect the MetaMCP-to-GLOBAL connection.'); }
     if (networks?.[link.network]?.NetworkID !== link.networkId) fail('The owned MetaMCP app is not attached to its saved GLOBAL client network.');
   }
+  assertLiveMetaPeerNetworks(ctx, state);
   return id;
 }
 function metaContainerSnapshot(ctx, state, { stopped = false } = {}) {
@@ -1040,9 +1049,11 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   try { networks = JSON.parse(networkResult.stdout); } catch { fail(`Cannot inspect app networks. ${outcome}`); }
   const names = networks && typeof networks === 'object' && !Array.isArray(networks) ? Object.keys(networks) : [];
   const link = assertLiveGlobalNetwork(ctx, state);
-  const expectedNetworks = [`${state.project}_default`, ...(link ? [link.network] : [])];
+  const peerLinks = assertLiveMetaPeerNetworks(ctx, state);
+  const expectedNetworks = [`${state.project}_default`, ...(link ? [link.network] : []), ...peerLinks.map((peer) => peer.network)];
   if (names.length !== expectedNetworks.length || expectedNetworks.some((name) => !names.includes(name)) ||
-      (link && networks[link.network]?.NetworkID !== link.networkId)) {
+      (link && networks[link.network]?.NetworkID !== link.networkId) ||
+      peerLinks.some((peer) => networks[peer.network]?.NetworkID !== peer.networkId)) {
     fail(`The app has extra or unexpected networks. Review its connection details before applying. ${outcome}`);
   }
 }
@@ -1534,11 +1545,13 @@ async function shareRegistrationFile(ctx, meta, savedMeta, registrationFile) {
 
 try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
+  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'link-metamcp', 'unlink-metamcp', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|link-metamcp|unlink-metamcp|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
   const opts = parseArgs(argv);
   if (opts.expectType && !['meta', 'global'].includes(opts.expectType)) fail('Unknown expected kit type.');
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
   if (opts.metaDir && !['link', 'unlink', 'share-global'].includes(action)) fail('--meta-dir is only valid for link/unlink/share-global.');
+  if (opts.peerDir && !['link-metamcp', 'unlink-metamcp'].includes(action)) fail('--peer-dir is only valid for link-metamcp/unlink-metamcp.');
+  if (['link-metamcp', 'unlink-metamcp'].includes(action) !== Boolean(opts.peerDir)) fail('link-metamcp/unlink-metamcp require --peer-dir.');
   if (opts.server && action !== 'logs') fail('--server is only valid for logs.');
   if (opts.registration && action !== 'share-global') fail('--registration is only valid for share-global.');
   if (opts.registrationFile && action !== 'share-registration') fail('--registration-file is only valid for share-registration.');
@@ -1556,12 +1569,20 @@ try {
   const state = isSharing ? sharingState(saved, base) : saved;
   if (opts.expectType && state.type !== opts.expectType) fail(`Expected a ${opts.expectType} project at ${base}; no Docker resource was changed.`);
   if (opts.server && state.type !== 'global') fail('--server is only available for GLOBAL logs.');
-  // Stopping, basic status and the explicit recovery path can operate without
-  // credentials; creation, start, apply and removal still validate them.
+  let peerState = null;
+  if (['link-metamcp', 'unlink-metamcp'].includes(action)) {
+    if (state.type !== 'meta') fail('MetaMCP peer links require --dir to select an independent MetaMCP.');
+    peerState = originState(path.resolve(opts.peerDir));
+    if (peerState.type !== 'meta' || peerState.project === state.project || peerState.base === state.base) {
+      fail('--peer-dir must select a different independent kit MetaMCP; no Docker resource was changed.');
+    }
+  }
+  // Stopping, status, recovery, relocation and network-only peer links can
+  // operate without credentials; lifecycle and data operations still validate them.
   let envError = null;
   if (action === 'status') {
     try { readEnv(state.base, state.type); } catch (error) { envError = error; }
-  } else if (!['stop', 'check-env', 'recover-env', 'relocate'].includes(action)) readEnv(state.base, state.type);
+  } else if (!['stop', 'check-env', 'recover-env', 'relocate', 'link-metamcp', 'unlink-metamcp'].includes(action)) readEnv(state.base, state.type);
   const ctx = dockerContext();
   if (isInit || action === 'start') await start(ctx, state);
   else if (action === 'provision-meta') {
@@ -1575,6 +1596,8 @@ try {
   else if (action === 'recover-env') await recoverMetaEnv(ctx, state);
   else if (action === 'relocate') await relocateKit(ctx, saved, base);
   else if (action === 'link' || action === 'unlink') connectLocalProjects(ctx, state, opts.metaDir, action === 'unlink');
+  else if (action === 'link-metamcp') linkMetaPeers(ctx, state, peerState);
+  else if (action === 'unlink-metamcp') unlinkMetaPeers(ctx, state, peerState);
   else if (action === 'share-global') await shareGlobalRegistration(ctx, state, saved, opts.metaDir, opts.registration);
   else if (action === 'share-registration') await shareRegistrationFile(ctx, state, saved, opts.registrationFile);
   else if (action === 'apply') {
@@ -1587,6 +1610,12 @@ try {
       compose(ctx, state, ['up', '-d', '--no-deps', '--force-recreate', '--no-build', 'gateway', 'graphiti', 'cognee']);
     }
   } else if (action === 'remove') {
+    if (state.type === 'meta' && readLiveMetaPeerLinks(state).length) {
+      const command = process.platform === 'win32'
+        ? '.\\windows\\link-metamcp.ps1 META_DIRECTORY PEER_DIRECTORY -Unlink'
+        : 'bash linux/link-metamcp.sh META_DIRECTORY PEER_DIRECTORY --unlink';
+      fail(`Disconnect every MetaMCP peer (${command}) before removing this project; containers and data were not changed.`);
+    }
     const expected = `${opts.deleteVolumes ? 'DELETE' : 'REMOVE'} ${state.project}`;
     const warning = opts.deleteVolumes
       ? `WARNING: removing containers AND ALL named volumes of ${state.project}, including database and user data. Back them up first. Files in ${state.base} remain.`

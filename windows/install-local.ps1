@@ -1,19 +1,22 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Install the native Windows LOCAL servers and local Docker Desktop MetaMCP.
+    Install the native Windows LOCAL servers and gateway.
 .DESCRIPTION
     Uses isolated, pinned runtimes under %USERPROFILE%\mcp-local. Existing
     .env, mcp-local.json, user data, and global npm/Python packages are kept.
-    MetaMCP is cloned and built into a separate Docker Desktop project.
+    The default installs only native LOCAL servers; Docker Desktop and MetaMCP
+    are optional and require the explicit -WithMetaMcp switch.
     Run from an interactive Windows user session, not as a Windows service.
 #>
 [CmdletBinding()]
 param(
     [switch]$NonInteractive,
+    # Explicitly include the legacy local Docker Desktop MetaMCP full-stack setup.
+    [switch]$WithMetaMcp,
     # Add local Docker MetaMCP to an already installed native LOCAL stack.
     [switch]$MetaMcpOnly,
-    # Install the native servers only; never install/start Docker or MetaMCP.
+    # Compatibility switch: LOCAL servers only (also the default).
     [switch]$ServersOnly,
     [switch]$InstallBuildTools,
     [switch]$SkipEverything,
@@ -183,11 +186,13 @@ Protect-PrivateDirectory (Join-Path $BaseDir 'logs')
 Protect-PrivateDirectory $Runtime
 Refresh-Path
 
-if ($MetaMcpOnly -and $ServersOnly) { throw 'Choose either MetaMcpOnly or ServersOnly.' }
+if (($MetaMcpOnly -and ($ServersOnly -or $WithMetaMcp)) -or ($ServersOnly -and $WithMetaMcp)) {
+    throw 'Choose only one of MetaMcpOnly, WithMetaMcp, or ServersOnly.'
+}
 if ($MetaMcpOnly) {
     if (-not (Test-Path -LiteralPath (Join-Path $BaseDir 'config\local-settings.json') -PathType Leaf) -or
         -not (Test-Path -LiteralPath (Join-Path $PrivateDir 'secrets.json') -PathType Leaf)) {
-        throw 'The native LOCAL stack is not initialized. Run install-local.ps1 without -MetaMcpOnly first.'
+        throw 'The native LOCAL stack is not initialized. Run install-local.ps1 first; use -WithMetaMcp if you also need the legacy local MetaMCP.'
     }
     # Do not reinstall npm/Python packages or stop an already-running gateway.
     Ensure-GitPrerequisite
@@ -204,7 +209,7 @@ Step 'Preparing the kit for updates'
 Invoke-Runner 'gateway-stop'
 
 Ensure-GitPrerequisite
-if (-not $ServersOnly) {
+if ($WithMetaMcp) {
     try { Ensure-DockerPrerequisite } catch { Fail "Docker Desktop: $($_.Exception.Message)" }
 }
 
@@ -377,35 +382,34 @@ if (-not $SkipBrowserDownload) {
 # this installer's temporary node-gyp selection.
 [Environment]::SetEnvironmentVariable('npm_config_python', $originalNpmPython, 'Process')
 [Environment]::SetEnvironmentVariable('NODE_GYP_FORCE_PYTHON', $originalNodeGypPython, 'Process')
-if ($ServersOnly) {
+if ($WithMetaMcp) {
+    Step 'Starting native LOCAL servers and explicitly requested MetaMCP'
+    try { Invoke-Runner 'start' }
+    catch { Fail "LOCAL stack: $($_.Exception.Message)" }
+} else {
     Step 'Starting native LOCAL servers only'
     try { Invoke-Runner 'gateway-start' }
     catch { Fail "LOCAL servers: $($_.Exception.Message)" }
-} else {
-    Step 'Starting LOCAL servers and legacy Docker Desktop MetaMCP'
-    # Retain the original combined workflow for existing installations.
-    try { Invoke-Runner 'start' }
-    catch { Fail "LOCAL stack: $($_.Exception.Message)" }
 }
 
 Write-KitHeader 'Windows LOCAL configuration'
 Write-KitInfo "Settings: $BaseDir\config\local-settings.json"
 Write-KitInfo "Secrets:  $PrivateDir\secrets.json (keep private)"
-if ($ServersOnly) {
-    Write-KitInfo 'No MetaMCP was installed or configured. Use install-metamcp.ps1 and connect-local.ps1 separately.'
-    Write-KitInfo 'Commands: .\windows\run-servers.ps1 status | logs | restart | stop'
-} else {
-    Write-KitInfo 'MetaMCP: register in the UI and create an API key. Shared server groups are set up automatically. Disable signup yourself in MetaMCP Settings.'
+if ($WithMetaMcp) {
+    Write-KitInfo 'MetaMCP was explicitly requested. Register in its UI, create an API key, and disable signup when setup is complete.'
     Write-KitInfo 'Commands: .\windows\run-local.ps1 status | logs | restart | stop | ports'
     Write-KitInfo 'Change existing MetaMCP ports: .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009'
+} else {
+    Write-KitInfo 'This run did not install or start Docker Desktop or MetaMCP. Existing MetaMCP containers and data were left untouched.'
+    Write-KitInfo 'Commands: .\windows\run-local.ps1 gateway-status | gateway-start | gateway-restart | gateway-stop'
 }
 Note 'Obsidian requires its Local REST API plugin and key; the server waits until configured.'
 if ($Failures.Count -gt 0) {
     Write-KitError 'Installation is incomplete. Fix the errors above and rerun this script; existing configuration and data are preserved.'
     exit 1
 }
-if ($ServersOnly) { Ok 'LOCAL servers installed. Connect them to a chosen MetaMCP separately.' }
-else { Ok 'Installation completed. Open local MetaMCP and check server-specific prerequisites as described above.' }
+if ($WithMetaMcp) { Ok 'LOCAL servers and explicitly requested local MetaMCP installation completed.' }
+else { Ok 'LOCAL servers installed. This run did not install or start MetaMCP.' }
 } finally {
     # Restore the caller's PATH, node-gyp Python and TLS protocol settings.
     [Environment]::SetEnvironmentVariable('Path', $originalPath, 'Process')
