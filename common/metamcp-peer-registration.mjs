@@ -229,10 +229,10 @@ async function login(target, email, password) {
   return { client, userId: session.body.user.id };
 }
 async function requireAdmin(client) {
-  let result;
-  try { result = await client.trpc('config.getAllConfigs'); }
+  let body;
+  try { ({ body } = await client.request(`${client.origin}/trpc/frontend.config.getAllConfigs`, { headers: { cookie: client.cookie } })); }
   catch { fail('Cannot confirm administrator access to MetaMCP B; no records were changed.'); }
-  let value = result;
+  let value = body?.result?.data;
   if (value && !Array.isArray(value) && typeof value === 'object' && Object.hasOwn(value, 'json')) value = value.json;
   if (!Array.isArray(value)) fail('Cannot confirm MetaMCP B administrator access or API version; no records were changed.');
 }

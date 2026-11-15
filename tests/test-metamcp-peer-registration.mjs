@@ -56,7 +56,7 @@ async function fakeMetaApi() {
       const input = req.method === 'POST' ? await body(req) :
         (url.searchParams.has('input') ? JSON.parse(url.searchParams.get('input')) : undefined);
       db.calls.push({ procedure, input });
-      if (procedure === 'config.getAllConfigs') return trpc(res, []);
+      if (procedure === 'config.getAllConfigs') return send(res, { result: { data: [] } });
       if (procedure === 'mcpServers.list') return trpc(res, db.servers);
       if (procedure === 'namespaces.list') return trpc(res, db.namespaces);
       if (procedure === 'endpoints.list') return trpc(res, db.endpoints);
