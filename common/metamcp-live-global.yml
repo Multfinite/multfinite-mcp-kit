@@ -1,0 +1,11 @@
+# The external network remains owned by the existing GLOBAL project. Keeping
+# this in the MetaMCP Compose model preserves its link on app recreation.
+services:
+  app:
+    networks:
+      default: {}
+      mcpkit_global_client: {}
+networks:
+  mcpkit_global_client:
+    external: true
+    name: ${MCPKIT_GLOBAL_CLIENT_NETWORK}

@@ -3,12 +3,16 @@
 // The legacy installations are deliberately not discovered or migrated.
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import net from 'node:net';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GLOBAL_SERVER_NAMES, LOCAL_SERVER_NAMES, LEGACY_GLOBAL_GROUPS, LEGACY_GLOBAL_GROUP_NAMES, legacyLocalGroups, LEGACY_LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
+import { ensurePatchedSource, LAN_PATCH_VERSION, CLEAN_TOOLS_PATCH_VERSION } from './metamcp-lan-source.mjs';
+import { readLiveGlobalLink, assertLiveGlobalNetwork } from './live-global.mjs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const revision = '05818ec2767b946f98d280ae9cefa401f0362d62';
@@ -19,8 +23,9 @@ function parseArgs(args) {
   const result = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    if (arg === '--delete-volumes') { result.deleteVolumes = true; continue; }
-    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--meta-dir': 'metaDir', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile' }[arg];
+    const flag = { '--delete-volumes': 'deleteVolumes', '--staged': 'staged', '--fresh': 'fresh', '--allow-insecure-lan': 'allowInsecureLan', '--clean-tools': 'cleanTools' }[arg];
+    if (flag) { if (result[flag]) fail(`Duplicate argument: ${arg}`); result[flag] = true; continue; }
+    const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--lan-ip': 'lanIp', '--admin-email': 'adminEmail', '--meta-dir': 'metaDir', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile' }[arg];
     if (!key || i + 1 >= args.length || args[i + 1].startsWith('--') || result[key] !== undefined) fail(`Invalid argument: ${arg}`);
     result[key] = args[++i];
   }
@@ -35,21 +40,35 @@ function validPort(value) {
   if (!/^\d{1,5}$/.test(String(value)) || !Number.isInteger(port) || port < 1 || port > 65535) fail('Port must be an integer from 1 to 65535.');
   return port;
 }
-function validOrigin(value) {
+function privateLanIp(value) {
+  if (typeof value !== 'string' || net.isIP(value) !== 4) fail('LAN IP must be a literal private IPv4 address.');
+  const [a, b] = value.split('.').map(Number);
+  if (!(a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168))) fail('LAN IP must be in an RFC 1918 private IPv4 range.');
+  return value;
+}
+function lanOrigins(state) {
+  return [`http://${state.lanIp}:${state.port}`, `http://localhost:${state.port}`, `http://127.0.0.1:${state.port}`].join(',');
+}
+function trustedOriginPrefix(state, appUrl) {
+  return state.lanIp ? `${lanOrigins(state)},` : `${appUrl},`;
+}
+function validOrigin(value, state = null) {
   let u;
   try { u = new URL(value); } catch { fail('APP_URL must be an absolute http(s) origin.'); }
   if (!['http:', 'https:'].includes(u.protocol) || u.username || u.password || u.pathname !== '/' || u.search || u.hash) fail('APP_URL must contain only scheme, host and optional port.');
-  if (u.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) fail('Use HTTPS for a non-loopback APP_URL. Configure the reverse proxy separately.');
+  if (state?.lanIp) {
+    if (u.origin !== `http://${state.lanIp}:${state.port}`) fail('The opt-in LAN instance must keep its configured LAN IP and port as APP_URL.');
+  } else if (u.protocol === 'http:' && !['localhost', '127.0.0.1', '[::1]'].includes(u.hostname)) fail('Use HTTPS for a non-loopback APP_URL. Configure the reverse proxy separately.');
   return u.origin;
 }
-function parseEnvOrigin(raw) {
+function parseEnvOrigin(raw, state = null) {
   // Do not interpret shell syntax, Compose interpolation, comments or escapes.
   // Accept a literal URL with optional matching single or double quotes.
   if (typeof raw !== 'string' || raw !== raw.trim()) fail('APP_URL in the private .env must be a literal origin without surrounding spaces.');
   let value = raw;
   if ((raw.startsWith("'") && raw.endsWith("'")) || (raw.startsWith('"') && raw.endsWith('"'))) value = raw.slice(1, -1);
   if (!value || /[\s'"\\$#`,]/.test(value)) fail('APP_URL in the private .env must be a literal origin without interpolation or comments.');
-  return validOrigin(value);
+  return validOrigin(value, state);
 }
 function cleanEnv(extra = {}) {
   const env = { ...process.env };
@@ -91,8 +110,16 @@ function originState(base, { allowRelocated = false } = {}) {
   const s = JSON.parse(fs.readFileSync(f, 'utf8'));
   if (!s || typeof s !== 'object' || Array.isArray(s) || s.version !== 1 || !['meta', 'global'].includes(s.type) ||
       typeof s.id !== 'string' || !/^[a-f0-9]{16}$/.test(s.id) || s.project !== `mcpkit-${s.type}-${s.id}` ||
-      typeof s.base !== 'string' || !path.isAbsolute(s.base) || path.resolve(s.base) !== s.base || validPort(s.port) !== s.port ||
-      (s.type === 'meta' && validOrigin(s.appUrl) !== s.appUrl)) fail(`Invalid kit state in ${f}; no Docker resource was changed.`);
+      typeof s.base !== 'string' || !path.isAbsolute(s.base) || path.resolve(s.base) !== s.base || validPort(s.port) !== s.port) {
+    fail(`Invalid kit state in ${f}; no Docker resource was changed.`);
+  }
+  if (s.lanIp !== undefined && (s.type !== 'meta' || privateLanIp(s.lanIp) !== s.lanIp || s.lanPatch !== LAN_PATCH_VERSION)) {
+    fail(`Invalid or unsupported LAN state in ${f}; no Docker resource was changed.`);
+  }
+  if (s.cleanTools !== undefined && (s.type !== 'meta' || s.cleanTools !== true || s.cleanToolsPatch !== CLEAN_TOOLS_PATCH_VERSION)) {
+    fail(`Invalid or unsupported clean-tool state in ${f}; no Docker resource was changed.`);
+  }
+  if (s.type === 'meta' && validOrigin(s.appUrl, s) !== s.appUrl) fail(`Invalid kit origin in ${f}; no Docker resource was changed.`);
   if (!allowRelocated && s.base !== base) {
     fail(`Kit state in ${f} refers to ${s.base}, not ${base}. On Linux, use linux/relocate-kit.sh after reviewing the move; no Docker resource was changed.`);
   }
@@ -126,37 +153,59 @@ function readEnv(base, type, { ignoreAppUrl = false } = {}) {
     }
   }
   if (type === 'global' && values.MCPKIT_GATEWAY_KEY === values.MCPKIT_CONTROL_KEY) fail('Gateway and control credentials must differ.');
-  if (type === 'meta' && !ignoreAppUrl && Object.hasOwn(values, 'APP_URL')) parseEnvOrigin(values.APP_URL);
+  if (type === 'meta' && !ignoreAppUrl && Object.hasOwn(values, 'APP_URL')) {
+    parseEnvOrigin(values.APP_URL, originState(base, { allowRelocated: true }));
+  }
   return values;
 }
 function configuredMetaOrigin(state) {
   const values = readEnv(state.base, 'meta');
   // Old installations did not have APP_URL in .env. Preserve their initial
   // origin unless the user explicitly adds the new configuration entry.
-  return Object.hasOwn(values, 'APP_URL') ? parseEnvOrigin(values.APP_URL) : state.appUrl;
+  return Object.hasOwn(values, 'APP_URL') ? parseEnvOrigin(values.APP_URL, state) : state.appUrl;
+}
+function validAdminEmail(value) {
+  if (typeof value !== 'string' || value.length > 254 || !/^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$/i.test(value)) fail('Enter one plain administrator email address.');
+  return value.toLowerCase();
 }
 function initialize(type, opts) {
   const base = path.resolve(opts.dir || '');
   if (!opts.dir) fail('Pass --dir for the new independent installation.');
+  if (opts.lanIp) {
+    if (type !== 'meta' || process.platform !== 'linux' || !opts.allowInsecureLan) fail('The Linux LAN mode requires --allow-insecure-lan. HTTP exposes credentials on the network.');
+    privateLanIp(opts.lanIp);
+    const local = Object.values(os.networkInterfaces()).flat().some((item) => item && item.family === 'IPv4' && item.address === opts.lanIp);
+    if (!local) fail(`LAN address ${opts.lanIp} is not assigned to this host.`);
+  } else if (opts.allowInsecureLan) fail('--allow-insecure-lan requires --lan-ip.');
+  if (opts.staged && (type !== 'meta' || !opts.adminEmail)) fail('A staged MetaMCP installation requires --admin-email.');
+  const adminEmail = opts.staged ? validAdminEmail(opts.adminEmail) : '';
   if (fs.existsSync(base) && fs.lstatSync(base).isSymbolicLink()) fail('The installation directory must not itself be a symlink.');
   fs.mkdirSync(base, { recursive: true, mode: 0o700 });
   const existing = fs.readdirSync(base);
   if (existing.includes('.mcpkit') && fs.existsSync(path.join(base, '.mcpkit', 'state.json'))) {
     const state = originState(base);
     if (state.type !== type) fail('This directory belongs to a different kind of installation.');
+    if (opts.fresh) fail(`A fresh install refuses an existing instance: ${base}`);
+    if (opts.cleanTools && !state.cleanTools) fail('Clean tool names cannot be enabled on an existing instance through init; its image and data were not changed.');
+    if (opts.staged && (!setupMarker(state) || validPort(opts.port) !== state.port || (opts.lanIp || '') !== (state.lanIp || '') || Boolean(opts.cleanTools) !== Boolean(state.cleanTools) || setupMarker(state).adminEmail !== adminEmail || (opts.appUrl && parseEnvOrigin(opts.appUrl, state) !== state.appUrl))) {
+      fail('The existing setup does not match the requested staged instance; it was preserved.');
+    }
     readEnv(base, type);
     console.log(`Existing ${type} installation preserved; port ${state.port} remains unchanged.`);
     return state;
   }
   if (existing.length) fail(`Directory is not empty and has no matching kit state; nothing was overwritten: ${base}`);
   const port = validPort(opts.port); // An explicit port is mandatory for every new instance.
-  const appUrl = type === 'meta' ? parseEnvOrigin(opts.appUrl || `http://localhost:${port}`) : '';
+  const policy = opts.lanIp ? { lanIp: opts.lanIp, port } : null;
+  const appUrl = type === 'meta' ? parseEnvOrigin(opts.appUrl || (opts.lanIp ? `http://${opts.lanIp}:${port}` : `http://localhost:${port}`), policy) : '';
   const id = crypto.randomBytes(8).toString('hex');
-  const state = { version: 1, type, id, project: `mcpkit-${type}-${id}`, base, port, ...(type === 'meta' ? { appUrl, revision } : {}) };
+  const state = { version: 1, type, id, project: `mcpkit-${type}-${id}`, base, port, ...(type === 'meta' ? { appUrl, revision } : {}),
+    ...(opts.lanIp ? { lanIp: opts.lanIp, lanPatch: LAN_PATCH_VERSION } : {}),
+    ...(opts.cleanTools ? { cleanTools: true, cleanToolsPatch: CLEAN_TOOLS_PATCH_VERSION } : {}) };
   const priv = path.join(base, '.mcpkit');
   fs.mkdirSync(priv, { mode: 0o700 });
   const env = type === 'meta'
-    ? `POSTGRES_PASSWORD=${random()}\nBETTER_AUTH_SECRET=${random()}\n# Public origin; edit this and run apply to change an existing container.\nAPP_URL='${appUrl}'\n# Configure an admin allowlist only after those accounts exist.\nMETAMCP_ADMIN_EMAILS=\n# APP_URL is always trusted; add only other origins you explicitly trust.\nEXTRA_TRUSTED_ORIGINS=\n`
+    ? `POSTGRES_PASSWORD=${random()}\nBETTER_AUTH_SECRET=${random()}\n# Public origin; edit this and run apply to change an existing container.\nAPP_URL='${appUrl}'\n# For a staged fresh install, the administrator is created before publication.\nMETAMCP_ADMIN_EMAILS=${adminEmail}\n# APP_URL is always trusted; add only other origins you explicitly trust.\nEXTRA_TRUSTED_ORIGINS=\n`
     : `MCPKIT_GATEWAY_KEY=${random()}\nMCPKIT_CONTROL_KEY=${random()}\nNEO4J_PASSWORD=${random()}\n# Edit these values, then run apply. Keep this file private.\nLLM_API_KEY=\nLLM_API_ENDPOINT=https://api.openai.com/v1\nLLM_API_MODEL=gpt-4o-mini\nLLM_API_PROVIDER=openai\nEMBEDDING_MODEL=text-embedding-3-small\nEMBEDDING_DIMENSIONS=1536\nCONTEXT7_API_KEY=\n`;
   privateWrite(path.join(priv, '.env'), env);
   if (type === 'global') {
@@ -171,9 +220,32 @@ function initialize(type, opts) {
       ['linux/services/node-mcp/Dockerfile', path.join(nodeBuild, 'Dockerfile')],
     ]) fs.copyFileSync(path.join(root, source), dest, fs.constants.COPYFILE_EXCL);
   }
+  if (opts.staged) privateWrite(path.join(priv, 'first-setup.json'), `${JSON.stringify({ version: 1, project: state.project, adminEmail }, null, 2)}\n`);
   privateWrite(path.join(priv, 'state.json'), `${JSON.stringify(state, null, 2)}\n`);
   console.log(`Created ${type} state at ${base}. Docker project: ${state.project}.`);
   return state;
+}
+function setupMarker(state) {
+  if (state.type !== 'meta') return null;
+  const file = path.join(state.base, '.mcpkit', 'first-setup.json');
+  if (!fs.existsSync(file)) return null;
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) fail('Invalid first-setup marker; no container was changed.');
+  let value;
+  try { value = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { fail('Invalid first-setup marker; no container was changed.'); }
+  if (value.version !== 1 || value.project !== state.project || validAdminEmail(value.adminEmail) !== value.adminEmail) fail('Invalid first-setup marker; no container was changed.');
+  return value;
+}
+function publicationMarker(state) {
+  const file = path.join(state.base, '.mcpkit', 'publication-ready.json');
+  if (!fs.existsSync(file)) return null;
+  const stat = fs.lstatSync(file);
+  if (!stat.isFile() || stat.isSymbolicLink()) fail('Invalid publication marker; inspect the installation.');
+  let value;
+  try { value = JSON.parse(fs.readFileSync(file, 'utf8')); } catch { fail('Invalid publication marker; inspect the installation.'); }
+  const setup = setupMarker(state);
+  if (!setup || value.version !== 1 || value.project !== state.project || value.adminEmail !== setup.adminEmail) fail('Publication marker does not match this staged instance.');
+  return value;
 }
 function config(state, { metaOriginOverride } = {}) {
   const priv = path.join(state.base, '.mcpkit');
@@ -185,19 +257,27 @@ function config(state, { metaOriginOverride } = {}) {
   };
   if (state.type === 'meta') {
     Object.assign(common, { MCPKIT_SOURCE: path.join(state.base, 'metamcp'), MCPKIT_APP_URL: metaOriginOverride ?? configuredMetaOrigin(state) });
+    if (state.lanIp) Object.assign(common, { MCPKIT_LAN_IP: state.lanIp, MCPKIT_LAN_ORIGINS: lanOrigins(state) });
+    const link = readLiveGlobalLink(state);
+    if (link) common.MCPKIT_GLOBAL_CLIENT_NETWORK = link.network;
   } else {
     Object.assign(common, { MCPKIT_BUILD_DIR: path.join(priv, 'build'), MCPKIT_NODE_BUILD_DIR: path.join(priv, 'node-build'), MCPKIT_NODE_IMAGE: `${state.project}-node:1` });
   }
   return common;
 }
-function composeArgs(ctx, state, command) {
+function composeArgs(ctx, state, command, { staging = Boolean(setupMarker(state)) } = {}) {
   const args = ['--context', ctx, 'compose', '--project-name', state.project, '--project-directory', state.base,
     '--env-file', path.join(state.base, '.mcpkit', '.env'), '-f', path.join(root, 'common', state.type === 'meta' ? 'metamcp-compose.yml' : 'global-compose.yml')];
   if (state.type === 'meta' && process.platform === 'linux') args.push('-f', path.join(root, 'common', 'metamcp-linux.yml'));
+  if (state.type === 'meta' && state.lanIp) args.push('-f', path.join(root, 'common', 'metamcp-lan.yml'));
+  if (state.type === 'meta' && state.cleanTools) args.push('-f', path.join(root, 'common', 'metamcp-clean-tools.yml'));
+  if (state.type === 'meta' && readLiveGlobalLink(state)) args.push('-f', path.join(root, 'common', 'metamcp-live-global.yml'));
+  if (state.type === 'meta' && staging) args.push('-f', path.join(root, 'common', 'metamcp-staging.yml'));
   return [...args, ...command];
 }
-function compose(ctx, state, args, capture = false) {
-  return run('docker', composeArgs(ctx, state, args), { capture, env: cleanEnv(config(state)) });
+function compose(ctx, state, args, capture = false, overrides = {}) {
+  if (state.type === 'meta' && readLiveGlobalLink(state)) assertLiveGlobalNetwork(ctx, state);
+  return run('docker', composeArgs(ctx, state, args, overrides), { capture, env: cleanEnv(config(state)) });
 }
 function inspect(ctx, kind, name) {
   const format = kind === 'container' || kind === 'image' ? '{{json .Config.Labels}}' : '{{json .Labels}}';
@@ -307,6 +387,7 @@ function ensureSource(state) {
   if (!fs.existsSync(marker) || fs.readFileSync(marker, 'utf8').trim() !== state.id) fail('MetaMCP clone is not owned by this installation. It was preserved.');
   const actual = run('git', ['-C', source, 'rev-parse', 'HEAD'], { capture: true }).stdout.trim();
   if (actual !== revision || state.revision !== revision) fail('MetaMCP clone revision differs from the saved revision. No build was attempted.');
+  if (state.lanIp || state.cleanTools) ensurePatchedSource(source, { lan: Boolean(state.lanIp), cleanTools: Boolean(state.cleanTools) });
   return source;
 }
 function ensureImages(ctx, state) {
@@ -315,10 +396,17 @@ function ensureImages(ctx, state) {
   for (const [image, service] of images) {
     const labels = inspect(ctx, 'image', image);
     checkLabel(labels, state, 'image', image);
-    if (labels) continue;
+    if (labels) {
+      if (state.lanIp && labels['com.multfinite.mcpkit.lan-patch'] !== LAN_PATCH_VERSION) fail('The existing LAN image does not have the expected source patch; no image was replaced.');
+      if (state.cleanTools && labels['com.multfinite.mcpkit.clean-tools-patch'] !== CLEAN_TOOLS_PATCH_VERSION) fail('The existing image does not have the expected clean-tool patch; no image was replaced.');
+      continue;
+    }
     if (state.type === 'meta' && !dirtyChecked) {
-      const status = run('git', ['-C', path.join(state.base, 'metamcp'), 'status', '--porcelain', '--untracked-files=all'], { capture: true }).stdout;
-      if (status.trim()) fail('MetaMCP clone has local/untracked files. They were not sent to Docker; restore an owned clean clone before building.');
+      if (state.lanIp || state.cleanTools) ensurePatchedSource(path.join(state.base, 'metamcp'), { lan: Boolean(state.lanIp), cleanTools: Boolean(state.cleanTools) });
+      else {
+        const status = run('git', ['-C', path.join(state.base, 'metamcp'), 'status', '--porcelain', '--untracked-files=all'], { capture: true }).stdout;
+        if (status.trim()) fail('MetaMCP clone has local/untracked files. They were not sent to Docker; restore an owned clean clone before building.');
+      }
       dirtyChecked = true;
     }
     console.log(`Building the isolated ${service} image; this can take a while.`);
@@ -326,6 +414,8 @@ function ensureImages(ctx, state) {
     const built = inspect(ctx, 'image', image);
     if (!built) fail(`Built image is missing: ${image}`);
     checkLabel(built, state, 'image', image);
+    if (state.lanIp && built['com.multfinite.mcpkit.lan-patch'] !== LAN_PATCH_VERSION) fail('Built LAN image lacks its expected patch label.');
+    if (state.cleanTools && built['com.multfinite.mcpkit.clean-tools-patch'] !== CLEAN_TOOLS_PATCH_VERSION) fail('Built image lacks its expected clean-tool patch label.');
   }
 }
 async function waitMetaHealth(state) {
@@ -342,21 +432,39 @@ async function waitMetaHealth(state) {
   }
   fail('MetaMCP did not pass the local health check within 120 seconds. Inspect status and logs locally before retrying.');
 }
+async function waitStagedMetaHealth(ctx, state) {
+  const id = ownedMetaService(ctx, state, 'app');
+  const deadline = Date.now() + 120_000;
+  while (Date.now() < deadline) {
+    const result = run('docker', ['--context', ctx, 'exec', id, 'curl', '-fsS', '--max-time', '2', 'http://127.0.0.1:12008/health'], { capture: true, allowFailure: true });
+    if (result.status === 0) { requireRunningMetaApp(ctx, state, id, { staged: true }); return; }
+    await delay(1000);
+  }
+  fail('Staged MetaMCP did not become healthy. It has not been intentionally published; inspect its status before retrying.');
+}
 async function start(ctx, state) {
+  const staged = Boolean(setupMarker(state));
   readEnv(state.base, state.type);
   checkResources(ctx, state);
   if (state.type === 'meta') ensureSource(state);
   ensureImages(ctx, state);
   checkResources(ctx, state);
-  compose(ctx, state, ['up', '-d', '--no-recreate', '--no-build']);
+  // Staging resets all host port bindings before the app is started.
+  compose(ctx, state, staged ? ['up', '-d', '--no-recreate', '--no-build', 'postgres', 'app'] : ['up', '-d', '--no-recreate', '--no-build']);
   if (state.type === 'meta') {
+    if (staged) {
+      await waitStagedMetaHealth(ctx, state);
+      console.log('MetaMCP is staged without a host port. Create the administrator and close registration before activation.');
+      return;
+    }
     await waitMetaHealth(state);
     const id = requireRunningMetaApp(ctx, state);
     const currentOrigin = containerEnvironment(ctx, id).APP_URL;
-    if (typeof currentOrigin !== 'string' || validOrigin(currentOrigin) !== currentOrigin) fail('The running app has an unexpected APP_URL; review its configuration.');
+    if (typeof currentOrigin !== 'string' || validOrigin(currentOrigin, state) !== currentOrigin) fail('The running app has an unexpected APP_URL; review its configuration.');
     console.log(`MetaMCP passed its local health check on port ${state.port}. Current app origin: ${currentOrigin}`);
     if (currentOrigin !== configuredMetaOrigin(state)) console.warn('APP_URL in the private .env differs from the running container; use apply after reviewing its warnings.');
-    if (currentOrigin !== `http://localhost:${state.port}`) console.log('For an external origin, configure its HTTPS reverse proxy before signing in.');
+    if (state.lanIp) console.log(`LAN HTTP is enabled on ${state.lanIp}:${state.port}; passwords and keys are not encrypted on that network.`);
+    else if (currentOrigin !== `http://localhost:${state.port}`) console.log('For an external origin, configure its HTTPS reverse proxy before signing in.');
     console.log('Create your own user and API key in the UI. Close signup yourself; an empty admin allowlist treats every signed-in user as an admin.');
   } else {
     console.log(`GLOBAL gateway is bound to 127.0.0.1:${state.port}. Servers may still be starting or waiting for credentials.`);
@@ -409,7 +517,7 @@ function containerEnvironment(ctx, id) {
   const result = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Config.Env}}', id], { capture: true });
   return dockerEnvironment(result.stdout, 'container');
 }
-function requireRunningMetaApp(ctx, state, expectedId = null) {
+function requireRunningMetaApp(ctx, state, expectedId = null, { staged = false } = {}) {
   // The host health endpoint alone could be served by a different process.
   const id = ownedMetaService(ctx, state, 'app');
   if (expectedId && id !== expectedId) fail('The MetaMCP app container changed during the health check; inspect the project state.');
@@ -418,9 +526,25 @@ function requireRunningMetaApp(ctx, state, expectedId = null) {
   let ports;
   try { ports = JSON.parse(result.stdout); } catch { fail('Cannot inspect active app port bindings.'); }
   const published = ports && typeof ports === 'object' && !Array.isArray(ports) ? ports['12008/tcp'] : null;
-  if (running !== 'true' || !Array.isArray(published) || published.length !== 1 ||
-      published[0]?.HostIp !== '127.0.0.1' || published[0]?.HostPort !== String(state.port)) {
-    fail('The owned MetaMCP app is not running on its expected loopback port; inspect the project state.');
+  if (staged) {
+    if (running !== 'true' || !ports || Object.values(ports).some((binding) => binding !== null && (!Array.isArray(binding) || binding.length))) {
+      fail('The staged MetaMCP unexpectedly has a published port; inspect it before continuing.');
+    }
+  } else {
+    const hosts = state.lanIp ? ['127.0.0.1', state.lanIp] : ['127.0.0.1'];
+    if (running !== 'true' || !Array.isArray(published) || published.length !== hosts.length ||
+        published.some((item) => item?.HostPort !== String(state.port) || !hosts.includes(item.HostIp)) ||
+        hosts.some((host) => published.filter((item) => item?.HostIp === host).length !== 1) ||
+        Object.entries(ports).some(([port, binding]) => port !== '12008/tcp' && binding !== null && (!Array.isArray(binding) || binding.length))) {
+      fail('The owned MetaMCP app is not running on exactly its expected host bindings; inspect the project state.');
+    }
+  }
+  const link = assertLiveGlobalNetwork(ctx, state);
+  if (link) {
+    const result = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .NetworkSettings.Networks}}', id], { capture: true });
+    let networks;
+    try { networks = JSON.parse(result.stdout); } catch { fail('Cannot inspect the MetaMCP-to-GLOBAL connection.'); }
+    if (networks?.[link.network]?.NetworkID !== link.networkId) fail('The owned MetaMCP app is not attached to its saved GLOBAL client network.');
   }
   return id;
 }
@@ -440,10 +564,13 @@ function metaContainerSnapshot(ctx, state, { stopped = false } = {}) {
   }
   const appUrl = app.APP_URL;
   let usableAppUrl = false;
-  try { usableAppUrl = parseEnvOrigin(appUrl) === appUrl; } catch { /* reject an unexpected container URL below */ }
+  try { usableAppUrl = parseEnvOrigin(appUrl, state) === appUrl; } catch { /* reject an unexpected container URL below */ }
+  const trustedPrefix = usableAppUrl ? trustedOriginPrefix(state, appUrl) : '';
   if (!usableAppUrl || app.NEXT_PUBLIC_APP_URL !== appUrl ||
       typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
-      !app.EXTRA_TRUSTED_ORIGINS.startsWith(`${appUrl},`)) {
+      !app.EXTRA_TRUSTED_ORIGINS.startsWith(trustedPrefix) ||
+      (state.lanIp && (app.MCPKIT_MULTI_AUTH_ORIGINS !== lanOrigins(state) || app.MCPKIT_COOKIE_PREFIX !== `mcpkit-${state.id}` || app.NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN !== 'true')) ||
+      (state.cleanTools && app.MCPKIT_CLEAN_TOOL_NAMES !== 'true')) {
     fail('Container MetaMCP URL or admin settings are unexpected; inspect the project state.');
   }
   const mountsResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', postgresId], { capture: true });
@@ -459,7 +586,84 @@ function metaContainerSnapshot(ctx, state, { stopped = false } = {}) {
   checkLabel(labels, state, 'volume', volume);
   if (labels['com.docker.compose.volume'] !== 'postgres_data') fail('Unexpected PostgreSQL volume identity; no file was changed.');
   return { appId, postgresId, password, secret, appUrl, admins: app.METAMCP_ADMIN_EMAILS,
-    extraOrigins: app.EXTRA_TRUSTED_ORIGINS.slice(appUrl.length + 1) };
+    extraOrigins: app.EXTRA_TRUSTED_ORIGINS.slice(trustedPrefix.length) };
+}
+function provisionStagedMeta(ctx, state) {
+  const marker = setupMarker(state);
+  if (!marker) fail('Provisioning is only available for an unpublished staged MetaMCP.');
+  const id = requireRunningMetaApp(ctx, state, null, { staged: true });
+  const snapshot = metaContainerSnapshot(ctx, state);
+  if (snapshot.appId !== id || snapshot.admins !== marker.adminEmail || snapshot.appUrl !== configuredMetaOrigin(state)) {
+    fail('Staged container or administrator settings changed; no account was created.');
+  }
+  let input;
+  try { input = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { fail('Expected private provisioning input on stdin.'); }
+  if (input.email !== marker.adminEmail || typeof input.password !== 'string' || input.password.length < 12 || input.password.length > 128) fail('Invalid provisioning credentials.');
+  const script = fs.readFileSync(path.join(root, 'common', 'metamcp-provision.mjs'), 'utf8');
+  const result = spawnSync('docker', ['--context', ctx, 'exec', '-i', id, 'node', '--input-type=module', '-e', script], {
+    env: cleanEnv(), input: JSON.stringify({ origin: snapshot.appUrl, email: input.email, password: input.password }),
+    encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 120000, maxBuffer: 1024 * 1024, windowsHide: true,
+  });
+  if (result.error || result.status !== 0) fail(`Administrator provisioning did not finish: ${(result.stderr || '').trim().slice(-500) || 'inspect the staged instance'}`);
+  let provisioned;
+  try { provisioned = JSON.parse(result.stdout); } catch { fail('Administrator provisioning returned an invalid result.'); }
+  if (typeof provisioned.userId !== 'string' || !provisioned.userId || !/^sk_mt_[A-Za-z0-9]{64}$/.test(provisioned.apiKey || '')) fail('Administrator provisioning did not return a valid private client key.');
+  const file = path.join(state.base, '.mcpkit', 'client-api-key');
+  if (fs.existsSync(file)) {
+    const stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || fs.readFileSync(file, 'utf8').trim() !== provisioned.apiKey) fail('An existing client key file differs; it was not overwritten.');
+  } else privateWrite(file, `${provisioned.apiKey}\n`);
+  console.log(`Administrator created and UI/SSO signup closed. Private client API key: ${file}`);
+}
+async function activateStagedMeta(ctx, state) {
+  const marker = setupMarker(state);
+  if (!marker) fail('This MetaMCP is not in first-setup mode.');
+  const appId = ownedMetaService(ctx, state, 'app');
+  const portsText = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .NetworkSettings.Ports}}', appId], { capture: true }).stdout;
+  let ports;
+  try { ports = JSON.parse(portsText); } catch { fail('Cannot inspect staged app bindings.'); }
+  if (!ports || typeof ports !== 'object' || Array.isArray(ports)) fail('Unexpected staged app bindings.');
+  const alreadyPublished = Object.values(ports).some((binding) => binding !== null && (!Array.isArray(binding) || binding.length));
+  if (alreadyPublished && !publicationMarker(state)) fail('An app was published before the ready marker; inspect it manually.');
+  const id = requireRunningMetaApp(ctx, state, appId, { staged: !alreadyPublished });
+  const snapshot = metaContainerSnapshot(ctx, state);
+  if (snapshot.appId !== id || snapshot.admins !== marker.adminEmail || snapshot.appUrl !== configuredMetaOrigin(state)) fail('Staged settings changed; no container was published.');
+  const keyFile = path.join(state.base, '.mcpkit', 'client-api-key');
+  if (!fs.existsSync(keyFile) || !fs.lstatSync(keyFile).isFile() || fs.lstatSync(keyFile).isSymbolicLink()) {
+    fail('The private client API key is missing; complete provisioning before publication.');
+  }
+  const key = fs.readFileSync(keyFile, 'utf8').trim();
+  if (!/^sk_mt_[A-Za-z0-9]{64}$/.test(key)) fail('The private client API key is invalid; nothing was published.');
+  // The key has a restricted alphabet and is sent over stdin to the owned
+  // database container; it never appears in process arguments or output.
+  const sql = `SELECT json_build_object('emails', (SELECT coalesce(json_agg(lower(email)), '[]'::json) FROM users), 'accounts', (SELECT count(*) FROM accounts JOIN users ON users.id = accounts.user_id WHERE provider_id = 'credential' AND account_id = users.id AND password IS NOT NULL), 'keys', (SELECT count(*) FROM api_keys JOIN users ON users.id = api_keys.user_id WHERE api_keys.name = 'mcpkit-client' AND api_keys.key = '${key}' AND api_keys.is_active), 'ui', (SELECT value FROM config WHERE id = 'DISABLE_SIGNUP'), 'sso', (SELECT value FROM config WHERE id = 'DISABLE_SSO_SIGNUP'))::text;`;
+  const cmd = 'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql -X -qAt -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"';
+  const query = spawnSync('docker', ['--context', ctx, 'exec', '-i', snapshot.postgresId, 'sh', '-c', cmd], {
+    env: cleanEnv(), input: sql, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true,
+  });
+  let checked;
+  try { if (query.error || query.status !== 0) throw new Error(); checked = JSON.parse(query.stdout.trim()); } catch { fail('Cannot verify staged account and registration settings; nothing was published.'); }
+  if (!Array.isArray(checked.emails) || checked.emails.length !== 1 || checked.emails[0] !== marker.adminEmail || Number(checked.accounts) !== 1 || Number(checked.keys) !== 1 || checked.ui !== 'true' || checked.sso !== 'true') {
+    fail('Staged account or registration settings are not safe for publication; nothing was published.');
+  }
+  const again = metaContainerSnapshot(ctx, state);
+  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) if (again[key] !== snapshot[key]) fail('Staged container settings changed; nothing was published.');
+  requireRunningMetaApp(ctx, state, id, { staged: !alreadyPublished });
+  const readyFile = path.join(state.base, '.mcpkit', 'publication-ready.json');
+  if (!publicationMarker(state)) privateWrite(readyFile, `${JSON.stringify({ version: 1, project: state.project, adminEmail: marker.adminEmail }, null, 2)}\n`);
+  if (!alreadyPublished) {
+    try { compose(ctx, state, ['up', '-d', '--no-deps', '--force-recreate', '--no-build', 'app'], false, { staging: false }); }
+    catch (error) { console.error('Publication may have started. Account and closed registration were checked, but inspect status before retrying.'); throw error; }
+  }
+  try {
+    await waitMetaHealth(state);
+    requireRunningMetaApp(ctx, state);
+    const after = metaContainerSnapshot(ctx, state);
+    if (after.postgresId !== snapshot.postgresId || after.password !== snapshot.password || after.secret !== snapshot.secret || after.appUrl !== snapshot.appUrl || after.admins !== snapshot.admins) fail('Published app configuration is unexpected.');
+    fs.unlinkSync(path.join(state.base, '.mcpkit', 'first-setup.json'));
+    fs.unlinkSync(readyFile);
+  } catch (error) { console.error('Publication may have completed; inspect the instance before retrying.'); throw error; }
+  console.log(`MetaMCP activated: ${state.appUrl}. Registration remains closed.`);
 }
 function checkMetaEnv(ctx, state) {
   if (state.type !== 'meta') fail('check-env is only available for an independent MetaMCP.');
@@ -692,11 +896,14 @@ function renderedMetaSettings(ctx, state, envValues) {
   const app = renderedRuntimeEnvironment(rendered, 'app');
   const postgres = renderedRuntimeEnvironment(rendered, 'postgres');
   const appUrl = configuredMetaOrigin(state);
+  const trustedPrefix = trustedOriginPrefix(state, appUrl);
   if (!app || !postgres || app.APP_URL !== appUrl || app.NEXT_PUBLIC_APP_URL !== appUrl ||
       app.POSTGRES_PASSWORD !== envValues.POSTGRES_PASSWORD || postgres.POSTGRES_PASSWORD !== envValues.POSTGRES_PASSWORD ||
       app.BETTER_AUTH_SECRET !== envValues.BETTER_AUTH_SECRET ||
       typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
-      !app.EXTRA_TRUSTED_ORIGINS.startsWith(`${appUrl},`)) {
+      !app.EXTRA_TRUSTED_ORIGINS.startsWith(trustedPrefix) ||
+      (state.lanIp && (app.MCPKIT_MULTI_AUTH_ORIGINS !== lanOrigins(state) || app.MCPKIT_COOKIE_PREFIX !== `mcpkit-${state.id}` || app.NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN !== 'true')) ||
+      (state.cleanTools && app.MCPKIT_CLEAN_TOOL_NAMES !== 'true')) {
     fail('Rendered MetaMCP settings or credentials do not match the private configuration; no container was changed.');
   }
   const admins = app.METAMCP_ADMIN_EMAILS;
@@ -704,7 +911,7 @@ function renderedMetaSettings(ctx, state, envValues) {
   if ((admins.trim() && !emails.length) || emails.some((value) => !/^[^\s@\[\]<>:'"]+@[^\s@\[\]<>:'"]+$/.test(value))) {
     fail('METAMCP_ADMIN_EMAILS must be a comma-separated list of plain email addresses; no container was changed.');
   }
-  const extraOrigins = app.EXTRA_TRUSTED_ORIGINS.slice(appUrl.length + 1);
+  const extraOrigins = app.EXTRA_TRUSTED_ORIGINS.slice(trustedPrefix.length);
   for (const value of extraOrigins.split(',').map((item) => item.trim()).filter(Boolean)) {
     let u;
     try { u = new URL(value); } catch { fail('EXTRA_TRUSTED_ORIGINS must contain literal origins, not Markdown links; no container was changed.'); }
@@ -728,6 +935,10 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   const labels = inspect(ctx, 'image', image);
   if (!labels) fail(`The existing MetaMCP image was not found. ${outcome}`);
   checkLabel(labels, state, 'image', image);
+  if ((state.lanIp && labels['com.multfinite.mcpkit.lan-patch'] !== LAN_PATCH_VERSION) ||
+      (state.cleanTools && labels['com.multfinite.mcpkit.clean-tools-patch'] !== CLEAN_TOOLS_PATCH_VERSION)) {
+    fail(`The existing MetaMCP image lacks its expected source patch labels. ${outcome}`);
+  }
   const appImage = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.Image}}', snapshot.appId], { capture: true }).stdout.trim();
   const taggedImage = run('docker', ['--context', ctx, 'image', 'inspect', '--format', '{{.Id}}', image], { capture: true }).stdout.trim();
   if (!/^sha256:[a-f0-9]{64}$/.test(appImage) || appImage !== taggedImage) fail(`The kit image tag no longer identifies the running app image. ${outcome}`);
@@ -751,8 +962,10 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   let ports;
   try { ports = JSON.parse(portsResult.stdout); } catch { fail(`Cannot inspect app port bindings. ${outcome}`); }
   const published = ports && typeof ports === 'object' && !Array.isArray(ports) ? ports['12008/tcp'] : null;
-  if (!ports || Object.keys(ports).length !== 1 || !Array.isArray(published) || published.length !== 1 ||
-      published[0]?.HostIp !== '127.0.0.1' || published[0]?.HostPort !== String(state.port)) {
+  const portHosts = state.lanIp ? ['127.0.0.1', state.lanIp] : ['127.0.0.1'];
+  if (!ports || Object.keys(ports).length !== 1 || !Array.isArray(published) || published.length !== portHosts.length ||
+      published.some((item) => item?.HostPort !== String(state.port) || !portHosts.includes(item.HostIp)) ||
+      portHosts.some((host) => published.filter((item) => item?.HostIp === host).length !== 1)) {
     fail(`The app has unexpected port bindings; review them before recreation. ${outcome}`);
   }
   const mountResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', snapshot.appId], { capture: true });
@@ -788,8 +1001,11 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   let networks;
   try { networks = JSON.parse(networkResult.stdout); } catch { fail(`Cannot inspect app networks. ${outcome}`); }
   const names = networks && typeof networks === 'object' && !Array.isArray(networks) ? Object.keys(networks) : [];
-  if (names.length !== 1 || names[0] !== `${state.project}_default`) {
-    fail(`The app has extra or unexpected networks. Back up the connection details and explicitly unlink/relink them before applying. ${outcome}`);
+  const link = assertLiveGlobalNetwork(ctx, state);
+  const expectedNetworks = [`${state.project}_default`, ...(link ? [link.network] : [])];
+  if (names.length !== expectedNetworks.length || expectedNetworks.some((name) => !names.includes(name)) ||
+      (link && networks[link.network]?.NetworkID !== link.networkId)) {
+    fail(`The app has extra or unexpected networks. Review its connection details before applying. ${outcome}`);
   }
 }
 async function applyMetaConfig(ctx, state) {
@@ -925,6 +1141,8 @@ function connectLocalProjects(ctx, globalState, metaDir, detach) {
   if (globalState.type !== 'global' || !metaDir) fail('link/unlink requires the GLOBAL directory and --meta-dir for a kit-owned MetaMCP.');
   const meta = originState(path.resolve(metaDir));
   if (meta.type !== 'meta') fail('The selected MetaMCP directory does not contain an independent MetaMCP.');
+  const persistentLink = readLiveGlobalLink(meta);
+  if (persistentLink && persistentLink.globalProject !== globalState.project) fail('This MetaMCP has a persistent link to a different GLOBAL; no network was changed.');
   readEnv(meta.base, meta.type);
   checkResources(ctx, globalState);
   checkResources(ctx, meta);
@@ -966,9 +1184,15 @@ function connectLocalProjects(ctx, globalState, metaDir, detach) {
     }
     if (!attached) run('docker', ['--context', ctx, 'network', 'connect', network, appId]);
   }
-  if (detach) { console.log('The selected MetaMCP was disconnected from the GLOBAL client network; records were not changed.'); return; }
+  if (detach) {
+    if (persistentLink) {
+      assertLiveGlobalNetwork(ctx, meta);
+      fs.unlinkSync(path.join(meta.base, '.mcpkit', 'live-global-link.json'));
+    }
+    console.log('The selected MetaMCP was disconnected from the GLOBAL client network; records were not changed.'); return;
+  }
   console.log(`MetaMCP is connected to the isolated GLOBAL client network. Gateway URL for connect-global: http://${globalState.project}-gateway:13001`);
-  console.log('Traffic on this local Docker network is not encrypted; use it only if the host and network are trusted. Reconnect after recreating the MetaMCP app.');
+  console.log(`Traffic on this local Docker network is not encrypted; use it only if the host and network are trusted. ${persistentLink ? 'The saved link survives app recreation.' : 'Reconnect after recreating the MetaMCP app.'}`);
 }
 
 function requirePrivateDirectory(dir) {
@@ -1272,7 +1496,7 @@ async function shareRegistrationFile(ctx, meta, savedMeta, registrationFile) {
 
 try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|check-env|recover-env|share-global|share-registration|relocate} --dir DIR [--port PORT] [--app-url URL] [--delete-volumes] [--meta-dir DIR] [--server ID] [--registration ID] [--registration-file FILE]');
+  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
   const opts = parseArgs(argv);
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
   if (opts.metaDir && !['link', 'unlink', 'share-global'].includes(action)) fail('--meta-dir is only valid for link/unlink/share-global.');
@@ -1283,6 +1507,8 @@ try {
   const isInit = action === 'init-meta' || action === 'init-global';
   if (!isInit && (opts.port || opts.appUrl)) fail('Ports and APP_URL are only accepted for new installations.');
   if (action === 'init-global' && opts.appUrl) fail('--app-url is only for MetaMCP.');
+  if (action !== 'init-meta' && (opts.staged || opts.fresh || opts.lanIp || opts.adminEmail || opts.allowInsecureLan || opts.cleanTools)) fail('Staging, fresh-install, clean-tool and LAN options are only available for init-meta.');
+  if (opts.adminEmail && !opts.staged) fail('--admin-email requires --staged.');
   const base = path.resolve(opts.dir);
   const isSharing = action === 'share-global' || action === 'share-registration';
   const saved = isInit ? initialize(action === 'init-meta' ? 'meta' : 'global', opts) :
@@ -1297,7 +1523,13 @@ try {
   } else if (!['stop', 'check-env', 'recover-env', 'relocate'].includes(action)) readEnv(state.base, state.type);
   const ctx = dockerContext();
   if (isInit || action === 'start') await start(ctx, state);
-  else if (action === 'stop') stopOwnedContainers(ctx, state);
+  else if (action === 'provision-meta') {
+    if (state.type !== 'meta') fail('provision-meta is only for a MetaMCP.');
+    provisionStagedMeta(ctx, state);
+  } else if (action === 'activate-meta') {
+    if (state.type !== 'meta') fail('activate-meta is only for a MetaMCP.');
+    await activateStagedMeta(ctx, state);
+  } else if (action === 'stop') stopOwnedContainers(ctx, state);
   else if (action === 'check-env') checkMetaEnv(ctx, state);
   else if (action === 'recover-env') await recoverMetaEnv(ctx, state);
   else if (action === 'relocate') await relocateKit(ctx, saved, base);
@@ -1305,6 +1537,7 @@ try {
   else if (action === 'share-global') await shareGlobalRegistration(ctx, state, saved, opts.metaDir, opts.registration);
   else if (action === 'share-registration') await shareRegistrationFile(ctx, state, saved, opts.registrationFile);
   else if (action === 'apply') {
+    if (state.type === 'meta' && setupMarker(state)) fail('Complete or remove the staged installation before applying configuration.');
     if (state.type === 'meta') await applyMetaConfig(ctx, state);
     else {
       checkResources(ctx, state);

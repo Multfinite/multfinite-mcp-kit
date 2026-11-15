@@ -5,15 +5,19 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { spawnSync } from 'node:child_process';
 import { GLOBAL_GROUPS, GLOBAL_SERVER_NAMES, GLOBAL_GROUP_NAMES, localGroups, LOCAL_SERVER_NAMES, LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
+import { inspectLiveGlobal, liveGlobalStatus } from './live-global.mjs';
 
 const [profile, ...rawArgs] = process.argv.slice(2);
 function fail(message) { throw new Error(message); }
 function parseArgs(args) {
   const opts = {};
   for (let i = 0; i < args.length; i++) {
-    if (args[i] !== '--dir' || !args[i + 1] || opts.dir) fail('Usage: register.mjs {local|global} --dir DIRECTORY');
-    opts.dir = args[++i];
+    if (args[i] === '--json-stdin' && !opts.jsonStdin) { opts.jsonStdin = true; continue; }
+    const key = { '--dir': 'dir', '--meta-dir': 'metaDir', '--live-global': 'liveGlobal' }[args[i]];
+    if (!key || !args[i + 1] || opts[key]) fail('Usage: register.mjs {local|global} --dir DIRECTORY [--json-stdin --meta-dir METAMCP]');
+    opts[key] = args[++i];
   }
   return opts;
 }
@@ -114,22 +118,71 @@ function cookieFrom(response) {
   }
   return pairs.join('; ');
 }
+let localTransport = null;
+function verifiedLocalMeta(dir, origin) {
+  if (process.env.DOCKER_HOST || process.env.DOCKER_CONTEXT) fail('Unset DOCKER_HOST and DOCKER_CONTEXT before local registration.');
+  function docker(args) {
+    const result = spawnSync('docker', args, { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, windowsHide: true });
+    if (result.error || result.status !== 0) fail('Cannot verify the selected local MetaMCP container.');
+    return result.stdout.trim();
+  }
+  const base = path.resolve(dir);
+  const privateDir = path.join(base, '.mcpkit');
+  if (fs.realpathSync(base) !== base || !fs.lstatSync(privateDir).isDirectory() || fs.lstatSync(privateDir).isSymbolicLink() ||
+      !fs.lstatSync(path.join(privateDir, 'state.json')).isFile() || fs.lstatSync(path.join(privateDir, 'state.json')).isSymbolicLink()) fail('The selected local MetaMCP directory is not a regular kit directory.');
+  const state = json(path.join(privateDir, 'state.json'));
+  if (state.version !== 1 || state.type !== 'meta' || state.base !== base || !/^[a-f0-9]{16}$/.test(state.id) ||
+      state.project !== `mcpkit-meta-${state.id}` || !Number.isInteger(state.port) || state.port < 1 || state.port > 65535 || state.appUrl !== origin ||
+      fs.existsSync(path.join(base, '.mcpkit', 'first-setup.json'))) fail('Local MetaMCP state or origin does not match the selected registration.');
+  const context = docker(['context', 'show']);
+  if (!context || !/^unix:\/\/\//.test(docker(['context', 'inspect', context, '--format', '{{.Endpoints.docker.Host}}']))) fail('Local registration requires a local Unix-socket Docker context.');
+  const ids = docker(['--context', context, 'container', 'ls', '-q', '--no-trunc', '--filter', `label=com.docker.compose.project=${state.project}`, '--filter', 'label=com.docker.compose.service=app']).split(/\s+/).filter(Boolean);
+  if (ids.length !== 1 || !/^[a-f0-9]{12,64}$/.test(ids[0])) fail('Expected one running kit-owned MetaMCP app.');
+  let app;
+  try { app = JSON.parse(docker(['--context', context, 'container', 'inspect', ids[0]]))[0]; } catch { fail('Cannot inspect the selected MetaMCP app.'); }
+  const labels = app?.Config?.Labels || {};
+  const ports = app?.NetworkSettings?.Ports?.['12008/tcp'];
+  const expectedHosts = state.lanIp ? ['127.0.0.1', state.lanIp] : ['127.0.0.1'];
+  const env = (app?.Config?.Env || []).filter((entry) => entry.startsWith('APP_URL='));
+  if (app?.State?.Running !== true || labels['com.multfinite.mcpkit.instance'] !== state.id || labels['com.docker.compose.project'] !== state.project ||
+      labels['com.docker.compose.service'] !== 'app' || String(labels['com.docker.compose.oneoff'] || '').toLowerCase() === 'true' ||
+      !Array.isArray(ports) || ports.length !== expectedHosts.length ||
+      ports.some((binding) => binding?.HostPort !== String(state.port) || !expectedHosts.includes(binding.HostIp)) ||
+      expectedHosts.some((host) => ports.filter((binding) => binding?.HostIp === host).length !== 1) ||
+      env.length !== 1 || env[0] !== `APP_URL=${origin}`) fail('The selected app identity or host bindings are unexpected.');
+  return { address: `http://127.0.0.1:${state.port}`, containerId: app.Id, context, privateDir };
+}
+function liveGlobalBundle(project, meta, gateway) {
+  const live = inspectLiveGlobal(meta.context, project);
+  if (!live.clientMembers.includes(meta.containerId) || live.url !== gateway) fail('The selected MetaMCP is not connected to the expected isolated GLOBAL gateway.');
+  liveGlobalStatus(live); // authenticated identity and server inventory, never prints secrets
+  return { id: live.id, key: live.gatewayKey, privateDir: meta.privateDir, groups: GLOBAL_GROUPS,
+    serverNames: GLOBAL_SERVER_NAMES, groupNames: GLOBAL_GROUP_NAMES };
+}
 async function request(url, opts = {}) {
   let response;
-  try { response = await fetch(url, { ...opts, redirect: 'error', signal: AbortSignal.timeout(30000) }); }
+  let address = url;
+  let options = opts;
+  if (localTransport) {
+    const parsed = new URL(url);
+    if (parsed.origin !== localTransport.origin) fail('Unexpected registration request origin.');
+    address = `${localTransport.address}${parsed.pathname}${parsed.search}`;
+    options = { ...opts, headers: { ...(opts.headers || {}), host: new URL(localTransport.origin).host } };
+  }
+  try { response = await fetch(address, { ...options, redirect: 'error', signal: AbortSignal.timeout(30000) }); }
   catch { fail('Network/TLS request failed or timed out. No redirect was followed; check the URL, certificates and connectivity.'); }
   let body;
   try { body = await response.json(); } catch { fail(`MetaMCP returned non-JSON (HTTP ${response.status}); check the origin and version.`); }
   if (!response.ok) fail(`MetaMCP rejected a request (HTTP ${response.status}); check login, permissions and server version.`);
   return { response, body };
 }
-async function login(origin) {
-  const mode = (await question('Authentication: [1] email/password, [2] existing browser session cookie (SSO) [1]: ')) || '1';
+async function login(origin, supplied = null) {
+  const mode = supplied ? '1' : (await question('Authentication: [1] email/password, [2] existing browser session cookie (SSO) [1]: ')) || '1';
   let cookie;
   if (mode === '1') {
-    const email = await question('MetaMCP account email: ');
-    const password = await secret('Password (not echoed): ');
-    if (!email || !password) fail('Email and password are required.');
+    const email = supplied ? supplied.email : await question('MetaMCP account email: ');
+    const password = supplied ? supplied.password : await secret('Password (not echoed): ');
+    if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) fail('Email and password are required.');
     const result = await request(`${origin}/api/auth/sign-in/email`, {
       method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify({ email, password }),
     });
@@ -183,24 +236,36 @@ function hasOpenEndpoint(endpoints, namespace) {
 async function main() {
   if (!['local', 'global'].includes(profile)) fail('Choose local or global.');
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!process.stdin.isTTY || !process.stdout.isTTY) fail('Registration requires an interactive terminal.');
   const opts = parseArgs(rawArgs);
-  if (!opts.dir) fail('--dir is required.');
-  const base = path.resolve(opts.dir);
-  const bundle = profile === 'local' ? localBundle(base) : globalBundle(base);
+  if (!opts.dir && !opts.liveGlobal) fail('--dir is required unless selecting an existing live GLOBAL.');
+  if (opts.dir && opts.liveGlobal) fail('Choose either --dir or --live-global, not both.');
+  if (!opts.jsonStdin && (!process.stdin.isTTY || !process.stdout.isTTY)) fail('Registration requires an interactive terminal.');
+  if (opts.jsonStdin && (profile !== 'global' || !opts.metaDir)) fail('Private stdin registration requires GLOBAL and a local --meta-dir.');
+  if (!opts.jsonStdin && (opts.metaDir || opts.liveGlobal)) fail('--meta-dir and --live-global are only used with --json-stdin.');
+  let supplied = null;
+  if (opts.jsonStdin) {
+    try { supplied = JSON.parse(fs.readFileSync(0, 'utf8')); } catch { fail('Invalid private registration input.'); }
+    if (!supplied || typeof supplied.target !== 'string' || typeof supplied.gateway !== 'string' ||
+        typeof supplied.email !== 'string' || typeof supplied.password !== 'string' || !supplied.email || !supplied.password) fail('Invalid private registration input.');
+  }
+  const base = opts.dir ? path.resolve(opts.dir) : null;
   console.log(`This creates public ${profile.toUpperCase()} servers, each with a same-named namespace and endpoint, without instance prefixes. An administrator account is required.`);
   console.log('New endpoints require a MetaMCP API key. Every MetaMCP user can use the shared servers and their configured credentials/data.');
   if (profile === 'local') console.log('WARNING: shared LOCAL servers can expose files, databases, terminals and desktop control to other users.');
   console.log('Existing records are never updated or deleted; conflicting names are not adopted.');
   console.log('The MetaMCP host must be able to reach the gateway URL; it can differ from the address reachable from this terminal.');
-  const target = validateUrl(await question('MetaMCP origin (for example https://mcp.example.org): '), false);
-  const gateway = validateUrl(await question('Gateway base URL as seen FROM MetaMCP: '), true);
+  const target = validateUrl(supplied ? supplied.target : await question('MetaMCP origin (for example https://mcp.example.org): '), false);
+  const gateway = validateUrl(supplied ? supplied.gateway : await question('Gateway base URL as seen FROM MetaMCP: '), true);
   if (target.insecure || gateway.insecure) {
     console.log('WARNING: non-loopback HTTP sends credentials/keys without transport encryption. Use HTTPS or a separately encrypted private tunnel/VPN.');
-    if ((await question('Type TRUSTED TUNNEL to confirm this network is protected: ')) !== 'TRUSTED TUNNEL') fail('Cancelled; no records were changed.');
+    if (!supplied && (await question('Type TRUSTED TUNNEL to confirm this network is protected: ')) !== 'TRUSTED TUNNEL') fail('Cancelled; no records were changed.');
   }
+  const meta = supplied ? verifiedLocalMeta(opts.metaDir, target.base) : null;
+  if (meta) localTransport = { origin: target.base, address: meta.address };
+  const bundle = opts.liveGlobal ? liveGlobalBundle(opts.liveGlobal, meta, gateway.base)
+    : profile === 'local' ? localBundle(base) : globalBundle(base);
   console.log('Use only a MetaMCP instance you trust: its server records will contain the gateway key.');
-  const auth = await login(target.base);
+  const auth = await login(target.base, supplied);
   await requireAdmin(target.base, auth.cookie);
   const expectedOwner = null;
   const publicOwner = { user_id: null };
@@ -349,7 +414,8 @@ async function main() {
     }
     console.log('\nRegistration complete. Existing records and user changes were not updated or deleted.');
     for (const group of Object.keys(bundle.groups)) console.log(`${group}: ${target.base}/metamcp/${bundle.groupNames[group]}/mcp`);
-    console.log('Create a PRIVATE API key in the MetaMCP UI for this account and use it with these endpoints.');
+    if (supplied) console.log(`Use the PRIVATE client key stored at ${path.join(meta.privateDir, 'client-api-key')}.`);
+    else console.log('Create a PRIVATE API key in the MetaMCP UI for this account and use it with these endpoints.');
     console.log('Any valid MetaMCP API key can access a shared endpoint; issue keys only to trusted clients.');
     if (profile === 'global') console.log('GitHub MCP requires its own token; set it manually in the newly created GitHub server in MetaMCP.');
     console.log(`Registration journal: ${file}. Keep it with the kit configuration; it contains no password or gateway key.`);

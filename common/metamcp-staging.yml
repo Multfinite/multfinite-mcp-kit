@@ -1,0 +1,5 @@
+# Compose >= 2.24.4: remove both loopback and optional LAN bindings while
+# the first account is created and registration is closed.
+services:
+  app:
+    ports: !reset []
