@@ -1317,7 +1317,9 @@ try {
     const warning = opts.deleteVolumes
       ? `WARNING: removing containers AND ALL named volumes of ${state.project}, including database and user data. Back them up first. Files in ${state.base} remain.`
       : `Removing containers and network of ${state.project}; writable container layers are lost. Named volumes and files in ${state.base} remain.`;
-    if (!(await confirm(warning, expected))) { console.log('Cancelled; nothing was removed.'); process.exit(0); }
+    // A cancelled removal must fail shell chains: otherwise a following
+    // reinstall or directory deletion could run despite the cancellation.
+    if (!(await confirm(warning, expected))) { console.log('Cancelled; nothing was removed.'); process.exit(1); }
     checkResources(ctx, state);
     requireUnusedByOthers(ctx, state);
     compose(ctx, state, opts.deleteVolumes ? ['down', '--volumes'] : ['down']);
