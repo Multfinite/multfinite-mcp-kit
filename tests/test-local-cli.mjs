@@ -59,7 +59,7 @@ function installFakes(base) {
   fs.symlinkSync(proxy, dest);
 }
 
-test('preserves legacy files, manages the gateway, and never kills a port occupant', { skip: unsupported || (!proxy && 'set MCP_PROXY_CLI to an installed mcp-proxy CLI'), timeout: 120000 }, async () => {
+test('ignores old config files, manages the gateway, and never kills a port occupant', { skip: unsupported || (!proxy && 'set MCP_PROXY_CLI to an installed mcp-proxy CLI'), timeout: 120000 }, async () => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp kit '));
   const base = path.join(tmp, 'Профиль с пробелами');
   const config = path.join(base, 'config');
@@ -70,7 +70,7 @@ test('preserves legacy files, manages the gateway, and never kills a port occupa
   const oldJson = '{"mcpServers":{"my-own-server":{"command":"keep"}}}\n';
   fs.writeFileSync(path.join(config, '.env'), oldEnv);
   fs.writeFileSync(path.join(config, 'mcp-local.json'), oldJson);
-  const env = { ...process.env, MCP_LOCAL_DIR: base, HOME: path.join(tmp, 'home'), USERPROFILE: path.join(tmp, 'home'), MCPKIT_TEST_PID_FILES: '1' };
+  const env = { ...process.env, MCPKIT_LOCAL_DIR: base, HOME: path.join(tmp, 'home'), USERPROFILE: path.join(tmp, 'home'), MCPKIT_TEST_PID_FILES: '1' };
   fs.mkdirSync(env.HOME);
   try {
     assertSuccess(invoke(env, 'init'));
@@ -78,8 +78,9 @@ test('preserves legacy files, manages the gateway, and never kills a port occupa
     const secretsFile = path.join(config, 'private/secrets.json');
     const stateFile = path.join(config, 'private/gateway-state.json');
     const settings = readJson(settingsFile);
-    assert.equal(settings.projectsDir, projects); assert.equal(settings.writingDir, writing);
+    assert.equal(settings.projectsDir, path.join(base, 'data/projects')); assert.equal(settings.writingDir, path.join(base, 'data/writing'));
     const secrets = readJson(secretsFile);
+    assert.equal(secrets.obsidianApiKey, ''); assert.equal(secrets.dbhubDsn, '');
     settings.port = await freePort();
     writeJson(settingsFile, settings);
     assertSuccess(invoke(env, 'init'));
@@ -137,7 +138,7 @@ test('preserves legacy files, manages the gateway, and never kills a port occupa
 test('PowerShell controls a TLS gateway using the pinned certificate', { skip: unsupported || (!proxy && 'set MCP_PROXY_CLI to an installed mcp-proxy CLI'), timeout: 120000 }, async (t) => {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpkit-tls-runner-'));
   const base = path.join(tmp, 'Профиль с пробелами');
-  const env = { ...process.env, MCP_LOCAL_DIR: base, HOME: tmp };
+  const env = { ...process.env, MCPKIT_LOCAL_DIR: base, HOME: tmp };
   const cert = path.join(tmp, 'certificate.pem'); const key = path.join(tmp, 'private-key.pem');
   const openssl = spawnSync('openssl', ['req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-subj', '/CN=localhost', '-keyout', key, '-out', cert, '-days', '1'], { stdio: 'ignore' });
   if (openssl.error?.code === 'ENOENT') { fs.rmSync(tmp, { recursive: true, force: true }); t.skip('openssl is not installed'); return; }
@@ -167,27 +168,22 @@ test('PowerShell controls a TLS gateway using the pinned certificate', { skip: u
   }
 });
 
-test('first initialization imports literal legacy values but ignores the sample database', { skip: unsupported }, () => {
-  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpkit legacy '));
+test('does not import values from an old .env into new LOCAL settings', { skip: unsupported }, () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpkit-no-import-'));
   const base = path.join(tmp, 'base'); const config = path.join(base, 'config');
   fs.mkdirSync(config, { recursive: true });
-  const env = { ...process.env, MCP_LOCAL_DIR: base, HOME: tmp };
-  const old = 'DBHUB_DSN=postgres://user:pass@localhost:5432/devdb\nOBSIDIAN_API_KEY=legacy-secret-value\n';
+  const env = { ...process.env, MCPKIT_LOCAL_DIR: base, HOME: tmp };
+  const old = 'DBHUB_DSN=postgres://user:pass@localhost:5432/devdb\nOBSIDIAN_API_KEY=old-secret-value\n';
   fs.writeFileSync(path.join(config, '.env'), old);
   try {
     const result = invoke(env, 'init'); assertSuccess(result);
-    assert.doesNotMatch(result.stdout, /legacy-secret-value/);
+    assert.doesNotMatch(result.stdout, /old-secret-value/);
     const secrets = readJson(path.join(config, 'private/secrets.json'));
-    assert.equal(secrets.obsidianApiKey, 'legacy-secret-value');
+    assert.equal(secrets.obsidianApiKey, '');
     assert.equal(secrets.dbhubDsn, '');
     assert.equal(fs.readFileSync(path.join(config, '.env'), 'utf8'), old);
     fs.writeFileSync(path.join(config, '.env'), 'DBHUB_DSN=postgres://real:secret@database.example/db\n');
     assertSuccess(invoke(env, 'init'));
-    assert.deepEqual(readJson(path.join(config, 'private/secrets.json')), secrets, 'subsequent init must not override private settings');
-    const second = path.join(tmp, 'second'); fs.mkdirSync(path.join(second, 'config'), { recursive: true });
-    fs.writeFileSync(path.join(second, 'config/.env'), 'DBHUB_DSN="postgres://real:secret@database.example/db"\n');
-    assertSuccess(invoke({ ...env, MCP_LOCAL_DIR: second }, 'init'));
-    assert.equal(readJson(path.join(second, 'config/private/secrets.json')).dbhubDsn, 'postgres://real:secret@database.example/db');
+    assert.deepEqual(readJson(path.join(config, 'private/secrets.json')), secrets, 'reinitialization must not import old private settings');
   } finally { fs.rmSync(tmp, { recursive: true, force: true }); }
 });
-

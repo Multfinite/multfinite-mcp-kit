@@ -1,38 +1,22 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    Manage native Windows LOCAL servers and the optional legacy local MetaMCP.
+    Manage the native Windows LOCAL gateway and MCP servers.
 .DESCRIPTION
-    Running without a command starts only the native servers and gateway. The explicit start command manages the legacy Docker Desktop MetaMCP stack.
+    This runner does not install or manage MetaMCP or Docker Desktop.
 .EXAMPLE
     .\windows\run-local.ps1 gateway-start
-    .\windows\run-local.ps1 start  # legacy full stack, including MetaMCP
-    .\windows\run-local.ps1 status
+    .\windows\run-local.ps1 gateway-status
     .\windows\run-local.ps1 logs obsidian
-    .\windows\run-local.ps1 seed
-    .\windows\run-local.ps1 seed -OwnerEmail 'you@example.com'
-    .\windows\run-local.ps1 reset-metamcp-records
-    .\windows\run-local.ps1 uninstall-metamcp
-    .\windows\run-local.ps1 enable-signup
-    .\windows\run-local.ps1 logs metamcp
-    .\windows\run-local.ps1 ports
-    .\windows\run-local.ps1 set-ports -WebPort 13008 -BackendPort 13009
 #>
 [CmdletBinding()]
 param(
-    # init is used by the installer; it never replaces existing settings.
-    [ValidateSet('init', 'start', 'stop', 'restart', 'status', 'logs', 'credentials', 'seed', 'reset-metamcp-records', 'uninstall-metamcp', 'enable-signup', 'ports', 'set-ports', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status', 'register-service', 'unregister-service')]
+    [ValidateSet('init', 'logs', 'gateway-start', 'gateway-stop', 'gateway-restart', 'gateway-status', 'register-service', 'unregister-service')]
     [string]$Command = 'gateway-start',
     [string]$Server = '',
-    [string]$OwnerEmail = '',
-    [ValidateRange(0, 65535)]
-    [int]$WebPort = 0,
-    [ValidateRange(0, 65535)]
-    [int]$BackendPort = 0,
-    # Used only for the create-only independent LOCAL initialization.
     [ValidateRange(1, 65535)]
     [int]$GatewayPort = 13001,
-    [string]$Directory = $(if ($env:MCP_LOCAL_DIR) { $env:MCP_LOCAL_DIR } else { Join-Path $env:USERPROFILE 'mcp-local' })
+    [string]$Directory = $(if ($env:MCPKIT_LOCAL_DIR) { $env:MCPKIT_LOCAL_DIR } else { Join-Path $env:USERPROFILE 'mcp-kit\local' })
 )
 $ErrorActionPreference = 'Stop'
 if ($env:OS -ne 'Windows_NT') { throw 'This script must be run in a Windows user session.' }
@@ -77,27 +61,6 @@ function Save-Json([string]$File, $Value, [switch]$CreateOnly) {
     } finally { if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue } }
 }
 
-function Get-LegacyValues {
-    $values = @{}
-    $file = Join-Path $ConfigDir '.env'
-    if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return $values }
-    foreach ($line in [IO.File]::ReadAllLines($file, [Text.Encoding]::UTF8)) {
-        # Literal parsing only; never execute or expand the existing .env.
-        $match = [regex]::Match($line.TrimStart([char]0xFEFF), '^\s*(?:export\s+)?(PROJECTS_DIR|WRITING_DIR|DBHUB_DSN|OBSIDIAN_API_KEY)=(.*)$')
-        if (-not $match.Success) { continue }
-        $key = $match.Groups[1].Value
-        $value = $match.Groups[2].Value.Trim()
-        if ($value.Length -ge 2 -and (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'")))) {
-            $value = $value.Substring(1, $value.Length - 2)
-        }
-        if ($key -in @('PROJECTS_DIR', 'WRITING_DIR')) {
-            if ([IO.Path]::IsPathRooted($value) -and (Test-Path -LiteralPath $value -PathType Container)) { $values[$key] = $value }
-        } elseif ($key -eq 'DBHUB_DSN') {
-            if ($value -ne 'postgres://user:pass@localhost:5432/devdb' -and $value -match '^[a-zA-Z][a-zA-Z0-9+.-]*://' -and $value -notmatch '[<>]') { $values[$key] = $value }
-        } elseif ($value -and $value -notmatch '[<>]') { $values[$key] = $value }
-    }
-    return $values
-}
 function Initialize-Configuration {
     Protect-PrivateDirectory $PrivateDir
     Protect-PrivateDirectory $Logs
@@ -105,7 +68,6 @@ function Initialize-Configuration {
     foreach ($dir in @((Join-Path $BaseDir 'data\projects'), (Join-Path $BaseDir 'data\writing'))) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    $legacy = Get-LegacyValues
     $name = [Environment]::MachineName.ToLowerInvariant() -creplace '[^a-z0-9]+', '-'
     $name = $name.Trim('-')
     if ($name.Length -gt 20) { $name = $name.Substring(0, 20).TrimEnd('-') }
@@ -118,22 +80,21 @@ function Initialize-Configuration {
         tlsCertFile = ''
         tlsKeyFile = ''
         allowInsecureLan = $false
-        projectsDir = if ($legacy.PROJECTS_DIR) { $legacy.PROJECTS_DIR } else { Join-Path $BaseDir 'data\projects' }
-        writingDir = if ($legacy.WRITING_DIR) { $legacy.WRITING_DIR } else { Join-Path $BaseDir 'data\writing' }
+        projectsDir = Join-Path $BaseDir 'data\projects'
+        writingDir = Join-Path $BaseDir 'data\writing'
         everythingSdkPath = Join-Path $Runtime 'everything-sdk\Everything64.dll'
         obsidianHost = '127.0.0.1'
         obsidianPort = 27124
     }
     $secrets = [ordered]@{
         gatewayApiKey = New-RandomHex 32
-        obsidianApiKey = if ($legacy.OBSIDIAN_API_KEY) { $legacy.OBSIDIAN_API_KEY } else { '' }
-        dbhubDsn = if ($legacy.DBHUB_DSN) { $legacy.DBHUB_DSN } else { '' }
+        obsidianApiKey = ''
+        dbhubDsn = ''
     }
     $created = Save-Json $SettingsFile $settings -CreateOnly
     Write-KitOk "$(if ($created) { 'Created' } else { 'Preserved' }) $SettingsFile"
     $created = Save-Json $SecretsFile $secrets -CreateOnly
     Write-KitOk "$(if ($created) { 'Created' } else { 'Preserved' }) $SecretsFile"
-    if (Test-Path -LiteralPath (Join-Path $ConfigDir 'mcp-local.json')) { Write-KitInfo 'The legacy mcp-local.json and .env are not modified.' }
 }
 function Test-Settings($Settings, $Secrets) {
     if ($Settings.version -ne 1) { throw 'Unsupported local settings version.' }
@@ -403,73 +364,20 @@ function Show-Logs([string]$Name) {
     }
 }
 
-# The local Docker integration uses the same generated gateway key and
-# settings, but never asks for a Linux host, SSH, a URL, TLS or VPN details.
-. (Join-Path $ScriptDir 'metamcp-local.ps1')
-
-function Start-LocalStack {
-    $problems = New-Object 'System.Collections.Generic.List[string]'
-    try { Start-Gateway } catch {
-        $message = "Windows MCP gateway: $($_.Exception.Message)"
-        Write-KitWarn $message
-        $problems.Add($message)
-    }
-    # An individual native server may be broken while the gateway and the
-    # others work. Still start MetaMCP and register all servers, then report
-    # the partial failure rather than hiding it or leaving Docker unconfigured.
-    try { Start-MetaMcp } catch {
-        $message = "Local MetaMCP: $($_.Exception.Message)"
-        Write-KitWarn $message
-        $problems.Add($message)
-    }
-    if ($problems.Count -gt 0) { throw ($problems -join '; ') }
-}
-function Stop-LocalStack {
-    $problems = New-Object 'System.Collections.Generic.List[string]'
-    try { Stop-Gateway } catch { $problems.Add("Windows MCP gateway: $($_.Exception.Message)") }
-    try { Stop-MetaMcp } catch { $problems.Add("Local MetaMCP: $($_.Exception.Message)") }
-    if ($problems.Count -gt 0) { throw ($problems -join '; ') }
-}
-function Get-LocalStackStatus {
-    $problems = New-Object 'System.Collections.Generic.List[string]'
-    try { Get-GatewayStatus } catch { $problems.Add("Windows MCP gateway: $($_.Exception.Message)") }
-    try { Show-MetaStatus } catch { $problems.Add("Local MetaMCP: $($_.Exception.Message)") }
-    if ($problems.Count -gt 0) { throw ($problems -join '; ') }
-}
-
 try {
-    if ($PSBoundParameters.ContainsKey('OwnerEmail') -and $Command -ne 'seed') { throw 'OwnerEmail is only accepted by the seed command.' }
     if ($PSBoundParameters.ContainsKey('GatewayPort') -and $Command -ne 'init') { throw 'GatewayPort is only accepted by create-only init.' }
     switch ($Command) {
-        'init'      { Initialize-Configuration }
-        'start'        { Start-LocalStack }
-        'stop'         { Stop-LocalStack }
-        'restart'      { Stop-LocalStack; Start-LocalStack }
-        'status'       { Get-LocalStackStatus }
-        'logs'         { if ($Server -eq 'metamcp') { Show-MetaLogs } else { Show-Logs $Server } }
-        'credentials'  { Show-MetaCredentials }
-        'seed'            { Repair-MetaSeed $OwnerEmail }
-        'reset-metamcp-records' { Reset-MetaRecords }
-        'uninstall-metamcp' { Remove-MetaMcp }
-        'enable-signup'   { Enable-MetaSignup }
-        'ports'           { Show-MetaPorts }
-        'set-ports'       {
-            if (-not $PSBoundParameters.ContainsKey('WebPort') -or -not $PSBoundParameters.ContainsKey('BackendPort')) {
-                throw 'Use set-ports -WebPort <port> -BackendPort <port-or-0>.'
-            }
-            Set-MetaPorts $WebPort $BackendPort
-            Start-LocalStack
-        }
-        'register-service' {
-            # Autostart only the native gateway; never the optional legacy MetaMCP stack.
+        'init'                { Initialize-Configuration }
+        'logs'                { Show-Logs $Server }
+        'register-service'    {
             $null = Get-Configuration
             Register-McpKitScheduledTask -Kind local -Directory $BaseDir -ScriptPath $PSCommandPath -StartArguments @('gateway-start', '-Directory', $BaseDir)
         }
-        'unregister-service' { Unregister-McpKitScheduledTask -Kind local -Directory $BaseDir }
-        'gateway-start'   { Start-Gateway }
-        'gateway-stop'    { Stop-Gateway }
-        'gateway-restart' { Stop-Gateway; Start-Gateway }
-        'gateway-status'  { Get-GatewayStatus }
+        'unregister-service'  { Unregister-McpKitScheduledTask -Kind local -Directory $BaseDir }
+        'gateway-start'       { Start-Gateway }
+        'gateway-stop'        { Stop-Gateway }
+        'gateway-restart'     { Stop-Gateway; Start-Gateway }
+        'gateway-status'      { Get-GatewayStatus }
     }
     exit 0
 } catch {

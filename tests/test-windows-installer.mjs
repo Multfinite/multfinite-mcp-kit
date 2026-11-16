@@ -9,7 +9,7 @@ import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { prepareDockerFixture } from './fixtures/docker-test-helpers.mjs';
+import { prepareWindowsFixture } from './fixtures/windows-test-helpers.mjs';
 
 const ps = process.env.MCP_POWERSHELL || 'pwsh';
 const available = spawnSync(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' }).status === 0;
@@ -104,7 +104,7 @@ test('PowerShell installer preserves settings, reports an incomplete venv, and s
   const home = path.join(root, 'home');
   const projects = path.join(root, 'existing projects');
   fs.mkdirSync(home); fs.mkdirSync(projects); fs.mkdirSync(bin);
-  const setup = prepareDockerFixture(root, bin);
+  const setup = prepareWindowsFixture(root, bin);
   const { runner, installer } = setup;
   fs.copyFileSync(uvFixture, path.join(bin, 'uv.exe')); fs.chmodSync(path.join(bin, 'uv.exe'), 0o755);
   makeFile(path.join(programs, 'Microsoft Visual Studio/Installer/vswhere.exe'), '#!/bin/sh\necho fake-build-tools\n', 0o755);
@@ -124,8 +124,8 @@ test('PowerShell installer preserves settings, reports an incomplete venv, and s
     const secretsFile = path.join(base, 'config/private/secrets.json');
     const settings = readJson(settingsFile); settings.port = await freePort(); writeJson(settingsFile, settings);
     const secrets = readJson(secretsFile);
-    assert.equal(settings.projectsDir, projects);
-    assert.equal(secrets.obsidianApiKey, 'existing-secret');
+    assert.equal(settings.projectsDir, path.join(base, 'data/projects'));
+    assert.equal(secrets.obsidianApiKey, '');
     prepareSyntheticNodeBootstrap(base, root, bin, 'direct');
     const first = execute(env, driver, installer); success(first);
     assert.match(first.stdout, /Native LOCAL servers installed\. MetaMCP was not installed or started\./);
@@ -175,7 +175,7 @@ test('PowerShell bootstraps a hash-verified uv without replacing an older uv', {
   const home = path.join(root, 'home');
   const programs = path.join(root, 'program files x86');
   fs.mkdirSync(home); fs.mkdirSync(bin);
-  const setup = prepareDockerFixture(root, bin, repoWindows);
+  const setup = prepareWindowsFixture(root, bin, repoWindows);
   const archiveRoot = path.join(root, 'wheel');
   const fakeExe = path.join(archiveRoot, 'uv-0.13.8.data/scripts/uv.exe');
   makeFile(fakeExe, fs.readFileSync(uvFixture), 0o755);
