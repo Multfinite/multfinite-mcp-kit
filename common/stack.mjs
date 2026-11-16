@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GLOBAL_SERVER_NAMES, LOCAL_SERVER_NAMES, LEGACY_GLOBAL_GROUPS, LEGACY_GLOBAL_GROUP_NAMES, legacyLocalGroups, LEGACY_LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
 import { ensurePatchedSource, LAN_PATCH_VERSION, CLEAN_TOOLS_PATCH_VERSION, SINGLE_SERVER_ENDPOINT_PATCH_VERSION } from './metamcp-lan-source.mjs';
+import { lanEnabledState, withAppUrl, validateLanIp } from './metamcp-lan-enable.mjs';
 import { readLiveGlobalLink, assertLiveGlobalNetwork } from './live-global.mjs';
 import { readLiveMetaPeerLinks, liveMetaPeerComposeFile, assertLiveMetaPeerNetworks, assertMetaPeerAppsRunning, linkMetaPeers, probeMetaPeerEndpoint, unlinkMetaPeers } from './live-metamcp.mjs';
 import { prepareMetaPeerRegistration, commitMetaPeerRegistration } from './metamcp-peer-registration.mjs';
@@ -1081,6 +1082,65 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
     fail(`The app has extra or unexpected networks. Review its connection details before applying. ${outcome}`);
   }
 }
+function replacePrivateFile(file, data) {
+  // Write beside the target first, then rename, so an interrupted write never
+  // leaves a truncated state or .env file behind.
+  const temp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(temp, data, { flag: 'wx', mode: 0o600 });
+  fs.renameSync(temp, file);
+}
+// Converts an existing loopback-only MetaMCP to the explicit HTTP LAN mode.
+// Order: validate, back up, write the new state/.env, build the LAN-patched app
+// image, then hand over to applyMetaConfig, which asks for confirmation and
+// recreates only the app container. PostgreSQL and named volumes are untouched.
+async function enableMetaLan(ctx, saved, lanIp) {
+  if (process.platform !== 'linux') fail('LAN mode is available only on Linux hosts.');
+  if (saved.type !== 'meta') fail('set-lan applies only to a MetaMCP installation.');
+  if (setupMarker(saved)) fail('Complete or remove the staged installation before enabling LAN access.');
+  validateLanIp(lanIp);
+  const local = Object.values(os.networkInterfaces()).flat().some((item) => item && item.family === 'IPv4' && item.address === lanIp);
+  if (!local) fail(`LAN address ${lanIp} is not assigned to this host; no files were changed.`);
+  const next = lanEnabledState(saved, lanIp);
+  if (next === saved) {
+    console.log(`LAN mode is already enabled on ${lanIp}; checking the app configuration.`);
+    await applyMetaConfig(ctx, saved);
+    return;
+  }
+  const priv = path.join(saved.base, '.mcpkit');
+  const stateFile = path.join(priv, 'state.json');
+  const envFile = path.join(priv, '.env');
+  const oldState = privateRegularFile(stateFile);
+  const oldEnv = privateRegularFile(envFile);
+  if (!oldState || !oldEnv) fail('The kit state or private .env is missing; no files were changed.');
+  const backupState = path.join(priv, 'state.json.pre-lan');
+  const backupEnv = path.join(priv, '.env.pre-lan');
+  if (fs.existsSync(backupState) || fs.existsSync(backupEnv)) {
+    fail('A previous pre-LAN backup exists. Review and move it aside before retrying; no files were changed.');
+  }
+  const newEnv = withAppUrl(oldEnv.toString('utf8'), next.appUrl);
+  privateWrite(backupState, oldState);
+  privateWrite(backupEnv, oldEnv);
+  const image = config(next).MCPKIT_IMAGE;
+  try {
+    replacePrivateFile(stateFile, `${JSON.stringify(next, null, 2)}\n`);
+    replacePrivateFile(envFile, newEnv);
+    ensurePatchedSource(path.join(next.base, 'metamcp'), { lan: true, cleanTools: Boolean(next.cleanTools) });
+    console.log('Building the app image with the LAN patch; the running container is not changed by this step.');
+    compose(ctx, next, ['build', 'app']);
+    const built = inspect(ctx, 'image', image);
+    if (!built) fail(`Built image is missing: ${image}`);
+    checkLabel(built, next, 'image', image);
+    if (built['com.multfinite.mcpkit.lan-patch'] !== LAN_PATCH_VERSION) fail('Built image lacks the expected LAN patch label.');
+  } catch (error) {
+    // Restore the previous kit files; the running container was not recreated yet.
+    replacePrivateFile(stateFile, oldState);
+    replacePrivateFile(envFile, oldEnv);
+    console.error('LAN preparation failed; the state and .env were restored from their previous content. Backups remain in .mcpkit/*.pre-lan.');
+    throw error;
+  }
+  console.log(`LAN configuration saved for ${lanIp}:${next.port}. Confirm the app recreation below; PostgreSQL and volumes are kept.`);
+  await applyMetaConfig(ctx, next);
+}
 async function applyMetaConfig(ctx, state) {
   const priv = path.join(state.base, '.mcpkit');
   for (const dir of [state.base, priv]) {
@@ -1570,7 +1630,7 @@ async function shareRegistrationFile(ctx, meta, savedMeta, registrationFile) {
 
 try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'link-metamcp', 'unlink-metamcp', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|link-metamcp|unlink-metamcp|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
+  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'set-lan', 'remove', 'link', 'unlink', 'link-metamcp', 'unlink-metamcp', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|set-lan|remove|link|unlink|link-metamcp|unlink-metamcp|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
   const opts = parseArgs(argv);
   if (opts.expectType && !['meta', 'global'].includes(opts.expectType)) fail('Unknown expected kit type.');
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
@@ -1587,7 +1647,10 @@ try {
   if (isInit && opts.expectType && opts.expectType !== (action === 'init-meta' ? 'meta' : 'global')) fail('The requested and expected kit types differ.');
   if (!isInit && (opts.port || opts.appUrl)) fail('Ports and APP_URL are only accepted for new installations.');
   if (action === 'init-global' && opts.appUrl) fail('--app-url is only for MetaMCP.');
-  if (action !== 'init-meta' && (opts.staged || opts.fresh || opts.lanIp || opts.adminEmail || opts.allowInsecureLan || opts.cleanTools)) fail('Staging, fresh-install, clean-tool and LAN options are only available for init-meta.');
+  if (!['init-meta', 'set-lan'].includes(action) && (opts.staged || opts.fresh || opts.lanIp || opts.adminEmail || opts.allowInsecureLan || opts.cleanTools)) fail('Staging, fresh-install, clean-tool and LAN options are only available for init-meta and set-lan.');
+  if (action === 'set-lan' && (!opts.lanIp || !opts.allowInsecureLan || opts.staged || opts.fresh || opts.adminEmail || opts.cleanTools || opts.port || opts.appUrl)) {
+    fail('set-lan requires --lan-ip <private IPv4 of this host> and --allow-insecure-lan, and accepts no other install options.');
+  }
   if (opts.adminEmail && !opts.staged) fail('--admin-email requires --staged.');
   const base = path.resolve(opts.dir);
   const isSharing = action === 'share-global' || action === 'share-registration';
@@ -1635,6 +1698,7 @@ try {
   else if (action === 'unlink-metamcp') unlinkMetaPeers(ctx, state, peerState);
   else if (action === 'share-global') await shareGlobalRegistration(ctx, state, saved, opts.metaDir, opts.registration);
   else if (action === 'share-registration') await shareRegistrationFile(ctx, state, saved, opts.registrationFile);
+  else if (action === 'set-lan') await enableMetaLan(ctx, state, opts.lanIp);
   else if (action === 'apply') {
     if (state.type === 'meta' && setupMarker(state)) fail('Complete or remove the staged installation before applying configuration.');
     if (state.type === 'meta') await applyMetaConfig(ctx, state);
