@@ -1004,8 +1004,14 @@ function renderedMetaSettings(ctx, state, envValues) {
   }
   return { appUrl, admins, extraOrigins, singleServerPolicy, appEnv: app };
 }
-function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false } = {}) {
+function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false, previousState = null } = {}) {
   const outcome = after ? 'The app was recreated; inspect it before retrying.' : 'No container was changed.';
+  // Pending LAN conversion: the running container is still described by the
+  // previous state, so container-facing checks use it. The new image was built
+  // and verified by enableMetaLan, so it is not compared with the running one.
+  const pending = Boolean(previousState) && !after;
+  const runningState = pending ? previousState : state;
+  const pendingLanKeys = pending ? ['MCPKIT_MULTI_AUTH_ORIGINS', 'MCPKIT_COOKIE_PREFIX', 'NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN'] : [];
   checkResources(ctx, state);
   const appRunning = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.State.Running}}', snapshot.appId], { capture: true }).stdout.trim();
   const appHealth = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', snapshot.appId], { capture: true }).stdout.trim();
@@ -1025,7 +1031,7 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   }
   const appImage = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.Image}}', snapshot.appId], { capture: true }).stdout.trim();
   const taggedImage = run('docker', ['--context', ctx, 'image', 'inspect', '--format', '{{.Id}}', image], { capture: true }).stdout.trim();
-  if (!/^sha256:[a-f0-9]{64}$/.test(appImage) || appImage !== taggedImage) fail(`The kit image tag no longer identifies the running app image. ${outcome}`);
+  if (!pending && (!/^sha256:[a-f0-9]{64}$/.test(appImage) || appImage !== taggedImage)) fail(`The kit image tag no longer identifies the running app image. ${outcome}`);
   const imageResult = run('docker', ['--context', ctx, 'image', 'inspect', '--format', '{{json .Config.Env}}', image], { capture: true });
   const imageEnv = dockerEnvironment(imageResult.stdout, 'image');
   const appEnv = containerEnvironment(ctx, snapshot.appId);
@@ -1035,7 +1041,7 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   const imageRuntime = run('docker', ['--context', ctx, 'image', 'inspect', '--format', runtimeFormat, image], { capture: true }).stdout;
   const appRuntime = run('docker', ['--context', ctx, 'container', 'inspect', '--format', runtimeFormat, snapshot.appId], { capture: true }).stdout;
   if (imageRuntime !== appRuntime) fail(`The app has customized execution settings; review them locally before recreation. ${outcome}`);
-  const editable = new Set(['APP_URL', 'NEXT_PUBLIC_APP_URL', 'METAMCP_ADMIN_EMAILS', 'EXTRA_TRUSTED_ORIGINS', 'MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT']);
+  const editable = new Set(['APP_URL', 'NEXT_PUBLIC_APP_URL', 'METAMCP_ADMIN_EMAILS', 'EXTRA_TRUSTED_ORIGINS', 'MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT', ...pendingLanKeys]);
   for (const [key, value] of Object.entries(planned.appEnv)) {
     if (!editable.has(key) && appEnv[key] !== value) fail(`The app has different non-URL settings; review them locally before recreation. ${outcome}`);
   }
@@ -1046,7 +1052,7 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   let ports;
   try { ports = JSON.parse(portsResult.stdout); } catch { fail(`Cannot inspect app port bindings. ${outcome}`); }
   const published = ports && typeof ports === 'object' && !Array.isArray(ports) ? ports['12008/tcp'] : null;
-  const portHosts = state.lanIp ? ['127.0.0.1', state.lanIp] : ['127.0.0.1'];
+  const portHosts = runningState.lanIp ? ['127.0.0.1', runningState.lanIp] : ['127.0.0.1'];
   if (!ports || Object.keys(ports).length !== 1 || !Array.isArray(published) || published.length !== portHosts.length ||
       published.some((item) => item?.HostPort !== String(state.port) || !portHosts.includes(item.HostIp)) ||
       portHosts.some((host) => published.filter((item) => item?.HostIp === host).length !== 1)) {
@@ -1215,7 +1221,7 @@ async function applyMetaConfig(ctx, state, { allowMissingImage = false, previous
     console.log('Requested URL, admin/trusted-origin settings, and endpoint server policy already match the app container; no container was recreated. Check status separately.');
     return;
   }
-  checkMetaApplyResources(ctx, state, before, planned);
+  checkMetaApplyResources(ctx, state, before, planned, { previousState });
   const count = (text) => text.split(',').map((value) => value.trim()).filter(Boolean).length;
   const message = `Apply MetaMCP configuration for ${state.project}?\n` +
     `Requested primary origin: ${planned.appUrl}\n` +
@@ -1234,7 +1240,7 @@ async function applyMetaConfig(ctx, state, { allowMissingImage = false, previous
     if (rechecked[key] !== before[key]) fail('Container configuration changed during confirmation; no container was changed.');
   }
   const finalPlan = renderedMetaSettings(ctx, state, values);
-  checkMetaApplyResources(ctx, state, rechecked, finalPlan);
+  checkMetaApplyResources(ctx, state, rechecked, finalPlan, { previousState });
   for (const key of ['appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
     if (finalPlan[key] !== planned[key]) fail('Rendered settings changed during confirmation; no container was changed.');
   }
