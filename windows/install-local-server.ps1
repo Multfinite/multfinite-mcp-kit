@@ -45,8 +45,10 @@ function Invoke-Native([string]$Executable, [string[]]$Arguments) {
     & $Executable @Arguments
     if ($LASTEXITCODE -ne 0) { throw "$(Split-Path -Leaf $Executable) failed with exit code $LASTEXITCODE" }
 }
-function Invoke-Runner([string]$Command, [object[]]$Arguments = @()) {
-    & (Join-Path $ScriptDir 'run-local.ps1') $Command -Directory $BaseDir @Arguments
+function Invoke-Runner([string]$Command, [hashtable]$NamedArguments = @{}) {
+    # Array splatting is positional. Forward named runner options with a
+    # hashtable so -GatewayPort cannot be mistaken for Server/OwnerEmail.
+    & (Join-Path $ScriptDir 'run-local.ps1') -Command $Command -Directory $BaseDir @NamedArguments
     if ($LASTEXITCODE -ne 0) { throw "run-local.ps1 $Command failed with exit code $LASTEXITCODE" }
 }
 function Install-Winget([string]$Id, [string[]]$Extra = @()) {
@@ -213,7 +215,7 @@ if ($LASTEXITCODE -ne 0 -or $nodeArch -ne 'x64') { throw 'The isolated Node runt
 Ok "Isolated Node.js $nodeVersion ($nodeArch)"
 
 Step 'Configuration'
-Invoke-Runner 'init' @('-GatewayPort', [string]$GatewayPort)
+Invoke-Runner 'init' @{ GatewayPort = $GatewayPort }
 
 Step 'uv and Python interpreters'
 $uv = Find-Application 'uv.exe'

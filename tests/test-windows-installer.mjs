@@ -35,6 +35,13 @@ test('uses only the new native Windows LOCAL installer filename', () => {
   assert.equal(fs.existsSync(path.join(windowsDir, 'install-local.ps1')), false);
 });
 
+test('forwards the LOCAL gateway port to run-local as a named parameter', () => {
+  const source = fs.readFileSync(path.join(windowsDir, 'install-local-server.ps1'), 'utf8');
+  assert.match(source, /\[hashtable\]\$NamedArguments/);
+  assert.match(source, /-Command \$Command -Directory \$BaseDir @NamedArguments/);
+  assert.match(source, /Invoke-Runner 'init' @\{\s*GatewayPort = \$GatewayPort\s*\}/);
+});
+
 async function freePort() {
   const server = net.createServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
