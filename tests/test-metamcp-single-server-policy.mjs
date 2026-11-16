@@ -33,6 +33,56 @@ function makeSource() {
   return source;
 }
 
+function legacyCleanToolsUtils() {
+  const file = fixtureFiles['apps/backend/src/lib/metamcp/utils.ts'];
+  const helper = [
+    '// Keep MetaMCP\'s internal routing, filters, overrides and audit identity',
+    '// unchanged. Only the external representation drops the single-server prefix.',
+    '// Refuse multiple servers rather than silently route a duplicate tool name.',
+    'export async function mcpkitSingleServerPrefix(namespaceUuid: string): Promise<string> {',
+    '  const namespace = await namespacesRepository.findByUuidWithServers(namespaceUuid);',
+    '  if (!namespace || namespace.servers.length !== 1) {',
+    '    throw new Error("Clean tool names require exactly one server in the namespace");',
+    '  }',
+    '  const name = sanitizeName(namespace.servers[0].name);',
+    '  if (!name || name.includes("__")) {',
+    '    throw new Error("The single server name cannot be used for clean tool routing");',
+    '  }',
+    '  return `${name}__`;',
+    '}',
+    '',
+    'export function mcpkitCleanItems<T extends { name: string }>(items: T[], prefix: string): T[] {',
+    '  const seen = new Set<string>();',
+    '  return items.map((item) => {',
+    '    if (!item.name.startsWith(prefix) || item.name.length === prefix.length) {',
+    '      throw new Error("Unexpected item identity; refusing ambiguous clean names");',
+    '    }',
+    '    const name = item.name.slice(prefix.length);',
+    '    if (seen.has(name)) throw new Error(`Duplicate clean name: ${name}`);',
+    '    seen.add(name);',
+    '    return { ...item, name };',
+    '  });',
+    '}',
+  ].join('\n');
+  return file
+    .replace('import { oauthSessionsRepository } from "../../db/repositories/oauth-sessions.repo";',
+      'import { oauthSessionsRepository } from "../../db/repositories/oauth-sessions.repo";\nimport { namespacesRepository } from "../../db/repositories/namespaces.repo";')
+    .replace('export function sanitizeName(name: string): string {', `${helper}\n\nexport function sanitizeName(name: string): string {`);
+}
+
+test('legacy clean-tools source is reconciled when instance state has the feature disabled', (t) => {
+  const source = makeSource();
+  t.after(() => fs.rmSync(source, { recursive: true, force: true }));
+  const utils = path.join(source, 'apps/backend/src/lib/metamcp/utils.ts');
+  fs.writeFileSync(utils, legacyCleanToolsUtils());
+
+  ensurePatchedSource(source);
+
+  const patchedUtils = fs.readFileSync(utils, 'utf8');
+  assert.match(patchedUtils, /mcpkitAssertSingleServerPerEndpoint/);
+  assert.doesNotMatch(patchedUtils, /mcpkitCleanItems/);
+});
+
 test('default MetaMCP source patch enforces one server without the clean-tools overlay', (t) => {
   const source = makeSource();
   t.after(() => fs.rmSync(source, { recursive: true, force: true }));

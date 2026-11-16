@@ -567,15 +567,29 @@ export function ensurePatchedSource(source, { lan = false, cleanTools = false } 
     selectedReplacements({ lan: true }),
     selectedReplacements({ cleanTools: true }),
     selectedReplacements({ lan: true, cleanTools: true }),
+    // Previous releases could leave these exact opt-in patches in a clone
+    // even when the current instance state no longer enables that option.
+    legacyCleanToolReplacements,
+    combineReplacements(lanReplacements, legacyCleanToolReplacements),
+    lanReplacements,
   ];
   const legacyReplacements = combineReplacements(
     ...(lan ? [lanReplacements] : []),
     ...(cleanTools ? [legacyCleanToolReplacements] : []),
   );
-  const files = [...new Set([...Object.keys(replacements), ...Object.keys(legacyReplacements)])];
   const status = git(source, ['status', '--porcelain', '--untracked-files=all']).trimEnd().split('\n').filter(Boolean);
-  const allowed = new Set(files.map((file) => ` M ${file}`));
-  if (status.some((line) => !allowed.has(line))) throw new Error('MetaMCP clone has unexpected changes; no build was attempted.');
+  const recognizedFiles = new Set([
+    ...Object.keys(replacements),
+    ...Object.keys(legacyReplacements),
+    ...knownReplacements.flatMap((table) => Object.keys(table)),
+  ]);
+  const statusFiles = status.map((line) => line.slice(3));
+  if (status.some((line, index) => !line.startsWith(' M ') || !recognizedFiles.has(statusFiles[index]))) {
+    throw new Error('MetaMCP clone has unexpected changes; no build was attempted.');
+  }
+  // Validate modified files from known historical patch sets as well as the
+  // current option set. The plan below reconciles them to the saved state.
+  const files = [...new Set([...Object.keys(replacements), ...Object.keys(legacyReplacements), ...statusFiles])];
   const plans = files.map((file) => {
     const filePath = path.join(source, file);
     const info = fs.lstatSync(filePath);
