@@ -12,6 +12,7 @@ import { createInterface } from 'node:readline/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GLOBAL_SERVER_NAMES, LOCAL_SERVER_NAMES, LEGACY_GLOBAL_GROUPS, LEGACY_GLOBAL_GROUP_NAMES, legacyLocalGroups, LEGACY_LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
 import { ensurePatchedSource, LAN_PATCH_VERSION, CLEAN_TOOLS_PATCH_VERSION, SINGLE_SERVER_ENDPOINT_PATCH_VERSION } from './metamcp-lan-source.mjs';
+import { lanEnabledState, withAppUrl, validateLanIp } from './metamcp-lan-enable.mjs';
 import { readLiveGlobalLink, assertLiveGlobalNetwork } from './live-global.mjs';
 import { readLiveMetaPeerLinks, liveMetaPeerComposeFile, assertLiveMetaPeerNetworks, assertMetaPeerAppsRunning, linkMetaPeers, probeMetaPeerEndpoint, unlinkMetaPeers } from './live-metamcp.mjs';
 import { prepareMetaPeerRegistration, commitMetaPeerRegistration } from './metamcp-peer-registration.mjs';
@@ -558,17 +559,29 @@ function requireRunningMetaApp(ctx, state, expectedId = null, { staged = false }
   assertLiveMetaPeerNetworks(ctx, state);
   return id;
 }
-function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy = false } = {}) {
+function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy = false, allowMissingImage = false, previousState = null } = {}) {
+  // During a pending LAN conversion the running container still reflects the
+  // previous (loopback) state; validate it against that state, not the new one.
+  const view = previousState ?? state;
   const service = stopped ? stoppedMetaService : ownedMetaService;
   const appId = service(ctx, state, 'app');
   const postgresId = service(ctx, state, 'postgres');
   const imageId = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.Image}}', appId], { capture: true }).stdout.trim();
   if (!/^sha256:[a-f0-9]{64}$/.test(imageId)) fail('Cannot identify the running MetaMCP image; no file was changed.');
-  const imageLabels = inspect(ctx, 'image', imageId);
-  if (!imageLabels) fail('The running MetaMCP image is missing; no file was changed.');
-  checkLabel(imageLabels, state, 'image', imageId);
-  if (!allowLegacyPolicy && imageLabels['com.multfinite.mcpkit.single-server-per-endpoint-patch'] !== SINGLE_SERVER_ENDPOINT_PATCH_VERSION) {
-    fail('The running MetaMCP image predates the one-server-per-endpoint policy. Rebuild and recreate only app before using this instance.');
+  let imageLabels = inspect(ctx, 'image', imageId);
+  if (!imageLabels) {
+    // Only the LAN conversion may proceed without the running image: the caller
+    // has just built and verified the replacement, and ownership is checked on
+    // the container labels instead.
+    if (!allowMissingImage) fail('The running MetaMCP image is missing; no file was changed.');
+    const containerLabels = inspect(ctx, 'container', appId);
+    checkLabel(containerLabels, state, 'container', appId);
+    imageLabels = null;
+  } else {
+    checkLabel(imageLabels, state, 'image', imageId);
+    if (!allowLegacyPolicy && imageLabels['com.multfinite.mcpkit.single-server-per-endpoint-patch'] !== SINGLE_SERVER_ENDPOINT_PATCH_VERSION) {
+      fail('The running MetaMCP image predates the one-server-per-endpoint policy. Rebuild and recreate only app before using this instance.');
+    }
   }
   const app = containerEnvironment(ctx, appId);
   const postgres = containerEnvironment(ctx, postgresId);
@@ -582,8 +595,8 @@ function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy 
   }
   const appUrl = app.APP_URL;
   let usableAppUrl = false;
-  try { usableAppUrl = parseEnvOrigin(appUrl, state) === appUrl; } catch { /* reject an unexpected container URL below */ }
-  const trustedPrefix = usableAppUrl ? trustedOriginPrefix(state, appUrl) : '';
+  try { usableAppUrl = parseEnvOrigin(appUrl, view) === appUrl; } catch { /* reject an unexpected container URL below */ }
+  const trustedPrefix = usableAppUrl ? trustedOriginPrefix(view, appUrl) : '';
   const singleServerPolicy = ['true', 'false'].includes(app.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT)
     ? app.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT
     : allowLegacyPolicy ? 'true' : null;
@@ -591,8 +604,8 @@ function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy 
       !['true', 'false'].includes(singleServerPolicy) ||
       typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
       !app.EXTRA_TRUSTED_ORIGINS.startsWith(trustedPrefix) ||
-      (state.lanIp && (app.MCPKIT_MULTI_AUTH_ORIGINS !== lanOrigins(state) || app.MCPKIT_COOKIE_PREFIX !== `mcpkit-${state.id}` || app.NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN !== 'true')) ||
-      (state.cleanTools && app.MCPKIT_CLEAN_TOOL_NAMES !== 'true')) {
+      (view.lanIp && (app.MCPKIT_MULTI_AUTH_ORIGINS !== lanOrigins(view) || app.MCPKIT_COOKIE_PREFIX !== `mcpkit-${view.id}` || app.NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN !== 'true')) ||
+      (view.cleanTools && app.MCPKIT_CLEAN_TOOL_NAMES !== 'true')) {
     fail('Container MetaMCP URL or admin settings are unexpected; inspect the project state.');
   }
   const mountsResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', postgresId], { capture: true });
@@ -991,8 +1004,14 @@ function renderedMetaSettings(ctx, state, envValues) {
   }
   return { appUrl, admins, extraOrigins, singleServerPolicy, appEnv: app };
 }
-function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false } = {}) {
+function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false, previousState = null } = {}) {
   const outcome = after ? 'The app was recreated; inspect it before retrying.' : 'No container was changed.';
+  // Pending LAN conversion: the running container is still described by the
+  // previous state, so container-facing checks use it. The new image was built
+  // and verified by enableMetaLan, so it is not compared with the running one.
+  const pending = Boolean(previousState) && !after;
+  const runningState = pending ? previousState : state;
+  const pendingLanKeys = pending ? ['MCPKIT_MULTI_AUTH_ORIGINS', 'MCPKIT_COOKIE_PREFIX', 'NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN'] : [];
   checkResources(ctx, state);
   const appRunning = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.State.Running}}', snapshot.appId], { capture: true }).stdout.trim();
   const appHealth = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}', snapshot.appId], { capture: true }).stdout.trim();
@@ -1012,7 +1031,7 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   }
   const appImage = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.Image}}', snapshot.appId], { capture: true }).stdout.trim();
   const taggedImage = run('docker', ['--context', ctx, 'image', 'inspect', '--format', '{{.Id}}', image], { capture: true }).stdout.trim();
-  if (!/^sha256:[a-f0-9]{64}$/.test(appImage) || appImage !== taggedImage) fail(`The kit image tag no longer identifies the running app image. ${outcome}`);
+  if (!pending && (!/^sha256:[a-f0-9]{64}$/.test(appImage) || appImage !== taggedImage)) fail(`The kit image tag no longer identifies the running app image. ${outcome}`);
   const imageResult = run('docker', ['--context', ctx, 'image', 'inspect', '--format', '{{json .Config.Env}}', image], { capture: true });
   const imageEnv = dockerEnvironment(imageResult.stdout, 'image');
   const appEnv = containerEnvironment(ctx, snapshot.appId);
@@ -1022,7 +1041,7 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   const imageRuntime = run('docker', ['--context', ctx, 'image', 'inspect', '--format', runtimeFormat, image], { capture: true }).stdout;
   const appRuntime = run('docker', ['--context', ctx, 'container', 'inspect', '--format', runtimeFormat, snapshot.appId], { capture: true }).stdout;
   if (imageRuntime !== appRuntime) fail(`The app has customized execution settings; review them locally before recreation. ${outcome}`);
-  const editable = new Set(['APP_URL', 'NEXT_PUBLIC_APP_URL', 'METAMCP_ADMIN_EMAILS', 'EXTRA_TRUSTED_ORIGINS', 'MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT']);
+  const editable = new Set(['APP_URL', 'NEXT_PUBLIC_APP_URL', 'METAMCP_ADMIN_EMAILS', 'EXTRA_TRUSTED_ORIGINS', 'MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT', ...pendingLanKeys]);
   for (const [key, value] of Object.entries(planned.appEnv)) {
     if (!editable.has(key) && appEnv[key] !== value) fail(`The app has different non-URL settings; review them locally before recreation. ${outcome}`);
   }
@@ -1033,7 +1052,7 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   let ports;
   try { ports = JSON.parse(portsResult.stdout); } catch { fail(`Cannot inspect app port bindings. ${outcome}`); }
   const published = ports && typeof ports === 'object' && !Array.isArray(ports) ? ports['12008/tcp'] : null;
-  const portHosts = state.lanIp ? ['127.0.0.1', state.lanIp] : ['127.0.0.1'];
+  const portHosts = runningState.lanIp ? ['127.0.0.1', runningState.lanIp] : ['127.0.0.1'];
   if (!ports || Object.keys(ports).length !== 1 || !Array.isArray(published) || published.length !== portHosts.length ||
       published.some((item) => item?.HostPort !== String(state.port) || !portHosts.includes(item.HostIp)) ||
       portHosts.some((host) => published.filter((item) => item?.HostIp === host).length !== 1)) {
@@ -1081,7 +1100,88 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
     fail(`The app has extra or unexpected networks. Review its connection details before applying. ${outcome}`);
   }
 }
-async function applyMetaConfig(ctx, state) {
+function replacePrivateFile(file, data) {
+  // Write beside the target first, then rename, so an interrupted write never
+  // leaves a truncated state or .env file behind.
+  const temp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(temp, data, { flag: 'wx', mode: 0o600 });
+  fs.renameSync(temp, file);
+}
+// Converts an existing loopback-only MetaMCP to the explicit HTTP LAN mode.
+// Order: validate, back up, write the new state/.env, build the LAN-patched app
+// image, then hand over to applyMetaConfig, which asks for confirmation and
+// recreates only the app container. PostgreSQL and named volumes are untouched.
+async function enableMetaLan(ctx, saved, lanIp) {
+  if (process.platform !== 'linux') fail('LAN mode is available only on Linux hosts.');
+  if (saved.type !== 'meta') fail('set-lan applies only to a MetaMCP installation.');
+  if (setupMarker(saved)) fail('Complete or remove the staged installation before enabling LAN access.');
+  validateLanIp(lanIp);
+  const local = Object.values(os.networkInterfaces()).flat().some((item) => item && item.family === 'IPv4' && item.address === lanIp);
+  if (!local) fail(`LAN address ${lanIp} is not assigned to this host; no files were changed.`);
+  const next = lanEnabledState(saved, lanIp);
+  if (next === saved) {
+    // A previous attempt may have saved the LAN state and stopped before the
+    // container was recreated. Make sure the tagged image carries the LAN patch,
+    // then continue with the same confirmed apply path.
+    console.log(`LAN mode is already enabled on ${lanIp}; checking the app image and configuration.`);
+    const tagged = inspect(ctx, 'image', config(saved).MCPKIT_IMAGE);
+    if (!tagged || tagged['com.multfinite.mcpkit.lan-patch'] !== LAN_PATCH_VERSION) {
+      ensurePatchedSource(path.join(saved.base, 'metamcp'), { lan: true, cleanTools: Boolean(saved.cleanTools) });
+      console.log('Building the app image with the LAN patch; the running container is not changed by this step.');
+      compose(ctx, saved, ['build', 'app']);
+    }
+    // Use the pre-LAN state only while the running container still has the old
+    // origin; once it has been recreated, the strict checks apply to the LAN state.
+    const backup = path.join(saved.base, '.mcpkit', 'state.json.pre-lan');
+    const runningUrl = containerEnvironment(ctx, ownedMetaService(ctx, saved, 'app')).APP_URL;
+    const stillOld = runningUrl !== saved.appUrl && fs.existsSync(backup);
+    const previousState = stillOld ? JSON.parse(privateRegularFile(backup).toString('utf8')) : null;
+    await applyMetaConfig(ctx, saved, { allowMissingImage: stillOld, previousState });
+    return;
+  }
+  const priv = path.join(saved.base, '.mcpkit');
+  const stateFile = path.join(priv, 'state.json');
+  const envFile = path.join(priv, '.env');
+  const oldState = privateRegularFile(stateFile);
+  const oldEnv = privateRegularFile(envFile);
+  if (!oldState || !oldEnv) fail('The kit state or private .env is missing; no files were changed.');
+  const backupState = path.join(priv, 'state.json.pre-lan');
+  const backupEnv = path.join(priv, '.env.pre-lan');
+  // A backup left by an earlier failed attempt is reused only if it still equals
+  // the current file; anything else is preserved for manual review.
+  const sameOrMissing = (file, bytes) => !fs.existsSync(file) || (privateRegularFile(file)?.equals(bytes) ?? false);
+  if (!sameOrMissing(backupState, oldState) || !sameOrMissing(backupEnv, oldEnv)) {
+    fail('A pre-LAN backup differs from the current files. Review .mcpkit/*.pre-lan and move it aside before retrying; no files were changed.');
+  }
+  if (!fs.existsSync(backupState)) privateWrite(backupState, oldState);
+  if (!fs.existsSync(backupEnv)) privateWrite(backupEnv, oldEnv);
+  const newEnv = withAppUrl(oldEnv.toString('utf8'), next.appUrl);
+  let image = '';
+  try {
+    replacePrivateFile(stateFile, `${JSON.stringify(next, null, 2)}\n`);
+    replacePrivateFile(envFile, newEnv);
+    // Read the image name only after the files are consistent: configuredMetaOrigin
+    // validates APP_URL against the state it is given.
+    image = config(next).MCPKIT_IMAGE;
+    ensurePatchedSource(path.join(next.base, 'metamcp'), { lan: true, cleanTools: Boolean(next.cleanTools) });
+    console.log('Building the app image with the LAN patch; the running container is not changed by this step.');
+    compose(ctx, next, ['build', 'app']);
+    const built = inspect(ctx, 'image', image);
+    if (!built) fail(`Built image is missing: ${image}`);
+    checkLabel(built, next, 'image', image);
+    if (built['com.multfinite.mcpkit.lan-patch'] !== LAN_PATCH_VERSION) fail('Built image lacks the expected LAN patch label.');
+    if (built['com.multfinite.mcpkit.single-server-per-endpoint-patch'] !== SINGLE_SERVER_ENDPOINT_PATCH_VERSION) fail('Built image lacks the one-server-per-endpoint patch label.');
+  } catch (error) {
+    // Restore the previous kit files; the running container was not recreated yet.
+    replacePrivateFile(stateFile, oldState);
+    replacePrivateFile(envFile, oldEnv);
+    console.error('LAN preparation failed; the state and .env were restored from their previous content. Backups remain in .mcpkit/*.pre-lan.');
+    throw error;
+  }
+  console.log(`LAN configuration saved for ${lanIp}:${next.port}. Confirm the app recreation below; PostgreSQL and volumes are kept.`);
+  await applyMetaConfig(ctx, next, { allowMissingImage: true, previousState: saved });
+}
+async function applyMetaConfig(ctx, state, { allowMissingImage = false, previousState = null } = {}) {
   const priv = path.join(state.base, '.mcpkit');
   for (const dir of [state.base, priv]) {
     const item = fs.lstatSync(dir);
@@ -1097,7 +1197,7 @@ async function applyMetaConfig(ctx, state) {
   try { savedState = JSON.parse(stateBytes.toString('utf8')); } catch { fail('Cannot read the kit state; no container was changed.'); }
   if (JSON.stringify(savedState) !== JSON.stringify(state)) fail('The kit state changed during preflight; no container was changed.');
   const values = readEnv(state.base, 'meta');
-  const before = metaContainerSnapshot(ctx, state);
+  const before = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
   if (before.password !== values.POSTGRES_PASSWORD || before.secret !== values.BETTER_AUTH_SECRET) {
     fail('The .env credentials differ from the existing containers. Restore the correct values before applying; no container was changed.');
   }
@@ -1113,7 +1213,7 @@ async function applyMetaConfig(ctx, state) {
     fail('Existing extra trusted origins would be cleared because EXTRA_TRUSTED_ORIGINS is missing. Set it explicitly after review; no container was changed.');
   }
   if (['appUrl', 'admins', 'extraOrigins', 'singleServerPolicy'].every((key) => before[key] === planned[key])) {
-    const current = metaContainerSnapshot(ctx, state);
+    const current = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
     for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
       if (current[key] !== before[key]) fail('Container configuration changed during inspection; no container was changed by this command.');
     }
@@ -1121,7 +1221,7 @@ async function applyMetaConfig(ctx, state) {
     console.log('Requested URL, admin/trusted-origin settings, and endpoint server policy already match the app container; no container was recreated. Check status separately.');
     return;
   }
-  checkMetaApplyResources(ctx, state, before, planned);
+  checkMetaApplyResources(ctx, state, before, planned, { previousState });
   const count = (text) => text.split(',').map((value) => value.trim()).filter(Boolean).length;
   const message = `Apply MetaMCP configuration for ${state.project}?\n` +
     `Requested primary origin: ${planned.appUrl}\n` +
@@ -1135,12 +1235,12 @@ async function applyMetaConfig(ctx, state) {
     'Do not run another start, stop, apply, or edit the .env at the same time.';
   if (!(await confirm(message, `APPLY ${state.project}`))) { console.log('Cancelled; no container was changed.'); process.exitCode = 1; return; }
   if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during confirmation; no container was changed.');
-  const rechecked = metaContainerSnapshot(ctx, state);
+  const rechecked = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
   for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
     if (rechecked[key] !== before[key]) fail('Container configuration changed during confirmation; no container was changed.');
   }
   const finalPlan = renderedMetaSettings(ctx, state, values);
-  checkMetaApplyResources(ctx, state, rechecked, finalPlan);
+  checkMetaApplyResources(ctx, state, rechecked, finalPlan, { previousState });
   for (const key of ['appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
     if (finalPlan[key] !== planned[key]) fail('Rendered settings changed during confirmation; no container was changed.');
   }
@@ -1153,6 +1253,7 @@ async function applyMetaConfig(ctx, state) {
   console.log('Compose reported app recreation complete. PostgreSQL and named volumes were not targeted for recreation or removal.');
   let after;
   try {
+    // After recreation the container must match the NEW state; no previous state applies.
     after = metaContainerSnapshot(ctx, state);
     if (after.appId === before.appId || after.postgresId !== before.postgresId || after.password !== before.password || after.secret !== before.secret ||
         after.appUrl !== planned.appUrl || after.admins !== planned.admins || after.extraOrigins !== planned.extraOrigins || after.singleServerPolicy !== planned.singleServerPolicy) {
@@ -1570,7 +1671,7 @@ async function shareRegistrationFile(ctx, meta, savedMeta, registrationFile) {
 
 try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'link-metamcp', 'unlink-metamcp', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|link-metamcp|unlink-metamcp|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
+  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'set-lan', 'remove', 'link', 'unlink', 'link-metamcp', 'unlink-metamcp', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|set-lan|remove|link|unlink|link-metamcp|unlink-metamcp|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
   const opts = parseArgs(argv);
   if (opts.expectType && !['meta', 'global'].includes(opts.expectType)) fail('Unknown expected kit type.');
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
@@ -1587,7 +1688,10 @@ try {
   if (isInit && opts.expectType && opts.expectType !== (action === 'init-meta' ? 'meta' : 'global')) fail('The requested and expected kit types differ.');
   if (!isInit && (opts.port || opts.appUrl)) fail('Ports and APP_URL are only accepted for new installations.');
   if (action === 'init-global' && opts.appUrl) fail('--app-url is only for MetaMCP.');
-  if (action !== 'init-meta' && (opts.staged || opts.fresh || opts.lanIp || opts.adminEmail || opts.allowInsecureLan || opts.cleanTools)) fail('Staging, fresh-install, clean-tool and LAN options are only available for init-meta.');
+  if (!['init-meta', 'set-lan'].includes(action) && (opts.staged || opts.fresh || opts.lanIp || opts.adminEmail || opts.allowInsecureLan || opts.cleanTools)) fail('Staging, fresh-install, clean-tool and LAN options are only available for init-meta and set-lan.');
+  if (action === 'set-lan' && (!opts.lanIp || !opts.allowInsecureLan || opts.staged || opts.fresh || opts.adminEmail || opts.cleanTools || opts.port || opts.appUrl)) {
+    fail('set-lan requires --lan-ip <private IPv4 of this host> and --allow-insecure-lan, and accepts no other install options.');
+  }
   if (opts.adminEmail && !opts.staged) fail('--admin-email requires --staged.');
   const base = path.resolve(opts.dir);
   const isSharing = action === 'share-global' || action === 'share-registration';
@@ -1635,6 +1739,7 @@ try {
   else if (action === 'unlink-metamcp') unlinkMetaPeers(ctx, state, peerState);
   else if (action === 'share-global') await shareGlobalRegistration(ctx, state, saved, opts.metaDir, opts.registration);
   else if (action === 'share-registration') await shareRegistrationFile(ctx, state, saved, opts.registrationFile);
+  else if (action === 'set-lan') await enableMetaLan(ctx, state, opts.lanIp);
   else if (action === 'apply') {
     if (state.type === 'meta' && setupMarker(state)) fail('Complete or remove the staged installation before applying configuration.');
     if (state.type === 'meta') await applyMetaConfig(ctx, state);

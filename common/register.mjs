@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GLOBAL_GROUPS, GLOBAL_SERVER_NAMES, GLOBAL_GROUP_NAMES } from './registration-manifest.mjs';
 import { loadLocalBundle } from './local-registration.mjs';
+import { kitDescription, isKitRecord, serverUpdateBody, namespaceUpdateBody } from './register-update.mjs';
 import { inspectLiveGlobal, startLiveGlobal, enableLiveGlobalRestart, liveGlobalStatus, connectLiveGlobal } from './live-global.mjs';
 
 const [profile, ...rawArgs] = process.argv.slice(2);
@@ -204,7 +205,7 @@ async function trpc(origin, cookie, procedure, input, mutation = false) {
   const { body } = await request(`${origin}/trpc/frontend.${procedure}${suffix}`, options);
   let value = body?.result?.data;
   if (value && typeof value === 'object' && Object.hasOwn(value, 'json')) value = value.json;
-  if (!value || typeof value !== 'object' || value.success !== true) fail(`MetaMCP procedure ${procedure} failed. Existing records were not updated or deleted.`);
+  if (!value || typeof value !== 'object' || value.success !== true) fail(`MetaMCP procedure ${procedure} failed; inspect the pending operation before retrying.`);
   return value.data;
 }
 function canonical(value) {
@@ -242,7 +243,7 @@ async function main() {
   console.log(`This creates public ${profile.toUpperCase()} servers, each with a same-named namespace and endpoint, without instance prefixes. An administrator account is required.`);
   console.log('New endpoints require a MetaMCP API key. Every MetaMCP user can use the shared servers and their configured credentials/data.');
   if (profile === 'local') console.log('WARNING: shared LOCAL servers can expose files, databases, terminals and desktop control to other users.');
-  console.log('Existing records are never updated or deleted; conflicting names are not adopted.');
+  console.log('Records created by this kit with the same names are updated to the current definition. Records with other names are never updated or deleted, and same-named records not created by this kit are not adopted.');
   console.log('The MetaMCP host must be able to reach the gateway URL; it can differ from the address reachable from this terminal.');
   // For an existing local Docker project, derive both addresses instead of
   // asking the user to copy credentials, a gateway URL, or an uncertain path.
@@ -355,24 +356,39 @@ async function main() {
             fail(`Previously registered endpoint ${name} has unexpected settings or namespace; no records were changed.`);
           }
         }
-        if (current.some((item) => item.name === name && item.uuid !== record?.uuid)) {
+        const adoptable = (item) => kind !== 'endpoint' && isKitRecord(item, profile, id);
+        if (current.some((item) => item.name === name && item.uuid !== record?.uuid && !adoptable(item))) {
           fail(`The ${kind} name ${name} is already in use; it was not adopted or renamed. No MetaMCP records were changed.`);
         }
       }
     }
+    async function update(kind, name, procedure, body) {
+      journal.pending = { kind, name };
+      save(); // Same rule as create: a lost response is not treated as success.
+      const data = await trpc(target.base, auth.cookie, procedure, body, true);
+      if (!data || data.uuid !== body.uuid) fail(`Unexpected ${kind} update response; inspect the pending operation before retrying.`);
+      return data;
+    }
     for (const id of serverIds) {
       const name = bundle.serverNames[id];
       const known = journal.servers[id];
-      if (known) {
-        const existing = serverList.find((s) => s.uuid === known.uuid);
-        if (!existing) fail(`Previously created server ${name} is missing or inaccessible. It was not recreated.`);
-        continue; // Edits are preserved. Hash is checked before a new mapping.
-      }
-      if (serverList.some((s) => s.name === name)) fail(`Server name ${name} already exists; it was not adopted or changed.`);
       const isGithub = id === 'github-mcp-server';
-      const body = { name, description: `MCP Kit ${profile}: ${id}`, type: 'STREAMABLE_HTTP',
+      const desired = { name, description: kitDescription(profile, id), type: 'STREAMABLE_HTTP',
         url: isGithub ? 'https://api.githubcopilot.com/mcp/' : `${gateway.base}/servers/${id}/mcp`,
-        ...(isGithub ? {} : { headers: { 'X-API-Key': bundle.key } }), ...publicOwner };
+        ...(isGithub ? {} : { headers: { 'X-API-Key': bundle.key } }) };
+      const current = known ? serverList.find((s) => s.uuid === known.uuid) : serverList.find((s) => s.name === name && isKitRecord(s, profile, id));
+      if (known && !current) fail(`Previously created server ${name} is missing or inaccessible. It was not recreated.`);
+      if (current) {
+        const body = serverUpdateBody(current, desired);
+        const record = body ? await update('server', name, 'mcpServers.update', body) : current;
+        journal.servers[id] = { uuid: record.uuid, name, hash: body || !known ? serverHash(record) : known.hash };
+        journal.pending = null;
+        save();
+        serverList[serverList.indexOf(current)] = record;
+        console.log(body ? `Updated server ${name}` : `Server ${name} is up to date`);
+        continue;
+      }
+      const body = { ...desired, ...publicOwner };
       const created = await create('server', name, 'mcpServers.create', body);
       journal.servers[id] = { uuid: created.uuid, name, hash: serverHash(created) };
       journal.pending = null;
@@ -384,16 +400,26 @@ async function main() {
       const name = bundle.groupNames[group];
       const uuids = members.map((id) => journal.servers[id].uuid);
       let ns = journal.namespaces[group];
-      if (ns) {
-        if (!namespaceList.some((item) => item.uuid === ns.uuid)) fail(`Previously created namespace ${name} is missing or inaccessible; it was not recreated.`);
+      const current = ns ? namespaceList.find((item) => item.uuid === ns.uuid) : namespaceList.find((item) => item.name === name && isKitRecord(item, profile, group));
+      if (ns && !current) fail(`Previously created namespace ${name} is missing or inaccessible; it was not recreated.`);
+      if (current) {
+        const detailed = await trpc(target.base, auth.cookie, 'namespaces.get', { uuid: current.uuid });
+        if (detailed?.user_id !== expectedOwner) fail(`Namespace ${name} is not public; it was not changed.`);
+        const actual = (detailed?.servers || []).map((server) => server.uuid);
+        const body = namespaceUpdateBody(current, { name, description: kitDescription(profile, group), serverUuids: uuids, actualServerUuids: actual });
+        const record = body ? await update('namespace', name, 'namespaces.update', body) : current;
+        ns = journal.namespaces[group] = { uuid: record.uuid, name, servers: uuids };
+        journal.pending = null;
+        save();
+        namespaceList[namespaceList.indexOf(current)] = record;
+        console.log(body ? `Updated namespace ${name}` : `Namespace ${name} is up to date`);
       } else {
-        if (namespaceList.some((item) => item.name === name)) fail(`Namespace name ${name} exists; it was not adopted or changed.`);
         for (const id of members) {
           const record = journal.servers[id];
-          const current = serverList.find((s) => s.uuid === record.uuid);
-          if (!current || serverHash(current) !== record.hash) fail(`Server ${record.name} was changed or removed; it was not attached to a new namespace.`);
+          const currentServer = serverList.find((s) => s.uuid === record.uuid);
+          if (!currentServer || serverHash(currentServer) !== record.hash) fail(`Server ${record.name} was changed or removed; it was not attached to a new namespace.`);
         }
-        const created = await create('namespace', name, 'namespaces.create', { name, description: `MCP Kit ${profile}: ${group}`, mcpServerUuids: uuids, ...publicOwner });
+        const created = await create('namespace', name, 'namespaces.create', { name, description: kitDescription(profile, group), mcpServerUuids: uuids, ...publicOwner });
         ns = journal.namespaces[group] = { uuid: created.uuid, name, servers: uuids };
         journal.pending = null;
         save();
@@ -422,7 +448,7 @@ async function main() {
       endpointList.push(created);
       console.log(`Created protected endpoint ${name}`);
     }
-    console.log('\nRegistration complete. Existing records and user changes were not updated or deleted.');
+    console.log('\nRegistration complete. Kit records were updated where needed; other records were not changed.');
     for (const group of Object.keys(bundle.groups)) console.log(`${group}: ${target.base}/metamcp/${bundle.groupNames[group]}/mcp`);
     const clientKeyFile = meta && path.join(meta.privateDir, 'client-api-key');
     if (clientKeyFile && fs.existsSync(clientKeyFile)) console.log(`Use the PRIVATE client key stored at ${clientKeyFile}.`);

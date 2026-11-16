@@ -60,7 +60,10 @@ node --test \
   tests/test-local-registration.mjs \
   tests/test-metamcp-link.mjs \
   tests/test-metamcp-peer-registration.mjs \
-  tests/test-metamcp-single-server-policy.mjs
+  tests/test-metamcp-single-server-policy.mjs \
+  tests/test-register-update.mjs \
+  tests/test-register-simulated.mjs \
+  tests/test-metamcp-lan-enable.mjs
 bash tests/test-linux-service-registration.sh
 ```
 
