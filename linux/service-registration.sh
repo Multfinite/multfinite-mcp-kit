@@ -66,7 +66,7 @@ mcpkit_register_service() {
     temp_file="$(mktemp "$unit_dir/.mcpkit-service.XXXXXX")" || return 1
     {
         printf '%s\n' "$MCPKIT_SYSTEMD_MARKER"
-        printf '[Unit]\nDescription=Multfinite MCP Kit %s runner\nAfter=default.target\n\n' "$kind"
+        printf '[Unit]\nDescription=Multfinite MCP Kit %s runner\n\n' "$kind"
         printf '[Service]\nType=oneshot\nRemainAfterExit=yes\n'
         printf 'Environment=%s\n' "$(mcpkit_systemd_quote "HOME=$HOME")"
         printf 'Environment=%s\n' "$(mcpkit_systemd_quote "PATH=$PATH")"

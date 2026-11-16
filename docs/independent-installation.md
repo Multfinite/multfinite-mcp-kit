@@ -37,7 +37,13 @@ bash linux/run-metamcp.sh stop   "$HOME/mcp-kit/metamcp/global"
 bash linux/run-metamcp.sh start  "$HOME/mcp-kit/metamcp/global"
 bash linux/run-metamcp.sh apply  "$HOME/mcp-kit/metamcp/global"
 bash linux/run-metamcp.sh logs   "$HOME/mcp-kit/metamcp/global"
+
+# Optional per-user systemd autostart; register starts this MetaMCP now.
+bash linux/run-metamcp.sh register-service "$HOME/mcp-kit/metamcp/global"
+bash linux/run-metamcp.sh unregister-service "$HOME/mcp-kit/metamcp/global"
 ```
+
+`register-service` creates a user systemd unit for this one MetaMCP instance, starts it immediately, and enables it for the user's systemd session. It does not enable WSL/systemd itself or start the WSL distribution from Windows. WSL boot configuration and registering multiple instances are described below in [Autostart for a complete WSL setup](#autostart-for-a-complete-wsl-setup).
 
 ### Windows
 
@@ -238,6 +244,59 @@ bash linux/run-local-servers.sh unregister-service "$HOME/mcp-kit/local"
 - Вместо Windows Everything используется **тот же `mcp-server-everything-search` с Linux-поиском через `locate/plocate`**. Установите `plocate` и `which`, затем инициализируйте индекс средствами вашей системы; `sudo updatedb` обходит файловую систему и выполняется только по вашему решению. Возможности и актуальность результатов отличаются от Windows Everything.
 - Вместо Windows-MCP установлен **Universal Computer Control** (`linux-desktop`). Это другой сервер с другим набором инструментов: для управления экраном нужен интерактивный X11/XWayland-сеанс и `DISPLAY`, а доступность конкретных приложений зависит от сессии, библиотек и прав. Для управления окнами нужны `wmctrl` и/или `xdotool`; некоторые возможности требуют AT-SPI, OCR и дополнительных системных библиотек. Python-окружение изолировано и не обязательно видит системный пакет `python3-pyatspi`; доступность каждого backend проверяйте отдельно. Нативный Wayland/безголовый сервер не обещается. Необязательная собственная конфигурация аналога — `config/computer-control.yaml`; настройки другого `~/.universal-computer` не подхватываются. Инструменты могут управлять реальным рабочим столом, выполнять действия и передавать снимки экрана клиенту/модели. Рассмотрите отдельный сеанс или ВМ и ограничьте доверенных клиентов.
 - Obsidian требует ключ Local REST API; доступ к нему ограничен loopback. CodeGraph/Serena/Codebase Memory требуют настройки или индексации проектов. DBHub, файловый доступ и Desktop Commander способны изменять данные. `ready` означает успешный MCP `initialize`, а не проверку каждой операции; `waiting` требует дополнительной настройки, а `starting`/`error` дают ненулевой код контроллера после ожидания. Файлы `config/local-settings.json`, `config/private/secrets.json`, данные и логи могут содержать секреты и пользовательские файлы.
+
+### Автозапуск полного набора в WSL 2
+
+Автозапуск состоит из двух частей: systemd запускает зарегистрированные компоненты **после старта Debian**, а Windows должен запустить саму WSL-дистрибуцию. Команды ниже запускайте из Debian под тем же Linux-пользователем, которому принадлежат установки; укажите реальные каталоги всех экземпляров (путь из сохранённого состояния должен совпадать с текущим).
+
+1. Включите systemd в WSL. Сохраните существующие настройки `/etc/wsl.conf` и добавьте в него, если такого раздела/параметра ещё нет:
+
+   ```ini
+   [boot]
+   systemd=true
+   ```
+
+   В PowerShell Windows выполните `wsl --shutdown`, затем снова откройте Debian. Проверьте `ps -p 1 -o comm=` (ожидается `systemd`) и `systemctl --user show-environment`.
+
+2. Включите пользовательский systemd manager без интерактивного входа. Команда требует sudo один раз:
+
+   ```sh
+   sudo loginctl enable-linger "$USER"
+   loginctl show-user "$USER" -p Linger
+   ```
+
+   В результате ожидается `Linger=yes`. Для Docker Engine, установленного внутри Debian, проверьте его автозапуск и доступ к сокету:
+
+   ```sh
+   sudo systemctl enable --now docker
+   docker info
+   ```
+
+   Если Docker установлен/управляется иначе, не выполняйте эту команду вслепую: выберите и настройте именно тот локальный Docker Engine, который используют текущие проекты. Независимые установки комплекта не переключают Docker context и не используют удалённый daemon.
+
+3. Зарегистрируйте **каждую** WSL-установку отдельно. Повторите MetaMCP-команду для всех трёх каталогов, а команды GLOBAL и Linux LOCAL — для тех наборов, которые действительно установлены в Debian. Примеры путей ниже замените точными текущими путями:
+
+   ```sh
+   KIT="$HOME/mcp-kit"
+   bash linux/run-metamcp.sh register-service "$KIT/metamcp/global-localhost"
+   bash linux/run-metamcp.sh register-service "$KIT/metamcp/local-wslhost"
+   bash linux/run-metamcp.sh register-service "$KIT/metamcp/local-vmhost"
+   bash linux/run-global-servers.sh register-service "$KIT/global"
+   bash linux/run-local-servers.sh register-service "$KIT/local"
+   ```
+
+   `register-service` сразу запускает выбранный компонент и включает его в systemd; повторная регистрация безопасно обновляет принадлежащий комплекту unit. Для диагностики используйте `systemctl --user --failed`, `systemctl --user status 'mcpkit-*'` и соответствующие `run-*.sh status <каталог>` команды. У LOCAL запуск desktop-control всё равно зависит от существующей интерактивной графической сессии, а отдельные MCP-серверы могут оставаться `waiting` без ключей/настроек. GLOBAL управляет всеми серверами своего GLOBAL-шлюза; команда не запускает серверы MetaMCP или Windows/VM LOCAL.
+
+4. Настройте запуск Debian при входе в Windows. В Планировщике заданий создайте задачу с триггером **At log on** для вашей учётной записи и действием:
+
+   - Program/script: `C:\Windows\System32\wsl.exe`
+   - Arguments: `-d Debian --exec /bin/true`
+
+   Либо создайте эквивалентный ярлык/скрипт автозапуска, запускающий `wsl.exe -d Debian --exec /bin/true`. Идентификатор `Debian` должен совпадать с `wsl -l -q`. Это запускает дистрибутив; `enable-linger` оставляет пользовательский manager активным и выполняет включённые units. Если нужен запуск до входа пользователя Windows, задачу планировщика нужно отдельно настроить с учётом политики Windows и доступности профиля/WSL.
+
+Если сервисы зарегистрированы, но не стартовали после перезагрузки, сначала проверьте, что Debian действительно был запущен Windows-задачей, затем `systemctl --user --failed`, `journalctl --user -b` и `docker info`. Чтобы снять регистрацию отдельного компонента, вызовите его `unregister-service <тот-же-каталог>`; это не останавливает уже работающий стек. Для всей WSL-инфраструктуры можно снять linger командой `sudo loginctl disable-linger "$USER"`, но это остановит автозапуск user services при отсутствии активного входа.
+
+Важно: это автозапуск только внутри WSL. Windows LOCAL на Host и LOCAL-серверы в Windows VM запускаются механизмами Windows на соответствующих машинах; настройка WSL не запускает Windows VM и её локальные процессы.
 
 ## 4. Подключение набора к выбранному MetaMCP
 
