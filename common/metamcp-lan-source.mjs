@@ -548,10 +548,10 @@ function git(source, args) {
   if (result.error || result.status !== 0) throw new Error('Cannot inspect the owned MetaMCP source.');
   return result.stdout;
 }
-function patched(original, changes) {
+function patched(original, changes, file = 'source file') {
   let value = original;
   for (const [before, after] of changes) {
-    if (value.split(before).length !== 2) throw new Error('Pinned upstream source differs from the expected MCP Kit patch; no files changed.');
+    if (value.split(before).length !== 2) throw new Error(`Pinned upstream source differs in ${file}; no files changed.`);
     value = value.replace(before, after);
   }
   return value;
@@ -595,9 +595,9 @@ export function ensurePatchedSource(source, { lan = false, cleanTools = false } 
     const info = fs.lstatSync(filePath);
     if (!info.isFile() || info.isSymbolicLink()) throw new Error('Unexpected source file; no build was attempted.');
     const baseline = git(source, ['show', `HEAD:${file}`]);
-    const expected = patched(baseline, replacements[file] || []);
-    const knownVersions = knownReplacements.map((table) => patched(baseline, table[file] || []));
-    const legacy = patched(baseline, legacyReplacements[file] || []);
+    const expected = patched(baseline, replacements[file] || [], file);
+    const knownVersions = knownReplacements.map((table) => patched(baseline, table[file] || [], file));
+    const legacy = patched(baseline, legacyReplacements[file] || [], file);
     const current = fs.readFileSync(filePath, 'utf8');
     if (current !== baseline && current !== expected && current !== legacy && !knownVersions.includes(current)) {
       throw new Error(`Local edits in ${file} were preserved; no build was attempted.`);

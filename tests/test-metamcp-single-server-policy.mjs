@@ -16,6 +16,12 @@ const fixtureFiles = {
   'apps/backend/src/lib/metamcp/utils.ts': `import { oauthSessionsRepository } from "../../db/repositories/oauth-sessions.repo";\n\nexport function sanitizeName(name: string): string {\n  return name;\n}\n`,
   'apps/backend/src/lib/metamcp/metamcp-proxy.ts': `import { sanitizeName } from "./utils";\n\nexport const createServer = async (namespaceUuid: string) => {\n  const namespace = await namespacesRepository.findByUuid(namespaceUuid);\n  server.setRequestHandler(ListToolsRequestSchema, async (request) => {\n    const result = await listToolsWithMiddleware(request, handlerContext);\n    const adminContext = getAdminToolsContext(handlerContext.sessionId);\n\n    if (adminContext?.enabled && adminContext.userId) {\n      result.tools.push(...getAdminToolsForMcp());\n    }\n\n    return result;\n  });\n\n  server.setRequestHandler(CallToolRequestSchema, async (request) => {\n    if (isExposedAdminToolName(request.params.name)) {\n      return executeAdminTool(request.params.name);\n    }\n    return await callToolWithMiddleware(request, handlerContext);\n  });\n\n  server.setRequestHandler(GetPromptRequestSchema, async (request) => {\n    const { name } = request.params;\n    const clientForPrompt = promptToClient[name];\n  });\n\n  server.setRequestHandler(ListPromptsRequestSchema, async (request) => {\n    const serverParams = await getMcpServers(\n      namespaceUuid,\n      includeInactiveServers,\n    );\n    const allPrompts = [];\n    return {\n      prompts: allPrompts,\n      nextCursor: request.params?.cursor,\n    };\n  });\n\n  server.setRequestHandler(ListResourcesRequestSchema, async (request) => {\n    const serverParams = await getMcpServers(\n      namespaceUuid,\n      includeInactiveServers,\n    );\n  });\n\n  server.setRequestHandler(ReadResourceRequestSchema, async (request) => {\n    const { uri } = request.params;\n  });\n\n  server.setRequestHandler(\n    ListResourceTemplatesRequestSchema,\n    async (request) => {\n      const serverParams = await getMcpServers(\n        namespaceUuid,\n        includeInactiveServers,\n      );\n    },\n  );\n};\n`,
   'apps/backend/src/routers/public-metamcp/openapi/handlers.ts': `import { sanitizeName } from "../../../lib/metamcp/utils";\n\nexport const createMiddlewareEnabledHandlers = () => {\n  return {\n    handlerContext,\n    listToolsWithMiddleware,\n    callToolWithMiddleware,\n  };\n};\n`,
+  'apps/backend/src/auth.ts': `const BETTER_AUTH_URL = process.env.APP_URL;\nconst authOptions = {\n    crossSubDomainCookies: {\n      enabled: true,\n    },\n};\n`,
+  'apps/frontend/lib/env.ts': `export function getEnv() {\n  // Client-side: use next-runtime-env\n  const NEXT_PUBLIC_APP_URL = env("NEXT_PUBLIC_APP_URL");\n  return NEXT_PUBLIC_APP_URL;\n}\n`,
+  'apps/backend/src/trpc.ts': `      headers.set("cookie", req.headers.cookie);\n`,
+  'apps/backend/src/middleware/better-auth-mcp.middleware.ts': `    headers.set("cookie", req.headers.cookie);\n`,
+  'apps/backend/src/routers/oauth/utils.ts': `export function getBaseUrl(req: express.Request): string {\n  // Prioritize APP_URL environment variable\n  return process.env.APP_URL || req.headers.host || "";\n}\n`,
+  'apps/backend/src/middleware/api-key-oauth.middleware.ts': `function getBaseUrl(req: express.Request): string {\n  // Prioritize APP_URL environment variable\n  return process.env.APP_URL || req.headers.host || "";\n}\n        const introspectUrl = new URL("/oauth/introspect", baseUrl);\n`,
 };
 
 function makeSource() {
@@ -81,6 +87,22 @@ test('legacy clean-tools source is reconciled when instance state has the featur
   const patchedUtils = fs.readFileSync(utils, 'utf8');
   assert.match(patchedUtils, /mcpkitAssertSingleServerPerEndpoint/);
   assert.doesNotMatch(patchedUtils, /mcpkitCleanItems/);
+});
+
+test('legacy clean-tools edits can be upgraded while preserving the configured LAN patch', (t) => {
+  const source = makeSource();
+  t.after(() => fs.rmSync(source, { recursive: true, force: true }));
+  ensurePatchedSource(source, { lan: true });
+  const utils = path.join(source, 'apps/backend/src/lib/metamcp/utils.ts');
+  fs.writeFileSync(utils, legacyCleanToolsUtils());
+
+  ensurePatchedSource(source, { lan: true });
+
+  const patchedUtils = fs.readFileSync(utils, 'utf8');
+  const auth = fs.readFileSync(path.join(source, 'apps/backend/src/auth.ts'), 'utf8');
+  assert.match(patchedUtils, /mcpkitAssertSingleServerPerEndpoint/);
+  assert.doesNotMatch(patchedUtils, /mcpkitCleanItems/);
+  assert.match(auth, /mcpkitOrigins/);
 });
 
 test('default MetaMCP source patch enforces one server without the clean-tools overlay', (t) => {
