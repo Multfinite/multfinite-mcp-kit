@@ -3,7 +3,7 @@ set -euo pipefail
 HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=linux/docker-common.sh
 source "$HERE/docker-common.sh"
-dir=''; port=''; app_url=''; lan_ip=''; admin_email=''; staged=0; setup=0; fresh=0; insecure=0; clean_tools=0
+dir=''; port=''; app_url=''; lan_ip=''; admin_email=''; staged=0; setup=0; fresh=0; insecure=0
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --dir|--port|--app-url|--lan-ip|--admin-email)
@@ -14,8 +14,7 @@ while [ "$#" -gt 0 ]; do
         --setup) staged=1; setup=1; shift ;;
         --fresh) fresh=1; shift ;;
         --allow-insecure-lan) insecure=1; shift ;;
-        --clean-tools) clean_tools=1; shift ;;
-        *) echo "Usage: $0 [--dir DIR] [--port PORT] [--app-url HTTPS_ORIGIN] [--lan-ip IPV4 --allow-insecure-lan] [--clean-tools] [--staged|--setup --admin-email EMAIL] [--fresh]" >&2; exit 2 ;;
+        *) echo "Usage: $0 [--dir DIR] [--port PORT] [--app-url HTTPS_ORIGIN] [--lan-ip IPV4 --allow-insecure-lan] [--staged|--setup --admin-email EMAIL] [--fresh]" >&2; exit 2 ;;
     esac
 done
 command -v node >/dev/null || { echo 'Install Node.js 20+ first.' >&2; exit 1; }
@@ -59,7 +58,6 @@ args=(init-meta --dir "$dir")
 [ "$staged" -eq 0 ] || args+=(--staged)
 [ "$fresh" -eq 0 ] || args+=(--fresh)
 [ "$insecure" -eq 0 ] || args+=(--allow-insecure-lan)
-[ "$clean_tools" -eq 0 ] || args+=(--clean-tools)
 if [ "$setup" -eq 1 ]; then
     node "$HERE/../common/stack.mjs" "${args[@]}"
     exec bash "$HERE/run-metamcp.sh" setup "$dir"

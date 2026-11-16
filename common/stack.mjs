@@ -11,7 +11,6 @@ import { spawnSync } from 'node:child_process';
 import { createInterface } from 'node:readline/promises';
 import { setTimeout as delay } from 'node:timers/promises';
 import { GLOBAL_SERVER_NAMES, LOCAL_SERVER_NAMES, LEGACY_GLOBAL_GROUPS, LEGACY_GLOBAL_GROUP_NAMES, legacyLocalGroups, LEGACY_LOCAL_GROUP_NAMES } from './registration-manifest.mjs';
-import { ensurePatchedSource, LAN_PATCH_VERSION, CLEAN_TOOLS_PATCH_VERSION, SINGLE_SERVER_ENDPOINT_PATCH_VERSION } from './metamcp-lan-source.mjs';
 import { readLiveGlobalLink, assertLiveGlobalNetwork } from './live-global.mjs';
 import { readLiveMetaPeerLinks, liveMetaPeerComposeFile, assertLiveMetaPeerNetworks, assertMetaPeerAppsRunning, linkMetaPeers, probeMetaPeerEndpoint, unlinkMetaPeers } from './live-metamcp.mjs';
 import { prepareMetaPeerRegistration, commitMetaPeerRegistration } from './metamcp-peer-registration.mjs';
@@ -25,7 +24,7 @@ function parseArgs(args) {
   const result = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    const flag = { '--delete-volumes': 'deleteVolumes', '--staged': 'staged', '--fresh': 'fresh', '--allow-insecure-lan': 'allowInsecureLan', '--clean-tools': 'cleanTools' }[arg];
+    const flag = { '--delete-volumes': 'deleteVolumes', '--staged': 'staged', '--fresh': 'fresh', '--allow-insecure-lan': 'allowInsecureLan' }[arg];
     if (flag) { if (result[flag]) fail(`Duplicate argument: ${arg}`); result[flag] = true; continue; }
     const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--lan-ip': 'lanIp', '--admin-email': 'adminEmail', '--meta-dir': 'metaDir', '--peer-dir': 'peerDir', '--endpoint': 'endpoint', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile', '--expect-type': 'expectType' }[arg];
     if (!key || i + 1 >= args.length || args[i + 1].startsWith('--') || result[key] !== undefined) fail(`Invalid argument: ${arg}`);
@@ -48,11 +47,8 @@ function privateLanIp(value) {
   if (!(a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168))) fail('LAN IP must be in an RFC 1918 private IPv4 range.');
   return value;
 }
-function lanOrigins(state) {
-  return [`http://${state.lanIp}:${state.port}`, `http://localhost:${state.port}`, `http://127.0.0.1:${state.port}`].join(',');
-}
-function trustedOriginPrefix(state, appUrl) {
-  return state.lanIp ? `${lanOrigins(state)},` : `${appUrl},`;
+function trustedOriginPrefix(appUrl) {
+  return `${appUrl},`;
 }
 function validOrigin(value, state = null) {
   let u;
@@ -115,11 +111,8 @@ function originState(base, { allowRelocated = false } = {}) {
       typeof s.base !== 'string' || !path.isAbsolute(s.base) || path.resolve(s.base) !== s.base || validPort(s.port) !== s.port) {
     fail(`Invalid kit state in ${f}; no Docker resource was changed.`);
   }
-  if (s.lanIp !== undefined && (s.type !== 'meta' || privateLanIp(s.lanIp) !== s.lanIp || s.lanPatch !== LAN_PATCH_VERSION)) {
-    fail(`Invalid or unsupported LAN state in ${f}; no Docker resource was changed.`);
-  }
-  if (s.cleanTools !== undefined && (s.type !== 'meta' || s.cleanTools !== true || s.cleanToolsPatch !== CLEAN_TOOLS_PATCH_VERSION)) {
-    fail(`Invalid or unsupported clean-tool state in ${f}; no Docker resource was changed.`);
+  if (s.lanIp !== undefined && (s.type !== 'meta' || privateLanIp(s.lanIp) !== s.lanIp)) {
+    fail(`Invalid LAN binding in ${f}; no Docker resource was changed.`);
   }
   if (s.type === 'meta' && validOrigin(s.appUrl, s) !== s.appUrl) fail(`Invalid kit origin in ${f}; no Docker resource was changed.`);
   if (!allowRelocated && s.base !== base) {
@@ -188,8 +181,7 @@ function initialize(type, opts) {
     const state = originState(base);
     if (state.type !== type) fail('This directory belongs to a different kind of installation.');
     if (opts.fresh) fail(`A fresh install refuses an existing instance: ${base}`);
-    if (opts.cleanTools && !state.cleanTools) fail('Clean tool names cannot be enabled on an existing instance through init; its image and data were not changed.');
-    if (opts.staged && (!setupMarker(state) || validPort(opts.port) !== state.port || (opts.lanIp || '') !== (state.lanIp || '') || Boolean(opts.cleanTools) !== Boolean(state.cleanTools) || setupMarker(state).adminEmail !== adminEmail || (opts.appUrl && parseEnvOrigin(opts.appUrl, state) !== state.appUrl))) {
+    if (opts.staged && (!setupMarker(state) || validPort(opts.port) !== state.port || (opts.lanIp || '') !== (state.lanIp || '') || setupMarker(state).adminEmail !== adminEmail || (opts.appUrl && parseEnvOrigin(opts.appUrl, state) !== state.appUrl))) {
       fail('The existing setup does not match the requested staged instance; it was preserved.');
     }
     readEnv(base, type);
@@ -202,12 +194,11 @@ function initialize(type, opts) {
   const appUrl = type === 'meta' ? parseEnvOrigin(opts.appUrl || (opts.lanIp ? `http://${opts.lanIp}:${port}` : `http://localhost:${port}`), policy) : '';
   const id = crypto.randomBytes(8).toString('hex');
   const state = { version: 1, type, id, project: `mcpkit-${type}-${id}`, base, port, ...(type === 'meta' ? { appUrl, revision } : {}),
-    ...(opts.lanIp ? { lanIp: opts.lanIp, lanPatch: LAN_PATCH_VERSION } : {}),
-    ...(opts.cleanTools ? { cleanTools: true, cleanToolsPatch: CLEAN_TOOLS_PATCH_VERSION } : {}) };
+    ...(opts.lanIp ? { lanIp: opts.lanIp } : {}) };
   const priv = path.join(base, '.mcpkit');
   fs.mkdirSync(priv, { mode: 0o700 });
   const env = type === 'meta'
-    ? `POSTGRES_PASSWORD=${random()}\nBETTER_AUTH_SECRET=${random()}\n# Public origin; edit this and run apply to change an existing container.\nAPP_URL='${appUrl}'\n# For a staged fresh install, the administrator is created before publication.\nMETAMCP_ADMIN_EMAILS=${adminEmail}\n# APP_URL is always trusted; add only other origins you explicitly trust.\n# MCP endpoints allow exactly one linked server by default.\n# Set MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT=false to opt out.\nMCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT=true\nEXTRA_TRUSTED_ORIGINS=\n`
+    ? `POSTGRES_PASSWORD=${random()}\nBETTER_AUTH_SECRET=${random()}\n# Public origin; edit this and run apply to change an existing container.\nAPP_URL='${appUrl}'\n# For a staged fresh install, the administrator is created before publication.\nMETAMCP_ADMIN_EMAILS=${adminEmail}\n# Add only other origins supported by upstream MetaMCP.\nEXTRA_TRUSTED_ORIGINS=\n`
     : `MCPKIT_GATEWAY_KEY=${random()}\nMCPKIT_CONTROL_KEY=${random()}\nNEO4J_PASSWORD=${random()}\n# Edit these values, then run apply. Keep this file private.\nLLM_API_KEY=\nLLM_API_ENDPOINT=https://api.openai.com/v1\nLLM_API_MODEL=gpt-4o-mini\nLLM_API_PROVIDER=openai\nEMBEDDING_MODEL=text-embedding-3-small\nEMBEDDING_DIMENSIONS=1536\nCONTEXT7_API_KEY=\n`;
   privateWrite(path.join(priv, '.env'), env);
   if (type === 'global') {
@@ -259,7 +250,6 @@ function config(state, { metaOriginOverride } = {}) {
   };
   if (state.type === 'meta') {
     Object.assign(common, { MCPKIT_SOURCE: path.join(state.base, 'metamcp'), MCPKIT_APP_URL: metaOriginOverride ?? configuredMetaOrigin(state) });
-    if (state.lanIp) Object.assign(common, { MCPKIT_LAN_IP: state.lanIp, MCPKIT_LAN_ORIGINS: lanOrigins(state) });
     const link = readLiveGlobalLink(state);
     if (link) common.MCPKIT_GLOBAL_CLIENT_NETWORK = link.network;
   } else {
@@ -272,7 +262,6 @@ function composeArgs(ctx, state, command, { staging = Boolean(setupMarker(state)
     '--env-file', path.join(state.base, '.mcpkit', '.env'), '-f', path.join(root, 'common', state.type === 'meta' ? 'metamcp-compose.yml' : 'global-compose.yml')];
   if (state.type === 'meta' && process.platform === 'linux') args.push('-f', path.join(root, 'common', 'metamcp-linux.yml'));
   if (state.type === 'meta' && state.lanIp) args.push('-f', path.join(root, 'common', 'metamcp-lan.yml'));
-  if (state.type === 'meta' && state.cleanTools) args.push('-f', path.join(root, 'common', 'metamcp-clean-tools.yml'));
   if (state.type === 'meta' && readLiveGlobalLink(state)) args.push('-f', path.join(root, 'common', 'metamcp-live-global.yml'));
   if (state.type === 'meta') {
     const peerOverlay = liveMetaPeerComposeFile(state);
@@ -396,7 +385,8 @@ function ensureSource(state) {
   if (!fs.existsSync(marker) || fs.readFileSync(marker, 'utf8').trim() !== state.id) fail('MetaMCP clone is not owned by this installation. It was preserved.');
   const actual = run('git', ['-C', source, 'rev-parse', 'HEAD'], { capture: true }).stdout.trim();
   if (actual !== revision || state.revision !== revision) fail('MetaMCP clone revision differs from the saved revision. No build was attempted.');
-  ensurePatchedSource(source, { lan: Boolean(state.lanIp), cleanTools: Boolean(state.cleanTools) });
+  const changes = run('git', ['-C', source, 'status', '--porcelain', '--untracked-files=all'], { capture: true }).stdout.trim();
+  if (changes) fail('The owned MetaMCP source clone has local changes. The kit never modifies upstream source and will not build from a modified clone. Preserve/review the changes and create a clean upstream clone before rebuilding.');
   return source;
 }
 function ensureImages(ctx, state) {
@@ -404,27 +394,13 @@ function ensureImages(ctx, state) {
   for (const [image, service] of images) {
     const labels = inspect(ctx, 'image', image);
     checkLabel(labels, state, 'image', image);
-    if (labels) {
-      if (state.type === 'meta' && labels['com.multfinite.mcpkit.single-server-per-endpoint-patch'] !== SINGLE_SERVER_ENDPOINT_PATCH_VERSION) {
-        fail('The existing MetaMCP image predates the default one-server-per-endpoint policy. Its owned source is patched, but the image and containers were not changed; rebuild the app image, then recreate only app before retrying.');
-      }
-      if (state.lanIp && labels['com.multfinite.mcpkit.lan-patch'] !== LAN_PATCH_VERSION) fail('The existing LAN image does not have the expected source patch; no image was replaced.');
-      if (state.cleanTools && labels['com.multfinite.mcpkit.clean-tools-patch'] !== CLEAN_TOOLS_PATCH_VERSION) fail('The existing image does not have the expected clean-tool patch; no image was replaced.');
-      continue;
-    }
-    if (state.type === 'meta') {
-      ensurePatchedSource(path.join(state.base, 'metamcp'), { lan: Boolean(state.lanIp), cleanTools: Boolean(state.cleanTools) });
-    }
+    if (labels) continue;
+    if (state.type === 'meta') ensureSource(state);
     console.log(`Building the isolated ${service} image; this can take a while.`);
     compose(ctx, state, ['build', service]);
     const built = inspect(ctx, 'image', image);
     if (!built) fail(`Built image is missing: ${image}`);
     checkLabel(built, state, 'image', image);
-    if (state.type === 'meta' && built['com.multfinite.mcpkit.single-server-per-endpoint-patch'] !== SINGLE_SERVER_ENDPOINT_PATCH_VERSION) {
-      fail('Built MetaMCP image lacks the default one-server-per-endpoint patch label.');
-    }
-    if (state.lanIp && built['com.multfinite.mcpkit.lan-patch'] !== LAN_PATCH_VERSION) fail('Built LAN image lacks its expected patch label.');
-    if (state.cleanTools && built['com.multfinite.mcpkit.clean-tools-patch'] !== CLEAN_TOOLS_PATCH_VERSION) fail('Built image lacks its expected clean-tool patch label.');
   }
 }
 async function waitMetaHealth(state) {
@@ -455,7 +431,6 @@ async function start(ctx, state) {
   const staged = Boolean(setupMarker(state));
   readEnv(state.base, state.type);
   checkResources(ctx, state);
-  if (state.type === 'meta') ensureSource(state);
   ensureImages(ctx, state);
   checkResources(ctx, state);
   // Staging resets all host port bindings before the app is started.
@@ -558,7 +533,7 @@ function requireRunningMetaApp(ctx, state, expectedId = null, { staged = false }
   assertLiveMetaPeerNetworks(ctx, state);
   return id;
 }
-function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy = false } = {}) {
+function metaContainerSnapshot(ctx, state, { stopped = false } = {}) {
   const service = stopped ? stoppedMetaService : ownedMetaService;
   const appId = service(ctx, state, 'app');
   const postgresId = service(ctx, state, 'postgres');
@@ -567,9 +542,6 @@ function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy 
   const imageLabels = inspect(ctx, 'image', imageId);
   if (!imageLabels) fail('The running MetaMCP image is missing; no file was changed.');
   checkLabel(imageLabels, state, 'image', imageId);
-  if (!allowLegacyPolicy && imageLabels['com.multfinite.mcpkit.single-server-per-endpoint-patch'] !== SINGLE_SERVER_ENDPOINT_PATCH_VERSION) {
-    fail('The running MetaMCP image predates the one-server-per-endpoint policy. Rebuild and recreate only app before using this instance.');
-  }
   const app = containerEnvironment(ctx, appId);
   const postgres = containerEnvironment(ctx, postgresId);
   const password = postgres.POSTGRES_PASSWORD;
@@ -583,16 +555,10 @@ function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy 
   const appUrl = app.APP_URL;
   let usableAppUrl = false;
   try { usableAppUrl = parseEnvOrigin(appUrl, state) === appUrl; } catch { /* reject an unexpected container URL below */ }
-  const trustedPrefix = usableAppUrl ? trustedOriginPrefix(state, appUrl) : '';
-  const singleServerPolicy = ['true', 'false'].includes(app.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT)
-    ? app.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT
-    : allowLegacyPolicy ? 'true' : null;
+  const trustedPrefix = usableAppUrl ? trustedOriginPrefix(appUrl) : '';
   if (!usableAppUrl || app.NEXT_PUBLIC_APP_URL !== appUrl ||
-      !['true', 'false'].includes(singleServerPolicy) ||
       typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
-      !app.EXTRA_TRUSTED_ORIGINS.startsWith(trustedPrefix) ||
-      (state.lanIp && (app.MCPKIT_MULTI_AUTH_ORIGINS !== lanOrigins(state) || app.MCPKIT_COOKIE_PREFIX !== `mcpkit-${state.id}` || app.NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN !== 'true')) ||
-      (state.cleanTools && app.MCPKIT_CLEAN_TOOL_NAMES !== 'true')) {
+      !app.EXTRA_TRUSTED_ORIGINS.startsWith(trustedPrefix)) {
     fail('Container MetaMCP URL or admin settings are unexpected; inspect the project state.');
   }
   const mountsResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', postgresId], { capture: true });
@@ -608,8 +574,7 @@ function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy 
   checkLabel(labels, state, 'volume', volume);
   if (labels['com.docker.compose.volume'] !== 'postgres_data') fail('Unexpected PostgreSQL volume identity; no file was changed.');
   return { appId, postgresId, password, secret, appUrl, admins: app.METAMCP_ADMIN_EMAILS,
-    extraOrigins: app.EXTRA_TRUSTED_ORIGINS.slice(trustedPrefix.length),
-    singleServerPolicy };
+    extraOrigins: app.EXTRA_TRUSTED_ORIGINS.slice(trustedPrefix.length) };
 }
 function hiddenInput(prompt) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) fail('An interactive terminal is required for a hidden password.');
@@ -708,7 +673,7 @@ async function activateStagedMeta(ctx, state) {
     fail('Staged account or registration settings are not safe for publication; nothing was published.');
   }
   const again = metaContainerSnapshot(ctx, state);
-  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) if (again[key] !== snapshot[key]) fail('Staged container settings changed; nothing was published.');
+  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) if (again[key] !== snapshot[key]) fail('Staged container settings changed; nothing was published.');
   requireRunningMetaApp(ctx, state, id, { staged: !alreadyPublished });
   const readyFile = path.join(state.base, '.mcpkit', 'publication-ready.json');
   if (!publicationMarker(state)) privateWrite(readyFile, `${JSON.stringify({ version: 1, project: state.project, adminEmail: marker.adminEmail }, null, 2)}\n`);
@@ -721,7 +686,7 @@ async function activateStagedMeta(ctx, state) {
     requireRunningMetaApp(ctx, state);
     const after = metaContainerSnapshot(ctx, state);
     if (after.postgresId !== snapshot.postgresId || after.password !== snapshot.password || after.secret !== snapshot.secret ||
-        after.appUrl !== snapshot.appUrl || after.admins !== snapshot.admins || after.singleServerPolicy !== snapshot.singleServerPolicy) {
+        after.appUrl !== snapshot.appUrl || after.admins !== snapshot.admins || after.extraOrigins !== snapshot.extraOrigins) {
       fail('Published app configuration is unexpected.');
     }
     fs.unlinkSync(path.join(state.base, '.mcpkit', 'first-setup.json'));
@@ -745,16 +710,13 @@ function checkMetaEnv(ctx, state) {
   const rendered = renderedMetaConfig(ctx, state, state.appUrl);
   const app = renderedRuntimeEnvironment(rendered, 'app');
   const postgres = renderedRuntimeEnvironment(rendered, 'postgres');
-  const singleServerPolicy = values.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT ?? 'true';
-  if (!['true', 'false'].includes(singleServerPolicy) || snapshot.singleServerPolicy !== singleServerPolicy ||
-      app?.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT !== singleServerPolicy ||
-      snapshot.password !== values.POSTGRES_PASSWORD || snapshot.secret !== values.BETTER_AUTH_SECRET ||
+  if (snapshot.password !== values.POSTGRES_PASSWORD || snapshot.secret !== values.BETTER_AUTH_SECRET ||
       app?.POSTGRES_PASSWORD !== snapshot.password || postgres?.POSTGRES_PASSWORD !== snapshot.password ||
       app?.BETTER_AUTH_SECRET !== snapshot.secret) {
     fail('The private .env, rendered Compose credentials, or existing container configurations differ. No files or containers were changed. Review them locally without generating new secrets.');
   }
   const current = metaContainerSnapshot(ctx, state);
-  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
+  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
     if (current[key] !== snapshot[key]) fail('Container configuration changed during inspection; no files or containers were changed by this command.');
   }
   const checked = privateRegularFile(envFile);
@@ -762,7 +724,7 @@ function checkMetaEnv(ctx, state) {
   if (!checked || !checked.equals(original) || !checkedState || !checkedState.equals(originalState)) {
     fail('The kit state or private .env changed during inspection; no files or containers were changed by this command.');
   }
-  console.log('The private .env, rendered Compose credentials, and one-server-per-endpoint policy match the existing containers. No files or containers were changed.');
+  console.log('The private .env and rendered Compose credentials match the existing containers. No files or containers were changed.');
   console.log('This does not prove the current database password, the historical auth secret, database integrity, or application readiness.');
 }
 function safeDotenvLiteral(value) {
@@ -879,11 +841,10 @@ async function recoverMetaEnv(ctx, state) {
   if (JSON.stringify(savedState) !== JSON.stringify(state)) fail('The kit state changed during recovery; no file was changed.');
   const file = path.join(priv, '.env');
   const current = privateRegularFile(file);
-  const snapshot = metaContainerSnapshot(ctx, state, { stopped: true, allowLegacyPolicy: true });
+  const snapshot = metaContainerSnapshot(ctx, state, { stopped: true });
   const recovered = `POSTGRES_PASSWORD=${snapshot.password}\nBETTER_AUTH_SECRET=${snapshot.secret}\n` +
     `APP_URL=${safeDotenvLiteral(snapshot.appUrl)}\nMETAMCP_ADMIN_EMAILS=${safeDotenvLiteral(snapshot.admins)}\n` +
-    `EXTRA_TRUSTED_ORIGINS=${safeDotenvLiteral(snapshot.extraOrigins)}\n` +
-    `MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT=${snapshot.singleServerPolicy}\n`;
+    `EXTRA_TRUSTED_ORIGINS=${safeDotenvLiteral(snapshot.extraOrigins)}\n`;
   if (current) {
     // Never replace a nonempty credential we cannot identify as the same
     // literal. PostgreSQL can have non-kit passwords and dotenv comments or
@@ -908,8 +869,8 @@ async function recoverMetaEnv(ctx, state) {
     'Only MetaMCP settings from the containers will be restored; other or unapplied settings remain in the backup.\n' +
     'Container values may not be the current DB password or historical auth secret (e.g. after SQL changes or recreation with a different .env). Stop if unsure.';
   if (!(await confirm(message, `RECOVER ${state.project}`))) { console.log('Cancelled; no file was changed.'); return; }
-  const rechecked = metaContainerSnapshot(ctx, state, { stopped: true, allowLegacyPolicy: true });
-  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
+  const rechecked = metaContainerSnapshot(ctx, state, { stopped: true });
+  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
     if (rechecked[key] !== snapshot[key]) fail('Container configuration changed during recovery; no file was changed.');
   }
   const checkedState = fs.lstatSync(stateFile);
@@ -964,16 +925,12 @@ function renderedMetaSettings(ctx, state, envValues) {
   const app = renderedRuntimeEnvironment(rendered, 'app');
   const postgres = renderedRuntimeEnvironment(rendered, 'postgres');
   const appUrl = configuredMetaOrigin(state);
-  const trustedPrefix = trustedOriginPrefix(state, appUrl);
-  const singleServerPolicy = envValues.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT ?? 'true';
+  const trustedPrefix = trustedOriginPrefix(appUrl);
   if (!app || !postgres || app.APP_URL !== appUrl || app.NEXT_PUBLIC_APP_URL !== appUrl ||
-      !['true', 'false'].includes(singleServerPolicy) || app.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT !== singleServerPolicy ||
       app.POSTGRES_PASSWORD !== envValues.POSTGRES_PASSWORD || postgres.POSTGRES_PASSWORD !== envValues.POSTGRES_PASSWORD ||
       app.BETTER_AUTH_SECRET !== envValues.BETTER_AUTH_SECRET ||
       typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
-      !app.EXTRA_TRUSTED_ORIGINS.startsWith(trustedPrefix) ||
-      (state.lanIp && (app.MCPKIT_MULTI_AUTH_ORIGINS !== lanOrigins(state) || app.MCPKIT_COOKIE_PREFIX !== `mcpkit-${state.id}` || app.NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN !== 'true')) ||
-      (state.cleanTools && app.MCPKIT_CLEAN_TOOL_NAMES !== 'true')) {
+      !app.EXTRA_TRUSTED_ORIGINS.startsWith(trustedPrefix)) {
     fail('Rendered MetaMCP settings or credentials do not match the private configuration; no container was changed.');
   }
   const admins = app.METAMCP_ADMIN_EMAILS;
@@ -989,7 +946,7 @@ function renderedMetaSettings(ctx, state, envValues) {
       fail('EXTRA_TRUSTED_ORIGINS must contain literal origins without paths, credentials or trailing slashes; no container was changed.');
     }
   }
-  return { appUrl, admins, extraOrigins, singleServerPolicy, appEnv: app };
+  return { appUrl, admins, extraOrigins, appEnv: app };
 }
 function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false } = {}) {
   const outcome = after ? 'The app was recreated; inspect it before retrying.' : 'No container was changed.';
@@ -1005,11 +962,6 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   const labels = inspect(ctx, 'image', image);
   if (!labels) fail(`The existing MetaMCP image was not found. ${outcome}`);
   checkLabel(labels, state, 'image', image);
-  if (labels['com.multfinite.mcpkit.single-server-per-endpoint-patch'] !== SINGLE_SERVER_ENDPOINT_PATCH_VERSION ||
-      (state.lanIp && labels['com.multfinite.mcpkit.lan-patch'] !== LAN_PATCH_VERSION) ||
-      (state.cleanTools && labels['com.multfinite.mcpkit.clean-tools-patch'] !== CLEAN_TOOLS_PATCH_VERSION)) {
-    fail(`The existing MetaMCP image lacks its expected source patch labels. ${outcome}`);
-  }
   const appImage = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{.Image}}', snapshot.appId], { capture: true }).stdout.trim();
   const taggedImage = run('docker', ['--context', ctx, 'image', 'inspect', '--format', '{{.Id}}', image], { capture: true }).stdout.trim();
   if (!/^sha256:[a-f0-9]{64}$/.test(appImage) || appImage !== taggedImage) fail(`The kit image tag no longer identifies the running app image. ${outcome}`);
@@ -1022,7 +974,7 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   const imageRuntime = run('docker', ['--context', ctx, 'image', 'inspect', '--format', runtimeFormat, image], { capture: true }).stdout;
   const appRuntime = run('docker', ['--context', ctx, 'container', 'inspect', '--format', runtimeFormat, snapshot.appId], { capture: true }).stdout;
   if (imageRuntime !== appRuntime) fail(`The app has customized execution settings; review them locally before recreation. ${outcome}`);
-  const editable = new Set(['APP_URL', 'NEXT_PUBLIC_APP_URL', 'METAMCP_ADMIN_EMAILS', 'EXTRA_TRUSTED_ORIGINS', 'MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT']);
+  const editable = new Set(['APP_URL', 'NEXT_PUBLIC_APP_URL', 'METAMCP_ADMIN_EMAILS', 'EXTRA_TRUSTED_ORIGINS']);
   for (const [key, value] of Object.entries(planned.appEnv)) {
     if (!editable.has(key) && appEnv[key] !== value) fail(`The app has different non-URL settings; review them locally before recreation. ${outcome}`);
   }
@@ -1112,13 +1064,13 @@ async function applyMetaConfig(ctx, state) {
   if (!Object.hasOwn(values, 'EXTRA_TRUSTED_ORIGINS') && before.extraOrigins.trim() && !planned.extraOrigins.trim()) {
     fail('Existing extra trusted origins would be cleared because EXTRA_TRUSTED_ORIGINS is missing. Set it explicitly after review; no container was changed.');
   }
-  if (['appUrl', 'admins', 'extraOrigins', 'singleServerPolicy'].every((key) => before[key] === planned[key])) {
+  if (['appUrl', 'admins', 'extraOrigins'].every((key) => before[key] === planned[key])) {
     const current = metaContainerSnapshot(ctx, state);
-    for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
+    for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
       if (current[key] !== before[key]) fail('Container configuration changed during inspection; no container was changed by this command.');
     }
     if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during inspection; no container was changed.');
-    console.log('Requested URL, admin/trusted-origin settings, and endpoint server policy already match the app container; no container was recreated. Check status separately.');
+    console.log('Requested URL and admin/trusted-origin settings already match the app container; no container was recreated. Check status separately.');
     return;
   }
   checkMetaApplyResources(ctx, state, before, planned);
@@ -1127,7 +1079,6 @@ async function applyMetaConfig(ctx, state) {
     `Requested primary origin: ${planned.appUrl}\n` +
     `Admin allowlist: ${count(planned.admins)} address(es)${planned.admins === before.admins ? ' (unchanged)' : ' (changed)'}.\n` +
     `Additional trusted origins: ${count(planned.extraOrigins)}${planned.extraOrigins === before.extraOrigins ? ' (unchanged)' : ' (changed)'}.\n` +
-    `One-server-per-endpoint policy: ${planned.singleServerPolicy === 'true' ? 'enabled' : 'DISABLED'}${planned.singleServerPolicy === before.singleServerPolicy ? ' (unchanged)' : ' (changed)'}.\n` +
     'Only the app container will be recreated; PostgreSQL and named volumes are not intentionally recreated or removed.\n' +
     'The app may run database migrations on startup. Back up the database and any files in the app container writable layer first; that layer will be lost.\n' +
     'Ensure the listed admin accounts already exist and disable public registration before exposing this service.\n' +
@@ -1136,12 +1087,12 @@ async function applyMetaConfig(ctx, state) {
   if (!(await confirm(message, `APPLY ${state.project}`))) { console.log('Cancelled; no container was changed.'); process.exitCode = 1; return; }
   if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during confirmation; no container was changed.');
   const rechecked = metaContainerSnapshot(ctx, state);
-  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
+  for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
     if (rechecked[key] !== before[key]) fail('Container configuration changed during confirmation; no container was changed.');
   }
   const finalPlan = renderedMetaSettings(ctx, state, values);
   checkMetaApplyResources(ctx, state, rechecked, finalPlan);
-  for (const key of ['appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
+  for (const key of ['appUrl', 'admins', 'extraOrigins']) {
     if (finalPlan[key] !== planned[key]) fail('Rendered settings changed during confirmation; no container was changed.');
   }
   if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during preflight; no container was changed.');
@@ -1155,13 +1106,13 @@ async function applyMetaConfig(ctx, state) {
   try {
     after = metaContainerSnapshot(ctx, state);
     if (after.appId === before.appId || after.postgresId !== before.postgresId || after.password !== before.password || after.secret !== before.secret ||
-        after.appUrl !== planned.appUrl || after.admins !== planned.admins || after.extraOrigins !== planned.extraOrigins || after.singleServerPolicy !== planned.singleServerPolicy) {
+        after.appUrl !== planned.appUrl || after.admins !== planned.admins || after.extraOrigins !== planned.extraOrigins) {
       fail('The resulting app configuration or PostgreSQL identity is unexpected.');
     }
     await waitMetaHealth(state);
     requireRunningMetaApp(ctx, state, after.appId);
     const current = metaContainerSnapshot(ctx, state);
-    for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
+    for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
       if (current[key] !== after[key]) fail('Container configuration changed during the health check.');
     }
     checkMetaApplyResources(ctx, state, current, finalPlan, { after: true });
@@ -1474,7 +1425,7 @@ async function shareSelectedRegistration(ctx, meta, prepared, selected, extraChe
       requirePrivateDirectory(path.dirname(selected.file));
       assertFilesUnchanged([...prepared.files, { file: selected.file, bytes: selected.bytes }]);
       const current = metaContainerSnapshot(ctx, meta);
-      for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
+      for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
         if (current[key] !== prepared.before[key]) fail('MetaMCP containers changed during inspection; no sharing update was attempted.');
       }
       requireRunningMetaApp(ctx, meta, prepared.before.appId);
@@ -1587,7 +1538,7 @@ try {
   if (isInit && opts.expectType && opts.expectType !== (action === 'init-meta' ? 'meta' : 'global')) fail('The requested and expected kit types differ.');
   if (!isInit && (opts.port || opts.appUrl)) fail('Ports and APP_URL are only accepted for new installations.');
   if (action === 'init-global' && opts.appUrl) fail('--app-url is only for MetaMCP.');
-  if (action !== 'init-meta' && (opts.staged || opts.fresh || opts.lanIp || opts.adminEmail || opts.allowInsecureLan || opts.cleanTools)) fail('Staging, fresh-install, clean-tool and LAN options are only available for init-meta.');
+  if (action !== 'init-meta' && (opts.staged || opts.fresh || opts.lanIp || opts.adminEmail || opts.allowInsecureLan)) fail('Staging, fresh-install and LAN options are only available for init-meta.');
   if (opts.adminEmail && !opts.staged) fail('--admin-email requires --staged.');
   const base = path.resolve(opts.dir);
   const isSharing = action === 'share-global' || action === 'share-registration';

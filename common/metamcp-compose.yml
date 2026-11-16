@@ -7,7 +7,6 @@ services:
       dockerfile: Dockerfile
       labels:
         com.multfinite.mcpkit.instance: ${MCPKIT_INSTANCE}
-        com.multfinite.mcpkit.single-server-per-endpoint-patch: "1"
     pull_policy: never
     environment:
       NODE_ENV: production
@@ -30,9 +29,6 @@ services:
       METAMCP_ADMIN_EMAILS: ${METAMCP_ADMIN_EMAILS:-}
       TRANSFORM_LOCALHOST_TO_DOCKER_INTERNAL: "false"
       BOOTSTRAP_ENABLE: "false"
-      # The MetaMCP source patch enforces exactly one linked server per MCP
-      # endpoint unless this is explicitly set to "false" in the private env.
-      MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT: "${MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT:-true}"
     ports:
       - "127.0.0.1:${MCPKIT_PORT}:12008"
     volumes:
