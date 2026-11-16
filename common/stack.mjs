@@ -1114,16 +1114,22 @@ async function enableMetaLan(ctx, saved, lanIp) {
   if (!oldState || !oldEnv) fail('The kit state or private .env is missing; no files were changed.');
   const backupState = path.join(priv, 'state.json.pre-lan');
   const backupEnv = path.join(priv, '.env.pre-lan');
-  if (fs.existsSync(backupState) || fs.existsSync(backupEnv)) {
-    fail('A previous pre-LAN backup exists. Review and move it aside before retrying; no files were changed.');
+  // A backup left by an earlier failed attempt is reused only if it still equals
+  // the current file; anything else is preserved for manual review.
+  const sameOrMissing = (file, bytes) => !fs.existsSync(file) || (privateRegularFile(file)?.equals(bytes) ?? false);
+  if (!sameOrMissing(backupState, oldState) || !sameOrMissing(backupEnv, oldEnv)) {
+    fail('A pre-LAN backup differs from the current files. Review .mcpkit/*.pre-lan and move it aside before retrying; no files were changed.');
   }
+  if (!fs.existsSync(backupState)) privateWrite(backupState, oldState);
+  if (!fs.existsSync(backupEnv)) privateWrite(backupEnv, oldEnv);
   const newEnv = withAppUrl(oldEnv.toString('utf8'), next.appUrl);
-  privateWrite(backupState, oldState);
-  privateWrite(backupEnv, oldEnv);
-  const image = config(next).MCPKIT_IMAGE;
+  let image = '';
   try {
     replacePrivateFile(stateFile, `${JSON.stringify(next, null, 2)}\n`);
     replacePrivateFile(envFile, newEnv);
+    // Read the image name only after the files are consistent: configuredMetaOrigin
+    // validates APP_URL against the state it is given.
+    image = config(next).MCPKIT_IMAGE;
     ensurePatchedSource(path.join(next.base, 'metamcp'), { lan: true, cleanTools: Boolean(next.cleanTools) });
     console.log('Building the app image with the LAN patch; the running container is not changed by this step.');
     compose(ctx, next, ['build', 'app']);
