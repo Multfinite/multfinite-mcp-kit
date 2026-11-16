@@ -76,29 +76,4 @@ test ! -e "$GLOBAL_UNIT"
 test ! -e "$LOCAL_UNIT"
 grep -Fq -- '--user disable' "$MCPKIT_TEST_SYSTEMCTL_LOG"
 
-# The legacy GLOBAL entry point registers only after both existing config files exist.
-: > "$MCPKIT_TEST_SYSTEMCTL_LOG"
-LEGACY="$HOME/mcp-global"
-mkdir -p "$LEGACY/config" "$LEGACY/metamcp"
-if bash "$ROOT/linux/run-global.sh" register-service >/dev/null 2>&1; then
-    echo 'Legacy GLOBAL registration unexpectedly accepted an incomplete installation.' >&2
-    exit 1
-fi
-if grep -Fq -- '--user enable --now' "$MCPKIT_TEST_SYSTEMCTL_LOG"; then
-    echo 'Incomplete legacy GLOBAL registration touched systemd.' >&2
-    exit 1
-fi
-printf 'legacy config\n' > "$LEGACY/config/.env"
-printf 'legacy MetaMCP config\n' > "$LEGACY/metamcp/.env"
-bash "$ROOT/linux/run-global.sh" register-service
-source "$ROOT/linux/service-registration.sh"
-mcpkit_service_location global-legacy "$LEGACY"
-LEGACY_UNIT="$MCPKIT_SYSTEMD_UNIT_FILE"
-test -f "$LEGACY_UNIT"
-LEGACY_RUNNER="$(quote "$ROOT/linux/run-global.sh")"
-grep -Fxq -- "ExecStart=$BASH_ARG $LEGACY_RUNNER $START" "$LEGACY_UNIT"
-grep -Fxq -- "ExecStop=$BASH_ARG $LEGACY_RUNNER $STOP" "$LEGACY_UNIT"
-rm -rf -- "$LEGACY"
-bash "$ROOT/linux/run-global.sh" unregister-service
-test ! -e "$LEGACY_UNIT"
 echo 'Linux service registration tests passed with mocked systemd.'

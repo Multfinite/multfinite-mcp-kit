@@ -130,7 +130,7 @@ async function serve() {
   const { settings, secrets } = loadConfig();
   const controlKey = process.env.MCPKIT_CONTROL_KEY;
   const instanceId = process.env.MCPKIT_INSTANCE_ID;
-  if (!controlKey || !instanceId) throw new Error('Use run-local.ps1 start to launch the gateway.');
+  if (!controlKey || !instanceId) throw new Error('Use run-local.ps1 gateway-start to launch the gateway.');
   const specs = buildServerSpecs(settings, secrets);
   for (const spec of specs) fs.mkdirSync(spec.cwd, { recursive: true, mode: 0o700 });
   writeJson(path.join(RUNTIME, 'vector-watch.json'), { watchList: [settings.writingDir] });
