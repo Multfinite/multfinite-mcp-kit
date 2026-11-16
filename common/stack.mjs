@@ -559,7 +559,10 @@ function requireRunningMetaApp(ctx, state, expectedId = null, { staged = false }
   assertLiveMetaPeerNetworks(ctx, state);
   return id;
 }
-function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy = false, allowMissingImage = false } = {}) {
+function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy = false, allowMissingImage = false, previousState = null } = {}) {
+  // During a pending LAN conversion the running container still reflects the
+  // previous (loopback) state; validate it against that state, not the new one.
+  const view = previousState ?? state;
   const service = stopped ? stoppedMetaService : ownedMetaService;
   const appId = service(ctx, state, 'app');
   const postgresId = service(ctx, state, 'postgres');
@@ -592,8 +595,8 @@ function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy 
   }
   const appUrl = app.APP_URL;
   let usableAppUrl = false;
-  try { usableAppUrl = parseEnvOrigin(appUrl, state) === appUrl; } catch { /* reject an unexpected container URL below */ }
-  const trustedPrefix = usableAppUrl ? trustedOriginPrefix(state, appUrl) : '';
+  try { usableAppUrl = parseEnvOrigin(appUrl, view) === appUrl; } catch { /* reject an unexpected container URL below */ }
+  const trustedPrefix = usableAppUrl ? trustedOriginPrefix(view, appUrl) : '';
   const singleServerPolicy = ['true', 'false'].includes(app.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT)
     ? app.MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT
     : allowLegacyPolicy ? 'true' : null;
@@ -601,8 +604,8 @@ function metaContainerSnapshot(ctx, state, { stopped = false, allowLegacyPolicy 
       !['true', 'false'].includes(singleServerPolicy) ||
       typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
       !app.EXTRA_TRUSTED_ORIGINS.startsWith(trustedPrefix) ||
-      (state.lanIp && (app.MCPKIT_MULTI_AUTH_ORIGINS !== lanOrigins(state) || app.MCPKIT_COOKIE_PREFIX !== `mcpkit-${state.id}` || app.NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN !== 'true')) ||
-      (state.cleanTools && app.MCPKIT_CLEAN_TOOL_NAMES !== 'true')) {
+      (view.lanIp && (app.MCPKIT_MULTI_AUTH_ORIGINS !== lanOrigins(view) || app.MCPKIT_COOKIE_PREFIX !== `mcpkit-${view.id}` || app.NEXT_PUBLIC_MCPKIT_MULTI_ORIGIN !== 'true')) ||
+      (view.cleanTools && app.MCPKIT_CLEAN_TOOL_NAMES !== 'true')) {
     fail('Container MetaMCP URL or admin settings are unexpected; inspect the project state.');
   }
   const mountsResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', postgresId], { capture: true });
@@ -1121,7 +1124,13 @@ async function enableMetaLan(ctx, saved, lanIp) {
       console.log('Building the app image with the LAN patch; the running container is not changed by this step.');
       compose(ctx, saved, ['build', 'app']);
     }
-    await applyMetaConfig(ctx, saved, { allowMissingImage: true });
+    // Use the pre-LAN state only while the running container still has the old
+    // origin; once it has been recreated, the strict checks apply to the LAN state.
+    const backup = path.join(saved.base, '.mcpkit', 'state.json.pre-lan');
+    const runningUrl = containerEnvironment(ctx, ownedMetaService(ctx, saved, 'app')).APP_URL;
+    const stillOld = runningUrl !== saved.appUrl && fs.existsSync(backup);
+    const previousState = stillOld ? JSON.parse(privateRegularFile(backup).toString('utf8')) : null;
+    await applyMetaConfig(ctx, saved, { allowMissingImage: stillOld, previousState });
     return;
   }
   const priv = path.join(saved.base, '.mcpkit');
@@ -1164,9 +1173,9 @@ async function enableMetaLan(ctx, saved, lanIp) {
     throw error;
   }
   console.log(`LAN configuration saved for ${lanIp}:${next.port}. Confirm the app recreation below; PostgreSQL and volumes are kept.`);
-  await applyMetaConfig(ctx, next, { allowMissingImage: true });
+  await applyMetaConfig(ctx, next, { allowMissingImage: true, previousState: saved });
 }
-async function applyMetaConfig(ctx, state, { allowMissingImage = false } = {}) {
+async function applyMetaConfig(ctx, state, { allowMissingImage = false, previousState = null } = {}) {
   const priv = path.join(state.base, '.mcpkit');
   for (const dir of [state.base, priv]) {
     const item = fs.lstatSync(dir);
@@ -1182,7 +1191,7 @@ async function applyMetaConfig(ctx, state, { allowMissingImage = false } = {}) {
   try { savedState = JSON.parse(stateBytes.toString('utf8')); } catch { fail('Cannot read the kit state; no container was changed.'); }
   if (JSON.stringify(savedState) !== JSON.stringify(state)) fail('The kit state changed during preflight; no container was changed.');
   const values = readEnv(state.base, 'meta');
-  const before = metaContainerSnapshot(ctx, state, { allowMissingImage });
+  const before = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
   if (before.password !== values.POSTGRES_PASSWORD || before.secret !== values.BETTER_AUTH_SECRET) {
     fail('The .env credentials differ from the existing containers. Restore the correct values before applying; no container was changed.');
   }
@@ -1198,7 +1207,7 @@ async function applyMetaConfig(ctx, state, { allowMissingImage = false } = {}) {
     fail('Existing extra trusted origins would be cleared because EXTRA_TRUSTED_ORIGINS is missing. Set it explicitly after review; no container was changed.');
   }
   if (['appUrl', 'admins', 'extraOrigins', 'singleServerPolicy'].every((key) => before[key] === planned[key])) {
-    const current = metaContainerSnapshot(ctx, state, { allowMissingImage });
+    const current = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
     for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
       if (current[key] !== before[key]) fail('Container configuration changed during inspection; no container was changed by this command.');
     }
@@ -1220,7 +1229,7 @@ async function applyMetaConfig(ctx, state, { allowMissingImage = false } = {}) {
     'Do not run another start, stop, apply, or edit the .env at the same time.';
   if (!(await confirm(message, `APPLY ${state.project}`))) { console.log('Cancelled; no container was changed.'); process.exitCode = 1; return; }
   if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during confirmation; no container was changed.');
-  const rechecked = metaContainerSnapshot(ctx, state, { allowMissingImage });
+  const rechecked = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
   for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
     if (rechecked[key] !== before[key]) fail('Container configuration changed during confirmation; no container was changed.');
   }
@@ -1238,14 +1247,14 @@ async function applyMetaConfig(ctx, state, { allowMissingImage = false } = {}) {
   console.log('Compose reported app recreation complete. PostgreSQL and named volumes were not targeted for recreation or removal.');
   let after;
   try {
-    after = metaContainerSnapshot(ctx, state, { allowMissingImage });
+    after = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
     if (after.appId === before.appId || after.postgresId !== before.postgresId || after.password !== before.password || after.secret !== before.secret ||
         after.appUrl !== planned.appUrl || after.admins !== planned.admins || after.extraOrigins !== planned.extraOrigins || after.singleServerPolicy !== planned.singleServerPolicy) {
       fail('The resulting app configuration or PostgreSQL identity is unexpected.');
     }
     await waitMetaHealth(state);
     requireRunningMetaApp(ctx, state, after.appId);
-    const current = metaContainerSnapshot(ctx, state, { allowMissingImage });
+    const current = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
     for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
       if (current[key] !== after[key]) fail('Container configuration changed during the health check.');
     }
