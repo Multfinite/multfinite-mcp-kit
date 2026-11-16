@@ -1253,14 +1253,15 @@ async function applyMetaConfig(ctx, state, { allowMissingImage = false, previous
   console.log('Compose reported app recreation complete. PostgreSQL and named volumes were not targeted for recreation or removal.');
   let after;
   try {
-    after = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
+    // After recreation the container must match the NEW state; no previous state applies.
+    after = metaContainerSnapshot(ctx, state);
     if (after.appId === before.appId || after.postgresId !== before.postgresId || after.password !== before.password || after.secret !== before.secret ||
         after.appUrl !== planned.appUrl || after.admins !== planned.admins || after.extraOrigins !== planned.extraOrigins || after.singleServerPolicy !== planned.singleServerPolicy) {
       fail('The resulting app configuration or PostgreSQL identity is unexpected.');
     }
     await waitMetaHealth(state);
     requireRunningMetaApp(ctx, state, after.appId);
-    const current = metaContainerSnapshot(ctx, state, { allowMissingImage, previousState });
+    const current = metaContainerSnapshot(ctx, state);
     for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins', 'singleServerPolicy']) {
       if (current[key] !== after[key]) fail('Container configuration changed during the health check.');
     }
