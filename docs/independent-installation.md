@@ -278,14 +278,17 @@ bash linux/run-local-servers.sh unregister-service "$HOME/mcp-kit/local"
 
    ```sh
    KIT="$HOME/mcp-kit"
+   # Сначала шлюзы MCP, затем все экземпляры MetaMCP.
+   bash linux/run-global-servers.sh register-service "$KIT/global"
+   bash linux/run-local-servers.sh register-service "$KIT/local"
    bash linux/run-metamcp.sh register-service "$KIT/metamcp/global-localhost"
    bash linux/run-metamcp.sh register-service "$KIT/metamcp/local-wslhost"
    bash linux/run-metamcp.sh register-service "$KIT/metamcp/local-vmhost"
-   bash linux/run-global-servers.sh register-service "$KIT/global"
-   bash linux/run-local-servers.sh register-service "$KIT/local"
    ```
 
-   `register-service` сразу запускает выбранный компонент и включает его в systemd; повторная регистрация безопасно обновляет принадлежащий комплекту unit. Для диагностики используйте `systemctl --user --failed`, `systemctl --user status 'mcpkit-*'` и соответствующие `run-*.sh status <каталог>` команды. У LOCAL запуск desktop-control всё равно зависит от существующей интерактивной графической сессии, а отдельные MCP-серверы могут оставаться `waiting` без ключей/настроек. GLOBAL управляет всеми серверами своего GLOBAL-шлюза; команда не запускает серверы MetaMCP или Windows/VM LOCAL.
+   Замените примеры на **точные каталоги ваших установок**; повторите регистрацию для каждого установленного GLOBAL/LOCAL и MetaMCP. `register-service` сразу запускает выбранный компонент и включает его в systemd. MCP Kit связывает GLOBAL/LOCAL units с `mcpkit-mcp-servers.target`, а MetaMCP — с порядком `After=mcpkit-mcp-servers.target`: при следующем старте сначала завершаются команды запуска шлюзов, затем запускаются MetaMCP. Для запуска в текущем сеансе регистрируйте шлюзы первыми, как в примере. Повторная регистрация заменяет только принадлежащий комплекту unit, обновляет конфигурацию и повторяет запуск — этим можно исправить ранее созданный неисправный unit.
+
+   Для диагностики используйте `systemctl --user --failed`, `systemctl --user status mcpkit-mcp-servers.target`, `systemctl --user status 'mcpkit-*'` и соответствующие `run-*.sh status <каталог>` команды. У LOCAL запуск desktop-control всё равно зависит от существующей интерактивной графической сессии, а отдельные MCP-серверы могут оставаться `waiting` без ключей/настроек. GLOBAL управляет всеми серверами своего GLOBAL-шлюза; команда не запускает серверы MetaMCP или Windows/VM LOCAL.
 
 4. Настройте запуск Debian при входе в Windows. В Планировщике заданий создайте задачу с триггером **At log on** для вашей учётной записи и действием:
 

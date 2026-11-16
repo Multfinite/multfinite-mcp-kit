@@ -33,6 +33,8 @@ mcpkit_service_location global "$GLOBAL"
 GLOBAL_UNIT="$MCPKIT_SYSTEMD_UNIT_FILE"
 mcpkit_service_location local "$LOCAL"
 LOCAL_UNIT="$MCPKIT_SYSTEMD_UNIT_FILE"
+MCP_TARGET="$HOME/.config/systemd/user/mcpkit-mcp-servers.target"
+test -f "$MCP_TARGET"
 for unit in "$META_UNIT" "$GLOBAL_UNIT" "$LOCAL_UNIT"; do
     test -f "$unit"
     test "$(stat -c '%a' "$unit")" = 600
@@ -50,11 +52,19 @@ GLOBAL_DIR="$(quote "$GLOBAL")"
 LOCAL_DIR="$(quote "$LOCAL")"
 grep -Fxq -- "ExecStart=$BASH_ARG $META_RUNNER $START $META_DIR" "$META_UNIT"
 grep -Fxq -- "ExecStop=$BASH_ARG $META_RUNNER $STOP $META_DIR" "$META_UNIT"
+grep -Fxq -- 'Wants=mcpkit-mcp-servers.target' "$META_UNIT"
+grep -Fxq -- 'After=mcpkit-mcp-servers.target' "$META_UNIT"
+grep -Fxq -- 'WantedBy=default.target' "$MCP_TARGET"
 grep -Fxq -- "ExecStart=$BASH_ARG $GLOBAL_RUNNER $START $GLOBAL_DIR" "$GLOBAL_UNIT"
+grep -Fxq -- 'WantedBy=mcpkit-mcp-servers.target' "$GLOBAL_UNIT"
+grep -Fxq -- "WorkingDirectory=$(mcpkit_systemd_path_value "$META")" "$META_UNIT"
 grep -Fxq -- "ExecStop=$BASH_ARG $GLOBAL_RUNNER $STOP $GLOBAL_DIR" "$GLOBAL_UNIT"
 grep -Fxq -- "ExecStart=$BASH_ARG $LOCAL_RUNNER $START $LOCAL_DIR" "$LOCAL_UNIT"
 grep -Fxq -- "ExecStop=$BASH_ARG $LOCAL_RUNNER $STOP $LOCAL_DIR" "$LOCAL_UNIT"
 grep -Fq -- '--user enable --now' "$MCPKIT_TEST_SYSTEMCTL_LOG"
+if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze verify "$MCP_TARGET" "$META_UNIT" "$GLOBAL_UNIT" "$LOCAL_UNIT"
+fi
 
 # Removing a registration must not require the original installation directory.
 rm -rf -- "$META" "$GLOBAL" "$LOCAL"
