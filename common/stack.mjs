@@ -1602,7 +1602,7 @@ async function shareRegistrationFile(ctx, meta, savedMeta, registrationFile) {
 
 try {
   if (Number(process.versions.node.split('.')[0]) < 20) fail('Node.js 20 or newer is required.');
-  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'remove', 'link', 'unlink', 'link-metamcp', 'unlink-metamcp', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|remove|link|unlink|link-metamcp|unlink-metamcp|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
+  if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'rebuild', 'remove', 'link', 'unlink', 'link-metamcp', 'unlink-metamcp', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|rebuild|remove|link|unlink|link-metamcp|unlink-metamcp|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
   const opts = parseArgs(argv);
   if (opts.expectType && !['meta', 'global'].includes(opts.expectType)) fail('Unknown expected kit type.');
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
