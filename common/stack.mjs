@@ -17,6 +17,8 @@ import { prepareMetaPeerRegistration, commitMetaPeerRegistration } from './metam
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const revision = '05818ec2767b946f98d280ae9cefa401f0362d62';
+// Сборка из клона с локальными правками: по умолчанию запрещена, включается флагом.
+let allowLocalSource = false;
 const [action, ...argv] = process.argv.slice(2);
 
 function fail(message) { throw new Error(message); }
@@ -24,7 +26,7 @@ function parseArgs(args) {
   const result = {};
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    const flag = { '--delete-volumes': 'deleteVolumes', '--staged': 'staged', '--fresh': 'fresh', '--allow-insecure-lan': 'allowInsecureLan' }[arg];
+    const flag = { '--delete-volumes': 'deleteVolumes', '--staged': 'staged', '--fresh': 'fresh', '--allow-insecure-lan': 'allowInsecureLan', '--allow-local-source': 'allowLocalSource' }[arg];
     if (flag) { if (result[flag]) fail(`Duplicate argument: ${arg}`); result[flag] = true; continue; }
     const key = { '--dir': 'dir', '--port': 'port', '--app-url': 'appUrl', '--lan-ip': 'lanIp', '--admin-email': 'adminEmail', '--meta-dir': 'metaDir', '--peer-dir': 'peerDir', '--endpoint': 'endpoint', '--server': 'server', '--registration': 'registration', '--registration-file': 'registrationFile', '--expect-type': 'expectType' }[arg];
     if (!key || i + 1 >= args.length || args[i + 1].startsWith('--') || result[key] !== undefined) fail(`Invalid argument: ${arg}`);
@@ -390,7 +392,13 @@ function ensureSource(state) {
   const actual = run('git', ['-C', source, 'rev-parse', 'HEAD'], { capture: true }).stdout.trim();
   if (actual !== revision || state.revision !== revision) fail('MetaMCP clone revision differs from the saved revision. No build was attempted.');
   const changes = run('git', ['-C', source, 'status', '--porcelain', '--untracked-files=all'], { capture: true }).stdout.trim();
-  if (changes) fail('The owned MetaMCP source clone has local changes. The kit never modifies upstream source and will not build from a modified clone. Preserve/review the changes and create a clean upstream clone before rebuilding.');
+  if (changes) {
+    if (!allowLocalSource) {
+      fail('The owned MetaMCP source clone has local changes. The kit never modifies upstream source by itself. '
+        + 'Pass --allow-local-source to build such a clone deliberately, or run rebuild to reset it to the pinned revision.');
+    }
+    console.log('WARNING: building MetaMCP from a clone with local changes (--allow-local-source); the image will not match the pinned revision.');
+  }
   return source;
 }
 // Приводит принадлежащий киту клон к закреплённой upstream-ревизии и пересобирает
@@ -423,10 +431,12 @@ function rebuildSource(state) {
   }
   console.log(`Resetting the MetaMCP clone to the pinned revision ${revision}.`);
   run('git', ['-C', source, 'fetch', '--depth', '1', 'https://github.com/metatool-ai/metamcp.git', revision]);
-  run('git', ['-C', source, 'checkout', '--detach', revision]);
+  // reset, не checkout: checkout переносит локальные правки на новую ревизию,
+  // поэтому клон оставался грязным и следующая сборка отказывала.
+  run('git', ['-C', source, 'reset', '--hard', revision]);
   run('git', ['-C', source, 'clean', '-fdx']);
   if (state.revision !== revision) {
-    privateWrite(path.join(priv, 'state.json'), `${JSON.stringify({ ...state, revision }, null, 2)}\n`);
+    fs.writeFileSync(path.join(priv, 'state.json'), `${JSON.stringify({ ...state, revision }, null, 2)}\n`, { mode: 0o600 });
     state.revision = revision;
     console.log(`Updated the recorded MetaMCP revision to ${revision}.`);
   }
@@ -1609,6 +1619,8 @@ try {
   if (!['init-meta', 'init-global', 'start', 'stop', 'status', 'logs', 'apply', 'rebuild', 'remove', 'link', 'unlink', 'link-metamcp', 'unlink-metamcp', 'check-env', 'recover-env', 'share-global', 'share-registration', 'relocate', 'provision-meta', 'activate-meta'].includes(action)) fail('Usage: stack.mjs {init-meta|init-global|start|stop|status|logs|apply|rebuild|remove|link|unlink|link-metamcp|unlink-metamcp|check-env|recover-env|share-global|share-registration|relocate|provision-meta|activate-meta} --dir DIR [options]');
   const opts = parseArgs(argv);
   if (opts.expectType && !['meta', 'global'].includes(opts.expectType)) fail('Unknown expected kit type.');
+  if (opts.allowLocalSource && !['start', 'apply', 'rebuild'].includes(action)) fail('--allow-local-source is only valid for start, apply and rebuild.');
+  allowLocalSource = Boolean(opts.allowLocalSource);
   if (opts.deleteVolumes && action !== 'remove') fail('--delete-volumes is only valid for remove.');
   if (opts.metaDir && !['link', 'unlink', 'share-global'].includes(action)) fail('--meta-dir is only valid for link/unlink/share-global.');
   if (opts.peerDir && !['link-metamcp', 'unlink-metamcp'].includes(action)) fail('--peer-dir is only valid for link-metamcp/unlink-metamcp.');

@@ -169,6 +169,12 @@ bash linux/run-metamcp.sh rebuild "$HOME/mcp-kit/metamcp/A"
 .\windows\run-metamcp.ps1 rebuild "$env:USERPROFILE\mcp-kit\metamcp\A"
 ```
 
+Осознанная сборка из клона с локальными правками (например, при отладке самого MetaMCP) требует явного флага: без него `start` и `apply` отказываются собирать, чтобы образ не расходился с закреплённой ревизией незаметно.
+
+```sh
+bash linux/run-metamcp.sh start "$HOME/mcp-kit/metamcp/A" --allow-local-source
+```
+
 ## 2. Отдельный GLOBAL
 
 Скрипт устанавливает общие для набора сервисы в собственном проекте Docker, **не устанавливает MetaMCP и не меняет его базу**. Порт шлюза должен отличаться от занятых портов MetaMCP/LOCAL.

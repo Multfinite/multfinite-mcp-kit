@@ -12,7 +12,10 @@ test('Linux lifecycle builds only from a clean pinned upstream clone and never p
   const stack = read('common/stack.mjs');
   assert.doesNotMatch(stack, /metamcp-lan-source|ensurePatchedSource|single-server-per-endpoint-patch|clean-tools-patch|MCPKIT_CLEAN_TOOL_NAMES|MCPKIT_ENFORCE_SINGLE_SERVER_PER_ENDPOINT/);
   assert.match(stack, /status', '--porcelain', '--untracked-files=all'/);
-  assert.match(stack, /will not build from a modified clone/);
+  // Запрет по умолчанию остаётся; сборка с локальными правками возможна только явно.
+  assert.match(stack, /if \(!allowLocalSource\)/);
+  assert.match(stack, /--allow-local-source/);
+  assert.match(stack, /will not match the pinned revision/);
 });
 
 test('MetaMCP Compose overlays contain no source-patch features', () => {
