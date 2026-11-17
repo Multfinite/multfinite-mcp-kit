@@ -56,34 +56,39 @@ services:
       NGINX_ENVSUBST_FILTER: "^MCPKIT_"
       MCPKIT_LLM_PROXY_API_KEY: ${MCPKIT_LLM_PROXY_API_KEY:-}
       MCPKIT_LLM_PROXY_SESSION: ${MCPKIT_LLM_PROXY_SESSION:-MCP-KIT-WORK}
+      # Куда прокси отправляет /v1/embeddings: fastembed по умолчанию, ollama при профиле.
+      MCPKIT_EMBEDDINGS_UPSTREAM: ${MCPKIT_EMBEDDINGS_UPSTREAM:-http://embeddings:8000}
     volumes:
       # Путь передаёт кит: относительный резолвился бы от --project-directory
       # (каталог установки), а не от каталога репозитория.
       - ${MCPKIT_LLM_PROXY_CONF:-/mcp-kit/common/llm-proxy/nginx.conf.template}:/etc/nginx/templates/default.conf.template:ro
     labels: *kit-labels
     restart: unless-stopped
-  # Локальные эмбеддинги: у OpenCode Go их нет вообще (404 на /embeddings), а
-  # Graphiti и Cognee без них не строят граф. Модель скачивается при первом
-  # старте контейнера (MCPKIT_EMBEDDINGS_MODEL, по умолчанию nomic-embed-text).
+  # Локальные эмбеддинги: у OpenCode их нет вообще (404 на /embeddings), а
+  # Graphiti и Cognee без них не строят граф. fastembed отдаёт OpenAI-совместимый
+  # /v1/embeddings без отдельного рантайма вроде Ollama; модель кэшируется в томе.
   embeddings:
-    image: ollama/ollama:latest
-    entrypoint: ["/bin/sh", "-c"]
-    command:
-      - |
-        ollama serve &
-        pid=$$!
-        i=0
-        until ollama list >/dev/null 2>&1; do
-          i=$$((i + 1))
-          if [ "$$i" -gt 60 ]; then echo 'Ollama не поднялся за 120 с' >&2; break; fi
-          sleep 2
-        done
-        ollama pull "$$MCPKIT_EMBEDDINGS_MODEL" || echo "Не удалось скачать $$MCPKIT_EMBEDDINGS_MODEL" >&2
-        wait $$pid
+    image: ${MCPKIT_EMBEDDINGS_IMAGE:-mcpkit-embeddings:1}
+    build:
+      context: ${MCPKIT_EMBEDDINGS_BUILD_DIR:-/mcp-kit/common/embeddings}
+      labels: *kit-labels
+    pull_policy: never
     environment:
-      MCPKIT_EMBEDDINGS_MODEL: ${MCPKIT_EMBEDDINGS_MODEL:-nomic-embed-text}
+      # Отдельное имя, чтобы значение Ollama (MCPKIT_EMBEDDINGS_MODEL) не подменяло модель fastembed.
+      EMBEDDINGS_MODEL: ${MCPKIT_FASTEMBED_MODEL:-BAAI/bge-small-en-v1.5}
     volumes:
-      - embeddings_data:/root/.ollama
+      - embeddings_data:/data/hf
+    labels: *kit-labels
+    restart: unless-stopped
+  # Необязательный Ollama: только если нужна именно её модель (например
+  # nomic-embed-text, 768). По умолчанию не запускается —
+  #   docker compose --profile ollama up -d ollama
+  # и MCPKIT_EMBEDDINGS_UPSTREAM=http://ollama:11434 в приватном .env.
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    volumes:
+      - ollama_data:/root/.ollama
     labels: *kit-labels
     restart: unless-stopped
   graphiti:
@@ -105,8 +110,8 @@ services:
       # graphiti читает именно OPENAI_API_URL; OPENAI_BASE_URL он игнорирует.
       OPENAI_API_URL: ${MCPKIT_GRAPHITI_API_ENDPOINT:-https://api.openai.com/v1}
       MODEL_NAME: ${MCPKIT_GRAPHITI_API_MODEL:-gpt-4o-mini}
-      EMBEDDER_MODEL: ${MCPKIT_GRAPHITI_EMBEDDER_MODEL:-text-embedding-3-small}
-      EMBEDDER_DIMENSIONS: ${MCPKIT_GRAPHITI_EMBEDDER_DIMENSIONS:-1536}
+      EMBEDDER_MODEL: ${MCPKIT_GRAPHITI_EMBEDDER_MODEL:-BAAI/bge-small-en-v1.5}
+      EMBEDDER_DIMENSIONS: ${MCPKIT_GRAPHITI_EMBEDDER_DIMENSIONS:-384}
       GRAPHITI_GROUP_ID: ${MCPKIT_GRAPHITI_GROUP_ID:-multfinite-mcp-kit-global}
     volumes:
       # Размерность эмбеддера задаётся конфигом graphiti, поэтому файл идёт из кита.
@@ -133,11 +138,11 @@ services:
       # Предпроверка соединения ходит по своему пути и не всегда проходит через
       # OpenAI-совместимый прокси; отключается, как советует сам cognee.
       COGNEE_SKIP_CONNECTION_TEST: ${MCPKIT_COGNEE_SKIP_CONNECTION_TEST:-false}
-      EMBEDDING_PROVIDER: ${MCPKIT_COGNEE_EMBEDDING_API_PROVIDER:-openai}
+      EMBEDDING_PROVIDER: ${MCPKIT_COGNEE_EMBEDDING_API_PROVIDER:-fastembed}
       EMBEDDING_API_KEY: ${MCPKIT_COGNEE_EMBEDDING_API_KEY:-}
       EMBEDDING_ENDPOINT: ${MCPKIT_COGNEE_EMBEDDING_API_ENDPOINT:-https://api.openai.com/v1}
-      EMBEDDING_MODEL: ${MCPKIT_COGNEE_EMBEDDING_API_MODEL:-text-embedding-3-small}
-      EMBEDDING_DIMENSIONS: ${MCPKIT_COGNEE_EMBEDDING_DIMENSIONS:-1536}
+      EMBEDDING_MODEL: ${MCPKIT_COGNEE_EMBEDDING_API_MODEL:-BAAI/bge-small-en-v1.5}
+      EMBEDDING_DIMENSIONS: ${MCPKIT_COGNEE_EMBEDDING_DIMENSIONS:-384}
       SYSTEM_ROOT_DIRECTORY: /cognee-storage/system
       DATA_ROOT_DIRECTORY: /cognee-storage/data
     volumes:
@@ -181,6 +186,7 @@ volumes:
   neo4j_data: { labels: *kit-labels }
   qdrant_data: { labels: *kit-labels }
   embeddings_data: { labels: *kit-labels }
+  ollama_data: { labels: *kit-labels }
   cognee_system: { labels: *kit-labels }
   cognee_data: { labels: *kit-labels }
   memory_data: { labels: *kit-labels }

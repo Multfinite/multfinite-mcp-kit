@@ -247,7 +247,7 @@ bash linux/run-global-servers.sh apply "$HOME/mcp-kit/global"
 
 Некоторые OpenAI-совместимые шлюзы требуют дополнительный заголовок на каждый запрос. OpenCode Go отвечает `400 MissingSessionID`, если нет `x-opencode-session`, а Graphiti и Cognee такой заголовок задавать не умеют. Для такого случая в GLOBAL добавлен `llm-proxy` (официальный `nginx:alpine`, без собственного образа): он принимает `/v1/chat/completions`, подставляет `x-opencode-session` и уходит в OpenCode Go, а `/v1/embeddings` отправляет в локальные эмбеддинги.
 
-У OpenCode Go эмбеддингов нет вообще — `404` на любом пути. Локальные эмбеддинги даёт сервис `embeddings` (Ollama, модель `nomic-embed-text`): он входит в GLOBAL и поднимается вместе с ним, модель скачивается при первом старте. Прокси отправляет `/v1/embeddings` именно туда.
+У OpenCode Go эмбеддингов нет вообще — `404` на любом пути. Локальные эмбеддинги даёт сервис `embeddings`: контейнер на fastembed с OpenAI-совместимым `/v1/embeddings` (модель `BAAI/bge-small-en-v1.5`, 384 измерения). Он входит в GLOBAL и поднимается вместе с ним, модель скачивается при первом старте и кэшируется в томе `embeddings_data`; прокси отправляет `/v1/embeddings` туда. Ollama нужен только если требуется именно её модель (`nomic-embed-text`, 768): он вынесен в профиль `ollama` и по умолчанию не запускается — `docker compose --profile ollama up -d ollama` плюс `MCPKIT_EMBEDDINGS_UPSTREAM=http://ollama:11434` в приватном `.env`.
 
 Пример настроек для такого шлюза (`<GLOBAL>/.mcpkit/.env`):
 
@@ -260,18 +260,19 @@ MCPKIT_LLM_PROXY_SESSION=MCP-KIT-WORK
 MCPKIT_GRAPHITI_API_ENDPOINT=http://llm-proxy:8000/v1
 MCPKIT_GRAPHITI_API_KEY=<непустой: авторизацию делает прокси>
 MCPKIT_GRAPHITI_API_MODEL=deepseek-v4.1-flash
-MCPKIT_GRAPHITI_EMBEDDER_MODEL=nomic-embed-text
+MCPKIT_GRAPHITI_EMBEDDER_MODEL=BAAI/bge-small-en-v1.5
+MCPKIT_GRAPHITI_EMBEDDER_DIMENSIONS=384
 # Cognee
 MCPKIT_COGNEE_LLM_API_ENDPOINT=http://llm-proxy:8000/v1
 MCPKIT_COGNEE_LLM_API_KEY=<непустой>
-MCPKIT_COGNEE_LLM_API_MODEL=deepseek-v4.1-flash
+MCPKIT_COGNEE_LLM_API_MODEL=openai/deepseek-v4.1-flash
 MCPKIT_COGNEE_LLM_API_PROVIDER=openai
-MCPKIT_COGNEE_EMBEDDING_API_ENDPOINT=http://llm-proxy:8000/v1
-MCPKIT_COGNEE_EMBEDDING_API_KEY=<непустой>
-MCPKIT_COGNEE_EMBEDDING_API_MODEL=nomic-embed-text
-MCPKIT_COGNEE_EMBEDDING_API_PROVIDER=openai
-MCPKIT_COGNEE_EMBEDDING_DIMENSIONS=768
+MCPKIT_COGNEE_EMBEDDING_API_PROVIDER=fastembed
+MCPKIT_COGNEE_EMBEDDING_API_MODEL=BAAI/bge-small-en-v1.5
+MCPKIT_COGNEE_EMBEDDING_DIMENSIONS=384
 ```
+
+Размерность должна совпадать с моделью: `BAAI/bge-small-en-v1.5` — 384, `nomic-embed-text` — 768, `text-embedding-3-small` — 1536. Смена модели без переиндексации ломает поиск по существующей коллекции.
 
 Если шлюз отдаёт и чат, и эмбеддинги сам (настоящий OpenAI, OpenRouter, локальный vLLM), `llm-proxy` не нужен: укажите адрес шлюза напрямую в `MCPKIT_*_ENDPOINT`.
 

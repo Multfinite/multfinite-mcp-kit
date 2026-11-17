@@ -4,7 +4,7 @@
 # (без него 400 MissingSessionID), а Graphiti и Cognee такой заголовок задавать
 # не умеют. Прокси добавляет его сам и разводит запросы по назначению:
 #   /v1/chat/completions -> OpenCode Go
-#   /v1/embeddings       -> локальные эмбеддинги (профиль embeddings, Ollama)
+#   /v1/embeddings       -> локальные эмбеддинги (fastembed по умолчанию, Ollama по профилю)
 #   /v1/models           -> OpenCode Go
 #
 # Подстановки ${MCPKIT_*} делает официальный образ nginx (envsubst) до старта;
@@ -46,7 +46,7 @@ server {
     location /v1/embeddings {
         # Адрес задаётся переменной, чтобы nginx не падал при старте, когда
         # профиль embeddings выключен: без него будет 502, а не мёртвый прокси.
-        set $upstream_embeddings http://embeddings:11434;
+        set $upstream_embeddings ${MCPKIT_EMBEDDINGS_UPSTREAM};
         proxy_pass $upstream_embeddings/v1/embeddings;
         proxy_set_header Host embeddings;
         proxy_http_version 1.1;

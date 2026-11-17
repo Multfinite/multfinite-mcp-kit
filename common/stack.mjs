@@ -259,7 +259,9 @@ function config(state, { metaOriginOverride } = {}) {
   } else {
     Object.assign(common, { MCPKIT_BUILD_DIR: path.join(priv, 'build'), MCPKIT_NODE_BUILD_DIR: path.join(priv, 'node-build'), MCPKIT_NODE_IMAGE: `${state.project}-node:1`,
       MCPKIT_LLM_PROXY_CONF: path.join(root, 'common', 'llm-proxy', 'nginx.conf.template'),
-      MCPKIT_GRAPHITI_CONFIG: path.join(root, 'common', 'graphiti', 'config.yaml') });
+      MCPKIT_GRAPHITI_CONFIG: path.join(root, 'common', 'graphiti', 'config.yaml'),
+      MCPKIT_EMBEDDINGS_BUILD_DIR: path.join(root, 'common', 'embeddings'),
+      MCPKIT_EMBEDDINGS_IMAGE: `${state.project}-embeddings:1` });
   }
   return common;
 }
@@ -479,7 +481,7 @@ function syncKitBuild(state) {
   return changed;
 }
 function ensureImages(ctx, state) {
-  const images = state.type === 'meta' ? [[config(state).MCPKIT_IMAGE, 'app']] : [[config(state).MCPKIT_IMAGE, 'gateway'], [config(state).MCPKIT_NODE_IMAGE, 'memory']];
+  const images = state.type === 'meta' ? [[config(state).MCPKIT_IMAGE, 'app']] : [[config(state).MCPKIT_IMAGE, 'gateway'], [config(state).MCPKIT_NODE_IMAGE, 'memory'], [config(state).MCPKIT_EMBEDDINGS_IMAGE, 'embeddings']];
   const stale = state.type === 'global' ? syncKitBuild(state) : new Set();
   for (const [image, service] of images) {
     const labels = inspect(ctx, 'image', image);
