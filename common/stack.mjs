@@ -432,9 +432,13 @@ function rebuildSource(state) {
   }
   const image = config(state).MCPKIT_IMAGE;
   const ctx = dockerContext();
+  // Образ нельзя удалить, пока его использует запущенный app: сначала убираем
+  // контейнер, иначе rmi молча провалится и приложение пересоздастся из старого образа.
+  console.log('Removing the app container and its image so both are recreated from the clean clone.');
+  compose(ctx, state, ['rm', '-s', '-f', 'app']);
+  run('docker', ['--context', ctx, 'image', 'rm', image], { capture: true, allowFailure: true });
   if (inspect(ctx, 'image', image)) {
-    run('docker', ['--context', ctx, 'image', 'rm', image], { capture: true, allowFailure: true });
-    console.log(`Removed the ${image} image so it is rebuilt from the clean clone.`);
+    fail(`Could not remove ${image}; it is still in use. Stop the app container and retry; nothing else was changed.`);
   }
 }
 // Приватный build-каталог — источник сборки образов кита; init копирует туда
@@ -1674,10 +1678,6 @@ try {
     checkResources(ctx, state);
     rebuildSource(state);
     await start(ctx, state);
-    // Compose compares the image tag, not its ID, so after a rebuild it reports the
-    // container as running and keeps the old image. Recreate the app explicitly.
-    console.log('Recreating the app container so the rebuilt image is actually used.');
-    compose(ctx, state, ['up', '-d', '--no-deps', '--force-recreate', 'app']);
     console.log('The MetaMCP clone is back at the pinned upstream revision and the app image was rebuilt; database, private .env and registrations were not changed.');
   } else if (action === 'apply') {
     if (state.type === 'meta' && setupMarker(state)) fail('Complete or remove the staged installation before applying configuration.');
