@@ -139,11 +139,11 @@ function hiddenInput(prompt, { optional = false } = {}) {
     process.stdin.resume();
   });
 }
-async function credentials(source, target) {
+async function credentials(source, target, endpointName) {
   let sourceApiKey = readSourceApiKey(source);
   if (sourceApiKey === null) {
     sourceApiKey = await hiddenInput(
-      `API key for endpoint ${source.project} (press Enter only if that endpoint is open): `,
+      `API key for ${source.base} endpoint "${endpointName}" (press Enter only if that endpoint is open): `,
       { optional: true },
     );
     if (sourceApiKey && /[\r\n\0]/.test(sourceApiKey)) fail('Invalid source API key.');
@@ -151,8 +151,8 @@ async function credentials(source, target) {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     fail('MetaMCP B registration requires an interactive administrator login; credentials are never accepted in arguments.');
   }
-  const email = await question(`Administrator email for ${target.project}: `);
-  const password = await hiddenInput('MetaMCP B password (not echoed): ');
+  const email = await question(`Administrator email for ${target.base}: `);
+  const password = await hiddenInput(`Password for ${target.base} (not echoed): `);
   if (!email || /[\r\n\0]/.test(email) || !password) fail('Administrator email and password are required.');
   return { sourceApiKey, email, password };
 }
@@ -289,7 +289,7 @@ export async function prepareMetaPeerRegistration(source, target, endpoint, supp
   assertMetaState(source); assertMetaState(target);
   if (source.project === target.project || source.base === target.base) fail('Choose a source MetaMCP A and a different target MetaMCP B.');
   const resolved = resolveMetaPeerEndpoint(source, endpoint);
-  const values = suppliedCredentials || await credentials(source, target);
+  const values = suppliedCredentials || await credentials(source, target, resolved.name);
   const providedApiKey = values.sourceApiKey ?? readSourceApiKey(source);
   if (providedApiKey !== null && providedApiKey !== undefined && providedApiKey !== '' &&
       (typeof providedApiKey !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(providedApiKey))) {
