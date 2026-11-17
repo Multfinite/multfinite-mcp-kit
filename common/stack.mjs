@@ -77,9 +77,8 @@ function cleanEnv(extra = {}) {
   for (const name of Object.keys(env)) {
     const upper = name.toUpperCase();
     if (/^(MCPKIT_|COMPOSE_|POSTGRES_|BOOTSTRAP_|GIT_)/.test(upper) ||
-        ['APP_URL', 'NEXT_PUBLIC_APP_URL', 'EXTRA_TRUSTED_ORIGINS', 'DATABASE_URL', 'BETTER_AUTH_SECRET', 'METAMCP_ADMIN_EMAILS', 'NEO4J_PASSWORD',
-          'LLM_API_KEY', 'LLM_API_ENDPOINT', 'LLM_API_MODEL', 'LLM_API_PROVIDER', 'EMBEDDING_MODEL', 'EMBEDDING_DIMENSIONS',
-          'CONTEXT7_API_KEY', 'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'].includes(upper)) delete env[name];
+        ['APP_URL', 'NEXT_PUBLIC_APP_URL', 'EXTRA_TRUSTED_ORIGINS', 'DATABASE_URL', 'BETTER_AUTH_SECRET', 'METAMCP_ADMIN_EMAILS',
+          'DOCKER_HOST', 'DOCKER_CONTEXT', 'DOCKER_TLS_VERIFY', 'DOCKER_CERT_PATH'].includes(upper)) delete env[name];
   }
   return { ...env, GIT_TERMINAL_PROMPT: '0', ...extra };
 }
@@ -148,7 +147,7 @@ function readEnv(base, type, { ignoreAppUrl = false } = {}) {
       fail('Write APP_URL in the private .env as APP_URL=... without export or spaces around the key.');
     }
   }
-  const required = type === 'meta' ? ['POSTGRES_PASSWORD', 'BETTER_AUTH_SECRET'] : ['MCPKIT_GATEWAY_KEY', 'MCPKIT_CONTROL_KEY', 'NEO4J_PASSWORD'];
+  const required = type === 'meta' ? ['POSTGRES_PASSWORD', 'BETTER_AUTH_SECRET'] : ['MCPKIT_GATEWAY_KEY', 'MCPKIT_CONTROL_KEY', 'MCPKIT_NEO4J_PASSWORD'];
   for (const key of required) {
     if (!/^[a-f0-9]{64}$/.test(values[key] || '')) {
       fail(`Invalid or missing ${key} in the private .env: expected the original 64 lowercase hexadecimal characters without quotes or spaces. Restore the exact original value from a private backup; existing credentials were not changed.`);
@@ -263,7 +262,8 @@ function config(state, { metaOriginOverride } = {}) {
     const link = readLiveGlobalLink(state);
     if (link) common.MCPKIT_GLOBAL_CLIENT_NETWORK = link.network;
   } else {
-    Object.assign(common, { MCPKIT_BUILD_DIR: path.join(priv, 'build'), MCPKIT_NODE_BUILD_DIR: path.join(priv, 'node-build'), MCPKIT_NODE_IMAGE: `${state.project}-node:1` });
+    Object.assign(common, { MCPKIT_BUILD_DIR: path.join(priv, 'build'), MCPKIT_NODE_BUILD_DIR: path.join(priv, 'node-build'), MCPKIT_NODE_IMAGE: `${state.project}-node:1`,
+      MCPKIT_LLM_PROXY_CONF: path.join(root, 'common', 'llm-proxy', 'nginx.conf.template') });
   }
   return common;
 }
@@ -771,7 +771,7 @@ function relocationContainerIds(ctx, state, values) {
   const id = ownedMetaService(ctx, state, 'gateway');
   const env = containerEnvironment(ctx, id);
   if (env.MCPKIT_INSTANCE_ID !== state.id || env.MCPKIT_GATEWAY_KEY !== values.MCPKIT_GATEWAY_KEY ||
-      env.MCPKIT_CONTROL_KEY !== values.MCPKIT_CONTROL_KEY || env.NEO4J_PASSWORD !== values.NEO4J_PASSWORD) {
+      env.MCPKIT_CONTROL_KEY !== values.MCPKIT_CONTROL_KEY || env.MCPKIT_NEO4J_PASSWORD !== values.MCPKIT_NEO4J_PASSWORD) {
     fail('GLOBAL gateway credentials differ from the private configuration; no file was changed.');
   }
   const result = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', id], { capture: true });

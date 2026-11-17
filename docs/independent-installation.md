@@ -149,7 +149,22 @@ GLOBAL включает перечисленные в README Sequential Thinking
 
 `status` показывает контейнеры и состояния отдельных MCP-серверов; `ready` означает только успешный MCP `initialize`. При первом запуске пакеты могут ещё загружаться, а серверы без учётных данных могут оставаться в `waiting` или `starting`. Python-серверы запускаются в раздельных окружениях: Fetch закреплён на MCP SDK 1.26.0 из-за несовместимых изменений SDK 2, а другие пакеты могут использовать свои версии. Общая команда `logs` показывает журналы Compose; `logs <каталог> <server-id>` показывает соответствующий журнал сервера (для stdio-серверов шлюз должен работать). Журналы могут содержать секреты и личные данные.
 
-Для Graphiti и Cognee задайте `LLM_API_KEY`, при необходимости `LLM_API_ENDPOINT`, модель и провайдер в приватном `<GLOBAL>/.mcpkit/.env`; Context7 поддерживает `CONTEXT7_API_KEY`. Используется синтаксис Docker Compose `.env`. Не изменяйте сгенерированные `MCPKIT_GATEWAY_KEY`, `MCPKIT_CONTROL_KEY` и `NEO4J_PASSWORD` без отдельного плана перенастройки: повторная регистрация намеренно не перезаписывает старые подключения, а смена пароля в файле не меняет пароль уже существующей БД. Применение настроек пересоздаёт **только** контейнеры шлюза, Graphiti и Cognee; их именованные тома сохраняются, но ручные файлы в записываемом слое контейнеров могут быть потеряны:
+### Имена переменных: префикс называет сервер
+
+Правило одно: переменная, которая включает сервер, называет его. Общий префикс кита — `MCPKIT_`, затем сервер и предмет настройки: `MCPKIT_<SERVER>_<WHAT>`. Безымянных `LLM_API_*` в конфигурации не остаётся: иначе нельзя задать Graphiti и Cognee разные модели, провайдеров и эмбеддинги.
+
+| Сервер | Переменные |
+| --- | --- |
+| Graphiti | `MCPKIT_GRAPHITI_API_KEY`, `MCPKIT_GRAPHITI_API_ENDPOINT`, `MCPKIT_GRAPHITI_API_MODEL`, `MCPKIT_GRAPHITI_EMBEDDER_MODEL`, `MCPKIT_GRAPHITI_GROUP_ID`, `MCPKIT_GRAPHITI_NEO4J_DATABASE` |
+| Cognee, LLM | `MCPKIT_COGNEE_LLM_API_PROVIDER`, `MCPKIT_COGNEE_LLM_API_KEY`, `MCPKIT_COGNEE_LLM_API_MODEL`, `MCPKIT_COGNEE_LLM_API_ENDPOINT` |
+| Cognee, эмбеддинги | `MCPKIT_COGNEE_EMBEDDING_API_PROVIDER`, `MCPKIT_COGNEE_EMBEDDING_API_KEY`, `MCPKIT_COGNEE_EMBEDDING_API_ENDPOINT`, `MCPKIT_COGNEE_EMBEDDING_API_MODEL`, `MCPKIT_COGNEE_EMBEDDING_DIMENSIONS` |
+| Neo4j | `MCPKIT_NEO4J_PASSWORD` |
+| Context7 | `MCPKIT_CONTEXT7_API_KEY` |
+| Шлюз | `MCPKIT_GATEWAY_KEY`, `MCPKIT_CONTROL_KEY`, `MCPKIT_INSTANCE` |
+
+Внутри контейнеров имена остаются контрактными для самих серверов (`OPENAI_API_KEY`, `LLM_MODEL`, `NEO4J_PASSWORD`): переименование касается только файла настроек кита, где значение подставляется в `MCPKIT_*`. Старые общие имена (`LLM_API_*`, `EMBEDDING_*`, `CONTEXT7_API_KEY`, `NEO4J_PASSWORD`) больше не читаются — после обновления переведите файл скриптом `bash linux/migrate-global-env-prefixes.sh`; без этого Graphiti и Cognee останутся в ожидании ключей.
+
+Задайте значения в приватном `<GLOBAL>/.mcpkit/.env` (синтаксис Docker Compose `.env`). Не изменяйте сгенерированные `MCPKIT_GATEWAY_KEY`, `MCPKIT_CONTROL_KEY` и `MCPKIT_NEO4J_PASSWORD` без отдельного плана перенастройки: повторная регистрация намеренно не перезаписывает старые подключения, а смена пароля в файле не меняет пароль уже существующей БД. Применение настроек пересоздаёт **только** контейнеры шлюза, Graphiti и Cognee; их именованные тома сохраняются, но ручные файлы в записываемом слое контейнеров могут быть потеряны:
 
 ```sh
 bash linux/run-global-servers.sh apply "$HOME/mcp-kit/global"
@@ -158,6 +173,40 @@ bash linux/run-global-servers.sh apply "$HOME/mcp-kit/global"
 ```powershell
 .\windows\run-global-servers.ps1 apply "$env:USERPROFILE\mcp-kit\global"
 ```
+
+### Шлюз без эмбеддингов и обязательный заголовок
+
+Некоторые OpenAI-совместимые шлюзы требуют дополнительный заголовок на каждый запрос. OpenCode Go отвечает `400 MissingSessionID`, если нет `x-opencode-session`, а Graphiti и Cognee такой заголовок задавать не умеют. Для такого случая в GLOBAL добавлен `llm-proxy` (официальный `nginx:alpine`, без собственного образа): он принимает `/v1/chat/completions`, подставляет `x-opencode-session` и уходит в OpenCode Go, а `/v1/embeddings` отправляет в локальные эмбеддинги.
+
+У OpenCode Go эмбеддингов нет вообще — `404` на любом пути. Локальные эмбеддинги даёт сервис `embeddings` (Ollama, модель `nomic-embed-text`): он входит в GLOBAL и поднимается вместе с ним, модель скачивается при первом старте. Прокси отправляет `/v1/embeddings` именно туда.
+
+Пример настроек для такого шлюза (`<GLOBAL>/.mcpkit/.env`):
+
+```dotenv
+# прокси: этим ключом он авторизуется в шлюзе
+MCPKIT_LLM_PROXY_API_KEY=<ключ шлюза>
+# метка сессии в заголовке x-opencode-session (произвольная строка, дефолт MCP-KIT-WORK)
+MCPKIT_LLM_PROXY_SESSION=MCP-KIT-WORK
+# Graphiti
+MCPKIT_GRAPHITI_API_ENDPOINT=http://llm-proxy:8000/v1
+MCPKIT_GRAPHITI_API_KEY=<непустой: авторизацию делает прокси>
+MCPKIT_GRAPHITI_API_MODEL=deepseek-v4.1-flash
+MCPKIT_GRAPHITI_EMBEDDER_MODEL=nomic-embed-text
+# Cognee
+MCPKIT_COGNEE_LLM_API_ENDPOINT=http://llm-proxy:8000/v1
+MCPKIT_COGNEE_LLM_API_KEY=<непустой>
+MCPKIT_COGNEE_LLM_API_MODEL=deepseek-v4.1-flash
+MCPKIT_COGNEE_LLM_API_PROVIDER=openai
+MCPKIT_COGNEE_EMBEDDING_API_ENDPOINT=http://llm-proxy:8000/v1
+MCPKIT_COGNEE_EMBEDDING_API_KEY=<непустой>
+MCPKIT_COGNEE_EMBEDDING_API_MODEL=nomic-embed-text
+MCPKIT_COGNEE_EMBEDDING_API_PROVIDER=openai
+MCPKIT_COGNEE_EMBEDDING_DIMENSIONS=768
+```
+
+Если шлюз отдаёт и чат, и эмбеддинги сам (настоящий OpenAI, OpenRouter, локальный vLLM), `llm-proxy` не нужен: укажите адрес шлюза напрямую в `MCPKIT_*_ENDPOINT`.
+
+Для перехода уже настроенного файла на префиксные имена есть идемпотентный скрипт: `bash linux/migrate-global-env-prefixes.sh` (он делает копию `.env` и помечает старые имена устаревшими, не удаляя их).
 
 Без LLM-ключа Graphiti и Cognee ожидают настройки. Для GitHub внесите подходящий токен **в созданную запись сервера MetaMCP** после регистрации. GDrive ждёт OAuth-токен в принадлежащем GLOBAL томе; получите его по [инструкции исходного сервера](https://github.com/modelcontextprotocol/servers-archived/tree/main/src/gdrive), сохраните текущий токен перед заменой и поместите новый в `/mcpkit/gdrive/credentials.json` контейнера `gdrive` с владельцем `node` и правами `0600`. Этот токен и данные доступны всем клиентам данного сервиса. Qdrant может загружать модель эмбеддингов; Playwright требует Chromium и системные библиотеки, а DuckDuckGo использует браузерную TLS-имитацию через `curl_cffi`, а не установленный браузер. Установка и готовность отдельных внешних сервисов зависят от их ключей, сети и текущих версий образов.
 

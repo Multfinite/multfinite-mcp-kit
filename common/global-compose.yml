@@ -13,9 +13,12 @@ services:
       MCPKIT_GATEWAY_KEY: ${MCPKIT_GATEWAY_KEY}
       MCPKIT_CONTROL_KEY: ${MCPKIT_CONTROL_KEY}
       MCPKIT_INSTANCE_ID: ${MCPKIT_INSTANCE}
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      CONTEXT7_API_KEY: ${CONTEXT7_API_KEY:-}
+      # Каждая переменная называет сервер, которому она нужна: MCPKIT_<SERVER>_<WHAT>.
+      # Общих имён нет: иначе Graphiti и Cognee нельзя настроить по-разному.
+      MCPKIT_NEO4J_PASSWORD: ${MCPKIT_NEO4J_PASSWORD:-}
+      MCPKIT_CONTEXT7_API_KEY: ${MCPKIT_CONTEXT7_API_KEY:-}
+      MCPKIT_GRAPHITI_API_KEY: ${MCPKIT_GRAPHITI_API_KEY:-}
+      MCPKIT_COGNEE_LLM_API_KEY: ${MCPKIT_COGNEE_LLM_API_KEY:-}
     ports:
       - "127.0.0.1:${MCPKIT_PORT}:13001"
     volumes:
@@ -32,7 +35,7 @@ services:
   neo4j:
     image: neo4j:community
     environment:
-      NEO4J_AUTH: neo4j/${NEO4J_PASSWORD}
+      NEO4J_AUTH: neo4j/${MCPKIT_NEO4J_PASSWORD:-}
       NEO4J_PLUGINS: '["apoc"]'
     volumes:
       - neo4j_data:/data
@@ -44,26 +47,65 @@ services:
       - qdrant_data:/qdrant/storage
     labels: *kit-labels
     restart: unless-stopped
+  # OpenAI-совместимая точка для Graphiti и Cognee: добавляет обязательный для
+  # OpenCode Go заголовок x-opencode-session и разводит chat и embeddings.
+  # Собирается из официального nginx (20 МБ), без собственного образа.
+  llm-proxy:
+    image: nginx:alpine
+    environment:
+      NGINX_ENVSUBST_FILTER: "^MCPKIT_"
+      MCPKIT_LLM_PROXY_API_KEY: ${MCPKIT_LLM_PROXY_API_KEY:-}
+      MCPKIT_LLM_PROXY_SESSION: ${MCPKIT_LLM_PROXY_SESSION:-MCP-KIT-WORK}
+    volumes:
+      # Путь передаёт кит: относительный резолвился бы от --project-directory
+      # (каталог установки), а не от каталога репозитория.
+      - ${MCPKIT_LLM_PROXY_CONF:-/mcp-kit/common/llm-proxy/nginx.conf.template}:/etc/nginx/templates/default.conf.template:ro
+    labels: *kit-labels
+    restart: unless-stopped
+  # Локальные эмбеддинги: у OpenCode Go их нет вообще (404 на /embeddings), а
+  # Graphiti и Cognee без них не строят граф. Модель скачивается при первом
+  # старте контейнера (MCPKIT_EMBEDDINGS_MODEL, по умолчанию nomic-embed-text).
+  embeddings:
+    image: ollama/ollama:latest
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        ollama serve &
+        pid=$$!
+        i=0
+        until ollama list >/dev/null 2>&1; do
+          i=$$((i + 1))
+          if [ "$$i" -gt 60 ]; then echo 'Ollama не поднялся за 120 с' >&2; break; fi
+          sleep 2
+        done
+        ollama pull "$$MCPKIT_EMBEDDINGS_MODEL" || echo "Не удалось скачать $$MCPKIT_EMBEDDINGS_MODEL" >&2
+        wait $$pid
+    environment:
+      MCPKIT_EMBEDDINGS_MODEL: ${MCPKIT_EMBEDDINGS_MODEL:-nomic-embed-text}
+    volumes:
+      - embeddings_data:/root/.ollama
+    labels: *kit-labels
+    restart: unless-stopped
   graphiti:
     image: zepai/knowledge-graph-mcp:standalone
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
         if [ -z "$$OPENAI_API_KEY" ]; then
-          echo 'Graphiti needs LLM_API_KEY in the private kit env.' >&2
+          echo 'Graphiti needs MCPKIT_GRAPHITI_API_KEY in the private kit env.' >&2
           exec sleep infinity
         fi
         exec uv run --no-sync main.py --transport http --host 0.0.0.0 --database-provider neo4j
     environment:
       NEO4J_URI: bolt://neo4j:7687
       NEO4J_USER: neo4j
-      NEO4J_PASSWORD: ${NEO4J_PASSWORD}
-      NEO4J_DATABASE: neo4j
-      OPENAI_API_KEY: ${LLM_API_KEY:-}
-      OPENAI_BASE_URL: ${LLM_API_ENDPOINT:-https://api.openai.com/v1}
-      MODEL_NAME: ${LLM_API_MODEL:-gpt-4o-mini}
-      EMBEDDER_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      GRAPHITI_GROUP_ID: multfinite-mcp-kit-global
+      NEO4J_PASSWORD: ${MCPKIT_NEO4J_PASSWORD:-}
+      NEO4J_DATABASE: ${MCPKIT_GRAPHITI_NEO4J_DATABASE:-neo4j}
+      OPENAI_API_KEY: ${MCPKIT_GRAPHITI_API_KEY:-}
+      OPENAI_BASE_URL: ${MCPKIT_GRAPHITI_API_ENDPOINT:-https://api.openai.com/v1}
+      MODEL_NAME: ${MCPKIT_GRAPHITI_API_MODEL:-gpt-4o-mini}
+      EMBEDDER_MODEL: ${MCPKIT_GRAPHITI_EMBEDDER_MODEL:-text-embedding-3-small}
+      GRAPHITI_GROUP_ID: ${MCPKIT_GRAPHITI_GROUP_ID:-multfinite-mcp-kit-global}
     labels: *kit-labels
     restart: unless-stopped
   cognee:
@@ -72,22 +114,22 @@ services:
     command:
       - |
         if [ -z "$$LLM_API_KEY" ]; then
-          echo 'Cognee needs LLM_API_KEY in the private kit env.' >&2
+          echo 'Cognee needs MCPKIT_COGNEE_LLM_API_KEY in the private kit env.' >&2
           exec sleep infinity
         fi
         exec /app/entrypoint.sh
     environment:
       TRANSPORT_MODE: http
       MCP_ALLOWED_HOSTS: "cognee:*"
-      LLM_PROVIDER: ${LLM_API_PROVIDER:-openai}
-      LLM_API_KEY: ${LLM_API_KEY:-}
-      LLM_MODEL: ${LLM_API_MODEL:-gpt-4o-mini}
-      LLM_ENDPOINT: ${LLM_API_ENDPOINT:-https://api.openai.com/v1}
-      EMBEDDING_PROVIDER: ${LLM_API_PROVIDER:-openai}
-      EMBEDDING_API_KEY: ${LLM_API_KEY:-}
-      EMBEDDING_ENDPOINT: ${LLM_API_ENDPOINT:-https://api.openai.com/v1}
-      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
-      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      LLM_PROVIDER: ${MCPKIT_COGNEE_LLM_API_PROVIDER:-openai}
+      LLM_API_KEY: ${MCPKIT_COGNEE_LLM_API_KEY:-}
+      LLM_MODEL: ${MCPKIT_COGNEE_LLM_API_MODEL:-gpt-4o-mini}
+      LLM_ENDPOINT: ${MCPKIT_COGNEE_LLM_API_ENDPOINT:-https://api.openai.com/v1}
+      EMBEDDING_PROVIDER: ${MCPKIT_COGNEE_EMBEDDING_API_PROVIDER:-openai}
+      EMBEDDING_API_KEY: ${MCPKIT_COGNEE_EMBEDDING_API_KEY:-}
+      EMBEDDING_ENDPOINT: ${MCPKIT_COGNEE_EMBEDDING_API_ENDPOINT:-https://api.openai.com/v1}
+      EMBEDDING_MODEL: ${MCPKIT_COGNEE_EMBEDDING_API_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIMENSIONS: ${MCPKIT_COGNEE_EMBEDDING_DIMENSIONS:-1536}
       SYSTEM_ROOT_DIRECTORY: /cognee-storage/system
       DATA_ROOT_DIRECTORY: /cognee-storage/data
     volumes:
@@ -130,6 +172,7 @@ volumes:
   gateway_data: { labels: *kit-labels }
   neo4j_data: { labels: *kit-labels }
   qdrant_data: { labels: *kit-labels }
+  embeddings_data: { labels: *kit-labels }
   cognee_system: { labels: *kit-labels }
   cognee_data: { labels: *kit-labels }
   memory_data: { labels: *kit-labels }

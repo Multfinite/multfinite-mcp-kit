@@ -11,13 +11,20 @@ for (const dir of [home, '/data/logs', '/data/work']) fs.mkdirSync(dir, { recurs
 const work = '/data/work';
 const stdio = (id, command, args, env = {}) => ({ id, command, args, env, cwd: work });
 const sidecar = (id, host, waitReason = '') => ({ id, upstream: { host, port: 8000, path: '/mcp' }, waitReason });
-const llmWait = process.env.LLM_API_KEY ? '' : 'Set LLM_API_KEY in the private GLOBAL env and apply the new configuration.';
+// Имена читаются по правилу MCPKIT_<SERVER>_<WHAT>; общих имён нет.
+const setting = (name) => process.env[name] || '';
+const graphitiWait = setting('MCPKIT_GRAPHITI_API_KEY')
+  ? ''
+  : 'Set MCPKIT_GRAPHITI_API_KEY in the private GLOBAL env and apply the new configuration.';
+const cogneeWait = setting('MCPKIT_COGNEE_LLM_API_KEY')
+  ? ''
+  : 'Set MCPKIT_COGNEE_LLM_API_KEY in the private GLOBAL env and apply the new configuration.';
 const specs = [
   stdio('sequentialthinking', npx, ['-y', '@modelcontextprotocol/server-sequential-thinking@2025.12.18']),
-  sidecar('graphiti', 'graphiti', llmWait),
-  sidecar('cognee', 'cognee', llmWait),
+  sidecar('graphiti', 'graphiti', graphitiWait),
+  sidecar('cognee', 'cognee', cogneeWait),
   sidecar('memory-bank-mcp', 'memory'),
-  stdio('context7', npx, ['-y', '@upstash/context7-mcp@4.7.0'], { CONTEXT7_API_KEY: process.env.CONTEXT7_API_KEY || '' }),
+  stdio('context7', npx, ['-y', '@upstash/context7-mcp@4.7.0'], { CONTEXT7_API_KEY: setting('MCPKIT_CONTEXT7_API_KEY') }),
   stdio('duckduckgo', uvx, ['--from', 'duckduckgo-mcp-server[browser]==0.7.0', 'duckduckgo-mcp-server']),
   // This fetch release uses the v1 McpError API and httpx<0.28. MCP 2
   // changes that API; isolate and pin a compatible SDK in its own uvx tool.
@@ -26,7 +33,7 @@ const specs = [
   stdio('mcp-compass', npx, ['-y', '@liuyoshio/mcp-compass@1.0.7']),
   sidecar('gdrive', 'gdrive'),
   stdio('neo4j-global', uvx, ['--from', 'mcp-neo4j-cypher==0.6.0', 'mcp-neo4j-cypher'], {
-    NEO4J_URI: 'bolt://neo4j:7687', NEO4J_USERNAME: 'neo4j', NEO4J_PASSWORD: process.env.NEO4J_PASSWORD || '',
+    NEO4J_URI: 'bolt://neo4j:7687', NEO4J_USERNAME: 'neo4j', NEO4J_PASSWORD: setting('MCPKIT_NEO4J_PASSWORD'),
   }),
   stdio('qdrant-global', uvx, ['--from', 'mcp-server-qdrant==0.8.1', 'mcp-server-qdrant'], { QDRANT_URL: 'http://qdrant:6333' }),
   stdio('playwright', process.execPath, ['/usr/local/lib/node_modules/@playwright/mcp/cli.js', '--headless', '--browser', 'chromium']),
