@@ -1674,6 +1674,10 @@ try {
     checkResources(ctx, state);
     rebuildSource(state);
     await start(ctx, state);
+    // Compose compares the image tag, not its ID, so after a rebuild it reports the
+    // container as running and keeps the old image. Recreate the app explicitly.
+    console.log('Recreating the app container so the rebuilt image is actually used.');
+    compose(ctx, state, ['up', '-d', '--no-deps', '--force-recreate', 'app']);
     console.log('The MetaMCP clone is back at the pinned upstream revision and the app image was rebuilt; database, private .env and registrations were not changed.');
   } else if (action === 'apply') {
     if (state.type === 'meta' && setupMarker(state)) fail('Complete or remove the staged installation before applying configuration.');
