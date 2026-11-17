@@ -102,10 +102,15 @@ services:
       NEO4J_PASSWORD: ${MCPKIT_NEO4J_PASSWORD:-}
       NEO4J_DATABASE: ${MCPKIT_GRAPHITI_NEO4J_DATABASE:-neo4j}
       OPENAI_API_KEY: ${MCPKIT_GRAPHITI_API_KEY:-}
-      OPENAI_BASE_URL: ${MCPKIT_GRAPHITI_API_ENDPOINT:-https://api.openai.com/v1}
+      # graphiti читает именно OPENAI_API_URL; OPENAI_BASE_URL он игнорирует.
+      OPENAI_API_URL: ${MCPKIT_GRAPHITI_API_ENDPOINT:-https://api.openai.com/v1}
       MODEL_NAME: ${MCPKIT_GRAPHITI_API_MODEL:-gpt-4o-mini}
       EMBEDDER_MODEL: ${MCPKIT_GRAPHITI_EMBEDDER_MODEL:-text-embedding-3-small}
+      EMBEDDER_DIMENSIONS: ${MCPKIT_GRAPHITI_EMBEDDER_DIMENSIONS:-1536}
       GRAPHITI_GROUP_ID: ${MCPKIT_GRAPHITI_GROUP_ID:-multfinite-mcp-kit-global}
+    volumes:
+      # Размерность эмбеддера задаётся конфигом graphiti, поэтому файл идёт из кита.
+      - ${MCPKIT_GRAPHITI_CONFIG:-/mcp-kit/common/graphiti/config.yaml}:/app/mcp/config/config.yaml:ro
     labels: *kit-labels
     restart: unless-stopped
   cognee:
@@ -125,6 +130,9 @@ services:
       LLM_API_KEY: ${MCPKIT_COGNEE_LLM_API_KEY:-}
       LLM_MODEL: ${MCPKIT_COGNEE_LLM_API_MODEL:-gpt-4o-mini}
       LLM_ENDPOINT: ${MCPKIT_COGNEE_LLM_API_ENDPOINT:-https://api.openai.com/v1}
+      # Предпроверка соединения ходит по своему пути и не всегда проходит через
+      # OpenAI-совместимый прокси; отключается, как советует сам cognee.
+      COGNEE_SKIP_CONNECTION_TEST: ${MCPKIT_COGNEE_SKIP_CONNECTION_TEST:-false}
       EMBEDDING_PROVIDER: ${MCPKIT_COGNEE_EMBEDDING_API_PROVIDER:-openai}
       EMBEDDING_API_KEY: ${MCPKIT_COGNEE_EMBEDDING_API_KEY:-}
       EMBEDDING_ENDPOINT: ${MCPKIT_COGNEE_EMBEDDING_API_ENDPOINT:-https://api.openai.com/v1}

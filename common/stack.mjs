@@ -256,7 +256,8 @@ function config(state, { metaOriginOverride } = {}) {
     if (link) common.MCPKIT_GLOBAL_CLIENT_NETWORK = link.network;
   } else {
     Object.assign(common, { MCPKIT_BUILD_DIR: path.join(priv, 'build'), MCPKIT_NODE_BUILD_DIR: path.join(priv, 'node-build'), MCPKIT_NODE_IMAGE: `${state.project}-node:1`,
-      MCPKIT_LLM_PROXY_CONF: path.join(root, 'common', 'llm-proxy', 'nginx.conf.template') });
+      MCPKIT_LLM_PROXY_CONF: path.join(root, 'common', 'llm-proxy', 'nginx.conf.template'),
+      MCPKIT_GRAPHITI_CONFIG: path.join(root, 'common', 'graphiti', 'config.yaml') });
   }
   return common;
 }
