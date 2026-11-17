@@ -393,12 +393,39 @@ function ensureSource(state) {
   if (changes) fail('The owned MetaMCP source clone has local changes. The kit never modifies upstream source and will not build from a modified clone. Preserve/review the changes and create a clean upstream clone before rebuilding.');
   return source;
 }
+// Приватный build-каталог — источник сборки образов кита; init копирует туда
+// исходники один раз. После обновления кита там остаётся старый код, и контейнер
+// продолжает работать с ним, поэтому сравниваем содержимое перед каждым запуском.
+const KIT_BUILD_FILES = [
+  ['gateway', 'common/global/Dockerfile', 'build/Dockerfile'],
+  ['gateway', 'common/global/global-kit.mjs', 'build/global-kit.mjs'],
+  ['gateway', 'windows/gateway.mjs', 'build/gateway.mjs'],
+  ['memory', 'linux/services/node-mcp/Dockerfile', 'node-build/Dockerfile'],
+];
+function syncKitBuild(state) {
+  const changed = new Set();
+  for (const [service, source, target] of KIT_BUILD_FILES) {
+    const from = path.join(root, source);
+    if (!fs.existsSync(from)) continue;
+    const to = path.join(state.base, '.mcpkit', target);
+    const desired = fs.readFileSync(from);
+    let current = null;
+    try { current = fs.readFileSync(to); } catch { current = null; }
+    if (current && current.equals(desired)) continue;
+    fs.mkdirSync(path.dirname(to), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(to, desired, { mode: 0o600 });
+    changed.add(service);
+    console.log(`Updated ${target} from ${source}; the ${service} image will be rebuilt.`);
+  }
+  return changed;
+}
 function ensureImages(ctx, state) {
   const images = state.type === 'meta' ? [[config(state).MCPKIT_IMAGE, 'app']] : [[config(state).MCPKIT_IMAGE, 'gateway'], [config(state).MCPKIT_NODE_IMAGE, 'memory']];
+  const stale = state.type === 'global' ? syncKitBuild(state) : new Set();
   for (const [image, service] of images) {
     const labels = inspect(ctx, 'image', image);
     checkLabel(labels, state, 'image', image);
-    if (labels) continue;
+    if (labels && !stale.has(service)) continue;
     if (state.type === 'meta') ensureSource(state);
     console.log(`Building the isolated ${service} image; this can take a while.`);
     compose(ctx, state, ['build', service]);
