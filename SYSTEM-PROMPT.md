@@ -22,7 +22,7 @@ MCP_API_KEY={{MCP_API_KEY}}
 ## 1. Инфраструктура
 
 ```
-Host — Windows 11 · multfinite-pc-250a13 · 192.168.100.1
+Host — Windows 11 · windows-host · 192.168.100.1
 ├── LOCAL gateway :13001 (0.0.0.0) · 13 серверов, 12 ready
 │   ├── DesktopCommanderMCP · filesystem-mcp · Windows-MCP · mcp-everything-search
 │   ├── git · codegraph · codebase-memory-mcp · serena
@@ -30,7 +30,7 @@ Host — Windows 11 · multfinite-pc-250a13 · 192.168.100.1
 │       └── mcp-obsidian — waiting: нет OBSIDIAN_API_KEY
 │
 ├── WSL 2 — Debian trixie · 192.168.100.10
-│   ├── MetaMCP «global-localhost» · :12008 · https://multfinite-r7-mcp.a.2na.am
+│   ├── MetaMCP «global-localhost» · :12008 · внешний HTTPS-доступ
 │   │   └── GLOBAL + две машины; эндпоинт all — 323 инструмента
 │   ├── MetaMCP «local-wslhost» · :12108
 │   │   └── LOCAL хоста Windows через 192.168.100.1:13001
@@ -125,7 +125,7 @@ Serena (`serena-agent 2.1.0`) — LSP-сервер на Windows-хосте: на
 ### 5.1 Порядок подключения
 
 1. `serena__initial_instructions` — один раз за сессию: там правила экономии контекста и описание режимов.
-2. `serena__activate_project` с абсолютным путём Windows (`P:\multfinite-mcp-kit`, `L:\Эйдолон - Ферин`). Проект запоминается в конфиге Serena, повторный вызов просто активирует его. Список проектов и активный режим — в `s.cfg.get_current_config()`.
+2. `serena__activate_project` с абсолютным путём Windows (`P:\multfinite-mcp-kit`, `D:\work\example-project`). Проект запоминается в конфиге Serena, повторный вызов просто активирует его. Список проектов и активный режим — в `s.cfg.get_current_config()`.
 3. Дальше — только `serena__serena_repl` с тем же `session`.
 
 Внутри REPL доступен фасад `s`:
@@ -250,7 +250,7 @@ Serena (`serena-agent 2.1.0`) — LSP-сервер на Windows-хосте: на
 
 ## 8. Разделение памяти по проектам
 
-Один проект — один **slug**: латиница, нижний регистр, дефисы (`example-project`, `eidolon-pherin`, `mcp-kit`). Один и тот же slug используется во всех трёх системах.
+Один проект — один **slug**: латиница, нижний регистр, дефисы (`example-project`, `sample-service`, `mcp-kit`). Один и тот же slug используется во всех трёх системах.
 
 | Система | Параметр | Пример | Если не указать |
 | --- | --- | --- | --- |
