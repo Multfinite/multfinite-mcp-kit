@@ -1008,7 +1008,12 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   if (imageRuntime !== appRuntime) fail(`The app has customized execution settings; review them locally before recreation. ${outcome}`);
   const editable = new Set(['APP_URL', 'NEXT_PUBLIC_APP_URL', 'METAMCP_ADMIN_EMAILS', 'EXTRA_TRUSTED_ORIGINS']);
   for (const [key, value] of Object.entries(planned.appEnv)) {
-    if (!editable.has(key) && appEnv[key] !== value) fail(`The app has different non-URL settings; review them locally before recreation. ${outcome}`);
+    if (editable.has(key) || appEnv[key] === value) continue;
+    // Ключа нет ни в контейнере, ни в образе — значит его добавил новый compose,
+    // а не ручная правка контейнера (env существующего контейнера не меняется).
+    // Так обновление кита применяет новые настройки, не требуя удалять контейнер.
+    if (!Object.hasOwn(appEnv, key) && !Object.hasOwn(imageEnv, key)) continue;
+    fail(`The app has different non-URL settings; review them locally before recreation. ${outcome}`);
   }
   for (const [key, value] of Object.entries(appEnv)) {
     if (!Object.hasOwn(planned.appEnv, key) && imageEnv[key] !== value) fail(`The app has extra environment settings; review them locally before recreation. ${outcome}`);
