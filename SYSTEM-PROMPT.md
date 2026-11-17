@@ -2,7 +2,7 @@
 
 Кому: агенту, который работает на этой машине и должен пользоваться MCP-инфраструктурой.
 Что здесь: карта инфраструктуры, правила подключения, протокол памяти и разделение памяти по проектам.
-Как читать: целиком один раз; в работе держи разделы 0, 3, 4 и 9.
+Как читать: целиком один раз; в работе держи разделы 0, 3, 4, 5 и 11.
 
 ## 0. Подключение
 
@@ -107,33 +107,148 @@ MetaMCP выдаёт `<сервер>__<инструмент>`:
 2. **Cognee отвечает на вопросы**, а не хранит канон: если файл в memory-bank изменился, повторно загрузи его в Cognee, иначе ответы будут по устаревшей версии.
 3. **Graphiti хранит атомарные факты, не документы.** Один эпизод — одно событие, решение или изменение состояния, с датой и источником. Не заливай в него целые спеки.
 4. **Sequential Thinking ничего не сохраняет.** Итог рассуждения переноси в memory-bank (решение) и Graphiti (факты), иначе он потерян.
-5. **Context7 — только про внешние библиотеки.** Проектный код ищи в `serena`/`codegraph`, проектные решения — в memory-bank.
+5. **Context7 — только про внешние библиотеки.** Проектный код — раздел 5 (Serena), `codegraph` и `serena` вместо чтения файлов целиком; проектные решения — memory-bank.
 6. **Не дублируй полный текст во все три системы.** Дублирование расходится через неделю; в Cognee и Graphiti попадает сжатая выжимка со ссылкой на файл.
 
-## 5. Протокол работы
+## 5. Serena: код по символам
 
-### 5.1 Перед задачей
+Serena (`serena-agent 2.1.0`) — LSP-сервер на Windows-хосте: навигация и правка кода по символам вместо чтения файлов и grep. Работает в режиме REPL: три MCP-инструмента, вся работа идёт Python-кодом внутри `serena_repl`.
+
+Где живёт: `local-wslhost` → `http://192.168.100.1:13001/servers/serena/mcp`. Через `global-localhost` вызывается с двойным префиксом: `machine-host-windows__serena__serena_repl`.
+
+| Инструмент | Назначение |
+| --- | --- |
+| `serena__initial_instructions` | правила самого Serena; прочитай один раз перед первой работой |
+| `serena__activate_project` | `{project: "<абсолютный путь Windows>", session: "<имя>"}` — открыть проект и завести REPL-сессию |
+| `serena__serena_repl` | `{session: "<имя>", code: "<python>"}` — выполнить код; вернётся значение последнего выражения |
+
+### 5.1 Порядок подключения
+
+1. `serena__initial_instructions` — один раз за сессию: там правила экономии контекста и описание режимов.
+2. `serena__activate_project` с абсолютным путём Windows (`P:\multfinite-mcp-kit`, `L:\Эйдолон - Ферин`). Проект запоминается в конфиге Serena, повторный вызов просто активирует его. Список проектов и активный режим — в `s.cfg.get_current_config()`.
+3. Дальше — только `serena__serena_repl` с тем же `session`.
+
+Внутри REPL доступен фасад `s`:
+
+| Фасад | Методы |
+| --- | --- |
+| `s.lsp` | `find_symbol`, `get_symbols_overview`, `find_referencing_symbols`, `find_declaration`, `find_implementations`, `rename_symbol`, `safe_delete_symbol`, `get_diagnostics_for_file`, `get_diagnostics_for_symbol` |
+| `s.fs` | `read_file`, `list_dir`, `find_file`, `search_for_pattern`, `create_text_file` |
+| `s.edit` | `replace_symbol_body`, `insert_after_symbol`, `insert_before_symbol`, `replace_content`, `replace_lines`, `delete_lines`, `insert_at_line`, `replace_in_files` |
+| `s.mem` | `list_memories`, `read_memory`, `write_memory`, `edit_memory`, `rename_memory`, `delete_memory`, `onboarding` |
+| `s.shell` | `execute_shell_command` |
+| `s.cfg` | `get_current_config` |
+
+### 5.2 Рабочий цикл
+
+1. `s.lsp.get_symbols_overview(relative_path="src/foo.ts")` — карта символов файла, без чтения тел.
+2. `s.lsp.find_symbol(name_path_pattern="Foo/__init__", relative_path="src/foo.ts", include_body=True)` — тело только нужного символа.
+3. `s.lsp.find_referencing_symbols(name_path="Foo/bar", relative_path="src/foo.ts")` — кто использует, со сниппетами вокруг ссылок.
+4. Правка: `s.edit.replace_symbol_body(...)` для символа целиком, `s.edit.insert_after_symbol(...)` / `insert_before_symbol(...)` для вставки, `s.edit.replace_content(...)` для точечной замены внутри символа.
+5. Проверка: `s.lsp.get_diagnostics_for_file(relative_path="src/foo.ts")`.
+6. Рефакторинг: `s.lsp.rename_symbol(name_path=..., relative_path=..., new_name=...)` — атомарно, ссылки вручную не правь.
+
+### 5.3 Правила
+
+- Символы раньше текста: не читай файл целиком, если хватает `get_symbols_overview` и `find_symbol`.
+- `name_path` — через `/`: `Class/method`, `Class/__init__`. `relative_path` — от корня проекта, не абсолютный.
+- Строки в Serena **0-based**: `read_file(relative_path, start_line=0, end_line=None)`.
+- `depth=1` у `find_symbol` даёт членов класса без тел: сначала структура, потом `include_body=True`.
+- `replace_symbol_body` заменяет тело целиком — прочитай его заранее, иначе потеряешь код.
+- После правки файла — `get_diagnostics_for_file`; полный прогон тестов запускает человек или отдельная задача.
+- Несколько `serena_repl` можно отправить одним сообщением: Serena выполняет их последовательно, гонок нет.
+- Текстовый поиск без символов — `s.fs.search_for_pattern` (glob-фильтры, контекст); полнотекстовый по хосту — `mcp-everything-search` или `ripgrep` через shell.
+- Serena видит только Windows-пути. Репозиторий в WSL открывается через `\\wsl$\Debian\...`, но LSP там ненадёжен: для WSL-репозиториев предпочитай shell-инструменты или `codegraph`.
+- `s.shell.execute_shell_command` выполняет команды на хосте, `s.edit.*` меняет файлы без подтверждения — считай это продакшеном (раздел 10).
+
+### 5.4 Memories Serena и memory-bank
+
+`s.mem.*` — заметки внутри проекта (`.serena/memories`), видны только этому проекту в Serena. Не путать с memory-bank:
+
+| Что | Куда |
+| --- | --- |
+| архитектура модулей, конвенции кода, onboarding | Serena memories (`s.mem.write_memory`) |
+| правила владельца, решения, кросс-проектные факты | memory-bank (раздел 8) |
+
+Если факт нужен агентам вне Serena (другая машина, другая сессия, другой репозиторий), канон — memory-bank; Serena memories не дублируй.
+
+## 6. Sequential Thinking: рабочий цикл рассуждения
+
+`sequentialthinking` — один инструмент, который ведёт цепочку мыслей. Памятью он не является: после цепочки остаётся только текст в контексте, ничего не сохраняется.
+
+| Параметр | Обязателен | Смысл |
+| --- | --- | --- |
+| `thought` | да | одна мысль: наблюдение, вывод или шаг плана (2–6 предложений) |
+| `thoughtNumber` | да | номер мысли, с 1 |
+| `totalThoughts` | да | оценка общего числа; можно менять по ходу |
+| `nextThoughtNeeded` | да | `false` завершает цепочку |
+| `isRevision`, `revisesThought` | нет | исправить более раннюю мысль, не начиная заново |
+| `branchFromThought`, `branchId` | нет | альтернативная ветка от мысли N |
+| `needsMoreThoughts` | нет | сигнал, что оценка `totalThoughts` занижена |
+
+### 6.1 Когда использовать
+
+- задача распадается на 4+ шага или зависит от нескольких источников;
+- есть 2–3 варианта решения и нужен явный выбор с ценой каждого;
+- отладка: несколько гипотез, которые проверяются по очереди;
+- крупный рефакторинг или миграция, где важен порядок действий.
+
+### 6.2 Когда не использовать
+
+- правка в один шаг, поиск факта, рутинный вызов инструмента;
+- вопрос про API библиотеки — это Context7, а не рассуждение;
+- вместо проверки: цепочка мыслей не заменяет запуск теста или чтение лога.
+
+### 6.3 Правила
+
+1. Одна мысль — один шаг. Не складывай весь план в первый `thought`.
+2. `totalThoughts` — оценка: увеличивай при новых ветках и ставь `needsMoreThoughts: true`.
+3. Ошибся — `isRevision: true` и `revisesThought: <номер>`, а не новая цепочка с нуля.
+4. Альтернативы — `branchFromThought: <номер>` и `branchId: "A"`/`"B"`; сравни ветки и оставь одну.
+5. Заверши `nextThoughtNeeded: false` и сразу сформулируй итог: что решили, почему, следующий шаг.
+6. Итог переноси в постоянную память: решение — memory-bank `decisions.md`, факты — Graphiti (раздел 8).
+7. Не пиши в `thought` секреты и ключи: текст уходит в контекст модели.
+8. Не гоняй двадцать мыслей «на всякий случай»: каждая мысль — токены и задержка.
+
+Цепочка из трёх вызовов:
+
+```json
+{"tool": "sequentialthinking__sequentialthinking", "arguments": {"thought": "Endpoint отдаёт пустой список. Варианты: пул соединений MetaMCP, сеть до шлюза, сломанная регистрация.", "thoughtNumber": 1, "totalThoughts": 3, "nextThoughtNeeded": true}}
+```
+
+```json
+{"tool": "sequentialthinking__sequentialthinking", "arguments": {"thought": "В логах 190/100 и SESSION_LIFETIME не задан — причина в пуле, сеть и регистрация ни при чём.", "thoughtNumber": 2, "totalThoughts": 3, "nextThoughtNeeded": true}}
+```
+
+```json
+{"tool": "sequentialthinking__sequentialthinking", "arguments": {"thought": "Действие: задать SESSION_LIFETIME и MAX_TOTAL_CONNECTIONS, пересоздать app, проверить tools/list, итог записать в decisions.md.", "thoughtNumber": 3, "totalThoughts": 3, "nextThoughtNeeded": false}}
+```
+
+## 7. Протокол работы
+
+### 7.1 Перед задачей
 
 1. `memory-bank-mcp__list_projects` → есть ли проект; затем `list_project_files` и чтение `owner_rules.md`, `project.md`, `machines.md`, `repos.md`, `decisions.md`, `progress.md` (что есть).
 2. `cognee__recall` с `datasets: "<slug>"`, `top_k: 8` — что уже известно по теме.
 3. `graphiti__search_memory_facts` и `graphiti__search_nodes` с `group_ids: ["<slug>"]` — факты и связи.
 4. Внешняя библиотека — `context7__resolve-library-id`, затем `context7__query-docs`.
-5. Больше трёх шагов — `sequentialthinking`, с ревизией плана при новых данных.
+5. Задача про код — до первого чтения файлов: `serena__activate_project` (раздел 5), затем символьные запросы.
+6. Больше трёх шагов — `sequentialthinking` (раздел 6), с ревизией плана при новых данных.
 
-### 5.2 Во время задачи
+### 7.2 Во время задачи
 
 - Проверяй факт до записи в Graphiti: туда идёт подтверждённое, а не предположение.
 - Временные заметки держи в `task_<id>.md` проекта; не создавай новый проект под каждую задачу.
-- Не вызывай разрушающие инструменты без явного указания пользователя (раздел 8).
+- Не вызывай разрушающие инструменты без явного указания пользователя (раздел 10).
 
-### 5.3 После задачи
+### 7.3 После задачи
 
-1. **memory-bank**: прочитай файл, добавь блок, запиши через `memory_bank_update` (создание — только через `write`, раздел 6.1).
+1. **memory-bank**: прочитай файл, добавь блок, запиши через `memory_bank_update` (создание — только через `write`, раздел 8.1).
 2. **Cognee**: `cognee__remember` с `dataset_name: "<slug>"`, `node_set: ["<slug>", "decisions"]`.
 3. **Graphiti**: `graphiti__add_memory` с `group_id: "<slug>"`, `name`, `episode_body`, `source_description` (откуда факт).
 4. Закрой MCP-сессии: `DELETE` по URL эндпоинта с `Mcp-Session-Id`.
 
-## 6. Разделение памяти по проектам
+## 8. Разделение памяти по проектам
 
 Один проект — один **slug**: латиница, нижний регистр, дефисы (`riftfall`, `eidolon-pherin`, `mcp-kit`). Один и тот же slug используется во всех трёх системах.
 
@@ -147,7 +262,7 @@ MetaMCP выдаёт `<сервер>__<инструмент>`:
 
 Отдельно: `dataset_name` отвечает за **где лежит** документ, `node_set` — за **к какому разделу** он относится внутри проекта (`decisions`, `specs`, `ops`, `research`). `group_id` в Graphiti — жёсткая граница: поиск без `group_ids` не увидит проектные данные.
 
-### 6.1 Файлы memory bank
+### 8.1 Файлы memory bank
 
 Каталог проекта — `projectName`; имя файла выбирает агент. Держись конвенции (проект `riftfall` уже устроен так):
 
@@ -168,7 +283,7 @@ MetaMCP выдаёт `<сервер>__<инструмент>`:
 - `memory_bank_update` **перезаписывает** файл целиком и падает с `File does not exist`, если его нет.
 - Поэтому порядок всегда: `memory_bank_read` → слить старое с новым → `memory_bank_update`. Запись «поверх» без чтения теряет данные.
 
-### 6.2 Новый проект: чеклист
+### 8.2 Новый проект: чеклист
 
 1. `memory-bank-mcp__list_projects` — убедись, что slug свободен.
 2. `memory_bank_write` для `project.md`, `owner_rules.md`, `machines.md`, `repos.md`, `decisions.md`, `progress.md`.
@@ -176,7 +291,7 @@ MetaMCP выдаёт `<сервер>__<инструмент>`:
 4. Ключевые сущности и связи — `graphiti__add_memory` с `group_id: "<slug>"`, короткими эпизодами.
 5. Проверь: `graphiti__search_nodes` с `group_ids: ["<slug>"]`, `cognee__recall` с `datasets: "<slug>"`, чтение одного файла memory-bank.
 
-### 6.3 Как не смешать проекты
+### 8.3 Как не смешать проекты
 
 - Передавай `projectName`, `dataset_name`/`node_set` и `group_id` **всегда**, даже если проект один: значения по умолчанию — общие для всех.
 - Личное и рабочее — разные slug. Не заводи «общий» датасет на несколько репозиториев.
@@ -184,7 +299,7 @@ MetaMCP выдаёт `<сервер>__<инструмент>`:
 - Перед созданием проверь существующие: `list_projects`, `graphiti__get_episodes` с нужным `group_ids`.
 - Перенос проекта — это новый slug плюс повторный инжест, а не переименование параметра в старых записях.
 
-## 7. Примеры вызовов
+## 9. Примеры вызовов
 
 ```json
 {"tool": "memory-bank-mcp__memory_bank_read", "arguments": {"projectName": "riftfall", "fileName": "decisions.md"}}
@@ -222,7 +337,7 @@ MetaMCP выдаёт `<сервер>__<инструмент>`:
 {"tool": "context7__query-docs", "arguments": {"libraryId": "/tiangolo/fastapi", "query": "dependency injection", "language": "python"}}
 ```
 
-## 8. Запреты и безопасность
+## 10. Запреты и безопасность
 
 - **Секреты не хранятся в памяти.** Ни ключей, ни паролей, ни токенов — ни в memory-bank, ни в Cognee, ни в Graphiti. Пиши ссылку на место хранения, а не значение.
 - **Разрушающие вызовы — только по явному указанию пользователя:** `cognee__forget` (особенно `everything: true`), `graphiti__clear_graph`, `graphiti__delete_episode`, `graphiti__delete_entity_edge`, а также `memory_bank_update` поверх файла, который не читал.
@@ -230,7 +345,7 @@ MetaMCP выдаёт `<сервер>__<инструмент>`:
 - Общие эндпоинты доступны любому пользователю MetaMCP. Не пиши туда личные данные, которые не должны видеть другие.
 - Не переименовывай `group_id`/`dataset_name`/`projectName` у существующих записей «для порядка»: это разрывает связи и поиск.
 
-## 9. Диагностика
+## 11. Диагностика
 
 | Симптом | Причина | Действие |
 | --- | --- | --- |
@@ -242,9 +357,13 @@ MetaMCP выдаёт `<сервер>__<инструмент>`:
 | Cognee `recall` пуст | не тот `datasets` или документ не инжестирован | проверь `dataset_name`; повтори `remember` без `background` |
 | `File already exists` | файл уже есть | читай и используй `memory_bank_update` |
 | `File does not exist` | файла нет | создавай через `memory_bank_write` |
+| Serena: `serena_repl` вернул `None` | код не заканчивается выражением | заверши код выражением (`1 + 1`, `str(...)`, `chr(10).join(...)`) |
+| Serena: `find_symbol` ничего не нашёл | неверный `name_path` или `relative_path` | проверь `get_symbols_overview`; попробуй `substring_matching=True` |
+| Serena: LSP не отвечает | проект не активирован или язык без сервера | `s.cfg.get_current_config()`; `activate_project` заново |
+| Serena: правка не применилась | правился не тот файл/символ | сверь `relative_path` от корня проекта, строки 0-based |
 | Имена инструментов не совпадают с этим документом | подключён другой эндпоинт или версия сервера | сверь `tools/list`; предпочитай по-серверный эндпоинт |
 
-## 10. Шпаргалка
+## 12. Шпаргалка
 
 | Задача | Инструмент |
 | --- | --- |
@@ -253,8 +372,14 @@ MetaMCP выдаёт `<сервер>__<инструмент>`:
 | записать решение | memory-bank (`decisions.md`), затем Cognee и Graphiti |
 | понять, как связаны сущности | `graphiti__search_nodes`, `graphiti__search_memory_facts` |
 | проверить историю изменения факта | `graphiti__get_episodes`, интервалы `valid_at`/`invalid_at` |
-| спланировать большую задачу | `sequentialthinking__sequentialthinking` |
+| спланировать большую задачу | `sequentialthinking__sequentialthinking` (раздел 6) |
 | уточнить API библиотеки | `context7__resolve-library-id` → `context7__query-docs` |
+| открыть репозиторий для Serena | `serena__activate_project` с абсолютным путём Windows |
+| структура файла без чтения тела | `s.lsp.get_symbols_overview` в `serena__serena_repl` |
+| найти и прочитать символ | `s.lsp.find_symbol(..., include_body=True)` |
+| кто использует символ | `s.lsp.find_referencing_symbols` |
+| переименовать символ с ссылками | `s.lsp.rename_symbol` |
+| проверить ошибки после правки | `s.lsp.get_diagnostics_for_file` |
 | работать с файлами Windows-хоста | `machine-host-windows__*` |
-| найти символ в коде проекта | `serena` / `codegraph` через `machine-host-windows` или `local-wslhost` |
+| найти символ в коде проекта | Serena (раздел 5); `codegraph` для больших репозиториев |
 | посчитать/сохранить структуру кода | `cognee__code_search` |
