@@ -724,12 +724,9 @@ async function provisionStagedMeta(ctx, state) {
   let provisioned;
   try { provisioned = JSON.parse(result.stdout); } catch { fail('Administrator provisioning returned an invalid result.'); }
   if (typeof provisioned.userId !== 'string' || !provisioned.userId || !/^sk_mt_[A-Za-z0-9]{64}$/.test(provisioned.apiKey || '')) fail('Administrator provisioning did not return a valid private client key.');
-  const file = path.join(state.base, '.mcpkit', 'client-api-key');
-  if (fs.existsSync(file)) {
-    const stat = fs.lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || fs.readFileSync(file, 'utf8').trim() !== provisioned.apiKey) fail('An existing client key file differs; it was not overwritten.');
-  } else privateWrite(file, `${provisioned.apiKey}\n`);
-  console.log(`Administrator created and UI/SSO signup closed. Private client API key: ${file}`);
+  // Ключ показывается один раз и не сохраняется: файлов с ключами кит не держит.
+  console.log('Administrator created and UI/SSO signup closed. Client API key (shown once, copy it now):');
+  console.log(provisioned.apiKey);
 }
 async function activateStagedMeta(ctx, state) {
   const marker = setupMarker(state);
@@ -744,15 +741,9 @@ async function activateStagedMeta(ctx, state) {
   const id = requireRunningMetaApp(ctx, state, appId, { staged: !alreadyPublished });
   const snapshot = metaContainerSnapshot(ctx, state);
   if (snapshot.appId !== id || snapshot.admins !== marker.adminEmail || snapshot.appUrl !== configuredMetaOrigin(state)) fail('Staged settings changed; no container was published.');
-  const keyFile = path.join(state.base, '.mcpkit', 'client-api-key');
-  if (!fs.existsSync(keyFile) || !fs.lstatSync(keyFile).isFile() || fs.lstatSync(keyFile).isSymbolicLink()) {
-    fail('The private client API key is missing; complete provisioning before publication.');
-  }
-  const key = fs.readFileSync(keyFile, 'utf8').trim();
-  if (!/^sk_mt_[A-Za-z0-9]{64}$/.test(key)) fail('The private client API key is invalid; nothing was published.');
-  // The key has a restricted alphabet and is sent over stdin to the owned
-  // database container; it never appears in process arguments or output.
-  const sql = `SELECT json_build_object('emails', (SELECT coalesce(json_agg(lower(email)), '[]'::json) FROM users), 'accounts', (SELECT count(*) FROM accounts JOIN users ON users.id = accounts.user_id WHERE provider_id = 'credential' AND account_id = users.id AND password IS NOT NULL), 'keys', (SELECT count(*) FROM api_keys JOIN users ON users.id = api_keys.user_id WHERE api_keys.name = 'mcpkit-client' AND api_keys.key = '${key}' AND api_keys.is_active), 'ui', (SELECT value FROM config WHERE id = 'DISABLE_SIGNUP'), 'sso', (SELECT value FROM config WHERE id = 'DISABLE_SSO_SIGNUP'))::text;`;
+  // Ключ больше не хранится файлом: проверяем, что у учётной записи есть активный
+  // ключ провижининга, но без сверки самого значения.
+  const sql = `SELECT json_build_object('emails', (SELECT coalesce(json_agg(lower(email)), '[]'::json) FROM users), 'accounts', (SELECT count(*) FROM accounts JOIN users ON users.id = accounts.user_id WHERE provider_id = 'credential' AND account_id = users.id AND password IS NOT NULL), 'keys', (SELECT count(*) FROM api_keys WHERE api_keys.name = 'mcpkit-client' AND api_keys.is_active), 'ui', (SELECT value FROM config WHERE id = 'DISABLE_SIGNUP'), 'sso', (SELECT value FROM config WHERE id = 'DISABLE_SSO_SIGNUP'))::text;`;
   const cmd = 'export PGPASSWORD="$POSTGRES_PASSWORD"; exec psql -X -qAt -v ON_ERROR_STOP=1 -h 127.0.0.1 -U "$POSTGRES_USER" -d "$POSTGRES_DB"';
   const query = spawnSync('docker', ['--context', ctx, 'exec', '-i', snapshot.postgresId, 'sh', '-c', cmd], {
     env: cleanEnv(), input: sql, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 30000, maxBuffer: 1024 * 1024, windowsHide: true,

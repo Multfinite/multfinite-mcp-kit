@@ -73,29 +73,6 @@ export function resolveMetaPeerEndpoint(source, endpoint) {
   };
 }
 
-function readSourceApiKey(source) {
-  const file = path.join(privateDirectory(source), 'client-api-key');
-  let stat;
-  try { stat = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-  if (!stat.isFile() || stat.isSymbolicLink() ||
-      (process.platform !== 'win32' && (stat.mode & 0o077) !== 0)) {
-    fail(`The private client API key file for ${source.project} is not a protected regular file.`);
-  }
-  const key = fs.readFileSync(file, 'utf8').trim();
-  if (!/^sk_mt_[A-Za-z0-9]{64}$/.test(key)) fail(`The private client API key for ${source.base} is invalid: expected sk_mt_ followed by 64 characters, without spaces or a placeholder. File checked: ${path.join(source.base, '.mcpkit', 'client-api-key')}.`);
-  return key;
-}
-function readSavedClientKey(state) {
-  const file = path.join(privateDirectory(state), 'client-api-key');
-  let stat;
-  try { stat = fs.lstatSync(file); } catch (error) { if (error.code === 'ENOENT') return false; throw error; }
-  if (!stat.isFile() || stat.isSymbolicLink() ||
-      (process.platform !== 'win32' && (stat.mode & 0o077) !== 0) ||
-      !/^sk_mt_[A-Za-z0-9]{64}\s*$/.test(fs.readFileSync(file, 'utf8'))) {
-    fail(`The private client API key file for ${state.project} is invalid.`);
-  }
-  return file;
-}
 function question(prompt) {
   return new Promise((resolve) => {
     const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
@@ -140,14 +117,12 @@ function hiddenInput(prompt, { optional = false } = {}) {
   });
 }
 async function credentials(source, target, endpointName) {
-  let sourceApiKey = readSourceApiKey(source);
-  if (sourceApiKey === null) {
-    sourceApiKey = await hiddenInput(
-      `API key for ${source.base} endpoint "${endpointName}" (press Enter only if that endpoint is open): `,
-      { optional: true },
-    );
-    if (sourceApiKey && /[\r\n\0]/.test(sourceApiKey)) fail('Invalid source API key.');
-  }
+  // Ключ endpoint'а источника вводится только вручную: файла с ним кит не хранит.
+  const sourceApiKey = await hiddenInput(
+    `API key for ${source.base} endpoint "${endpointName}" (press Enter only if that endpoint is open): `,
+    { optional: true },
+  );
+  if (sourceApiKey && /[\r\n\0]/.test(sourceApiKey)) fail('Invalid source API key.');
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     fail('MetaMCP B registration requires an interactive administrator login; credentials are never accepted in arguments.');
   }
@@ -290,7 +265,7 @@ export async function prepareMetaPeerRegistration(source, target, endpoint, supp
   if (source.project === target.project || source.base === target.base) fail('Choose a source MetaMCP A and a different target MetaMCP B.');
   const resolved = resolveMetaPeerEndpoint(source, endpoint);
   const values = suppliedCredentials || await credentials(source, target, resolved.name);
-  const providedApiKey = values.sourceApiKey ?? readSourceApiKey(source);
+  const providedApiKey = values.sourceApiKey;
   if (providedApiKey !== null && providedApiKey !== undefined && providedApiKey !== '' &&
       (typeof providedApiKey !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(providedApiKey))) {
     fail('The source MetaMCP API key contains invalid characters.');
@@ -299,13 +274,12 @@ export async function prepareMetaPeerRegistration(source, target, endpoint, supp
   if (!values || typeof values.email !== 'string' || !values.email || typeof values.password !== 'string' || !values.password) {
     fail('MetaMCP B administrator email and password are required.');
   }
-  const targetClientKeyFile = readSavedClientKey(target);
   const { client, userId } = await login(target, values.email, values.password);
   await requireAdmin(client);
   return {
     source, target, endpointName: resolved.name, serverName: resolved.serverName,
     sourceUrl: resolved.sourceUrl, sourceApiKey: sourceApiKey || null,
-    targetClientKeyFile, client, userId,
+    client, userId,
   };
 }
 
@@ -322,7 +296,7 @@ export async function commitMetaPeerRegistration(prepared) {
 }
 
 async function commitMetaPeerRegistrationLocked(prepared, journalFile) {
-  const { source, target, endpointName, serverName, sourceUrl, sourceApiKey, targetClientKeyFile, client, userId } = prepared;
+  const { source, target, endpointName, serverName, sourceUrl, sourceApiKey, client, userId } = prepared;
   let journal;
   try {
     const stat = fs.lstatSync(journalFile);
@@ -433,14 +407,11 @@ async function commitMetaPeerRegistrationLocked(prepared, journalFile) {
   }
   const targetHostUrl = `http://127.0.0.1:${target.port}/metamcp/${serverName}/mcp`;
   const targetContainerUrl = `http://mcpkit-meta-${target.id}:12008/metamcp/${serverName}/mcp`;
-  const clientKeyFile = targetClientKeyFile;
   console.log(`Registered ${source.project} endpoint ${endpointName} in ${target.project} as server, namespace and endpoint ${serverName}.`);
   console.log(`MCP server URL stored in B: ${sourceUrl}`);
   console.log(`Protected endpoint on B: ${targetHostUrl}`);
   console.log(`From another container on the peer network, B's endpoint is: ${targetContainerUrl}`);
-  console.log(clientKeyFile
-    ? `A valid MetaMCP B API key is available at ${clientKeyFile}; the endpoint requires API-key authentication.`
-    : 'The endpoint on B requires API-key authentication; create a MetaMCP API key in B before using it.');
+  console.log(`Endpoint ${serverName} on B requires API-key authentication; create a MetaMCP API key in B and enter it when a client asks for one.`);
   console.log(`Private registration journal: ${journalFile}`);
   return { name: serverName, sourceUrl, targetHostUrl, targetContainerUrl };
 }

@@ -107,7 +107,6 @@ async function fixture() {
   const api = await fakeMetaApi();
   const source = makeState(root, 'source A', '1111111111111111', 12108, 'http://localhost:12108');
   const target = makeState(root, 'target B', '2222222222222222', api.port, api.origin);
-  fs.writeFileSync(path.join(source.priv, 'client-api-key'), `${KEY}\n`, { mode: 0o600 });
   return { root, api, source, target, cleanup: async () => { await api.close(); fs.rmSync(root, { recursive: true, force: true }); } };
 }
 
@@ -115,7 +114,7 @@ async function fixture() {
   const f = await fixture();
   try {
     const endpoint = 'http://127.0.0.1:12108/metamcp/all/mcp';
-    const prepared = await prepareMetaPeerRegistration(f.source, f.target, endpoint, { email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
+    const prepared = await prepareMetaPeerRegistration(f.source, f.target, endpoint, { sourceApiKey: KEY, email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
     assert.equal(prepared.endpointName, 'all');
     assert.equal(prepared.sourceUrl, `http://mcpkit-meta-${f.source.id}:12008/metamcp/all/mcp`);
     assert.equal(prepared.sourceApiKey, KEY);
@@ -150,7 +149,7 @@ async function fixture() {
     const journal = fs.readFileSync(journalFile, 'utf8');
     assert.doesNotMatch(journal, new RegExp(KEY));
 
-    const retried = await prepareMetaPeerRegistration(f.source, f.target, 'all', { email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
+    const retried = await prepareMetaPeerRegistration(f.source, f.target, 'all', { sourceApiKey: KEY, email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
     await commitMetaPeerRegistration(retried);
     assert.equal(f.api.db.servers.length, 1);
     assert.equal(f.api.db.namespaces.length, 1);
@@ -163,7 +162,7 @@ test('does not adopt a conflicting MetaMCP record by name', async () => {
   try {
     const name = `mcpkit-meta-${f.source.id}-all`;
     f.api.db.servers.push({ uuid: crypto.randomUUID(), name, user_id: null });
-    const prepared = await prepareMetaPeerRegistration(f.source, f.target, 'all', { email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
+    const prepared = await prepareMetaPeerRegistration(f.source, f.target, 'all', { sourceApiKey: KEY, email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
     await assert.rejects(commitMetaPeerRegistration(prepared), /already in use; it was not adopted or changed/);
     assert.equal(f.api.db.servers.length, 1);
     assert.equal(f.api.db.namespaces.length, 0);
