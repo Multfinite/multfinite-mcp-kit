@@ -13,6 +13,8 @@ import { prepareWindowsFixture } from './fixtures/windows-test-helpers.mjs';
 
 const ps = process.env.MCP_POWERSHELL || 'pwsh';
 const available = spawnSync(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.Major'], { encoding: 'utf8' }).status === 0;
+const nativePs = process.env.MCP_POWERSHELL || (process.platform === 'win32' ? 'powershell' : 'pwsh');
+const nativePsAvailable = spawnSync(nativePs, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', 'exit 0'], { encoding: 'utf8' }).status === 0;
 const proxy = process.env.MCP_PROXY_CLI;
 const skip = (process.platform === 'win32' && 'synthetic POSIX tools') || (!available && 'set MCP_POWERSHELL') || (!proxy && 'set MCP_PROXY_CLI');
 const fixture = fileURLToPath(new URL('./fixtures/fake-stdio-mcp.cjs', import.meta.url));
@@ -40,6 +42,30 @@ test('forwards the LOCAL gateway port to run-local as a named parameter', () => 
   assert.match(source, /\[hashtable\]\$NamedArguments/);
   assert.match(source, /-Command \$Command -Directory \$BaseDir @NamedArguments/);
   assert.match(source, /Invoke-Runner 'init' @\{\s*GatewayPort = \$GatewayPort\s*\}/);
+});
+
+test('run-local-servers binds its arguments to run-local by name', {
+  skip: (process.platform !== 'win32' && 'Windows PowerShell wrapper') || (!nativePsAvailable && 'PowerShell is unavailable'),
+}, () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpkit wrapper '));
+  const base = path.join(root, 'local');
+  fs.mkdirSync(path.join(base, 'config', 'private'), { recursive: true });
+  fs.writeFileSync(path.join(base, 'config', 'private', 'independent-windows-kit.json'), `${JSON.stringify({ version: 1, kind: 'windows-local', base })}\n`);
+  for (const file of ['run-local-servers.ps1', 'independent-common.ps1', 'local-common.ps1']) {
+    fs.copyFileSync(path.join(windowsDir, file), path.join(root, file));
+  }
+  // Mirror run-local.ps1's parameter order: an array splat would bind the
+  // literal '-Directory' to Server and the path to the integer GatewayPort.
+  fs.writeFileSync(path.join(root, 'run-local.ps1'), [
+    "param([string]$Command = 'gateway-start', [string]$Server = '', [int]$GatewayPort = 13001, [string]$Directory = '')",
+    "@($Command, $Directory, $Server) | Set-Content -LiteralPath (Join-Path $PSScriptRoot 'received.txt') -Encoding UTF8",
+    'exit 7',
+    '',
+  ].join('\n'));
+  const result = spawnSync(nativePs, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', path.join(root, 'run-local-servers.ps1'), 'logs', base, 'filesystem'], { encoding: 'utf8' });
+  assert.equal(result.status, 7, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const received = fs.readFileSync(path.join(root, 'received.txt'), 'utf8').replace(/\r/g, '').trim().split('\n');
+  assert.deepEqual(received, ['logs', base, 'filesystem']);
 });
 
 async function freePort() {

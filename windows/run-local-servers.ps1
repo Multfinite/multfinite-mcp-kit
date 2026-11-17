@@ -14,15 +14,18 @@ $base = [IO.Path]::GetFullPath($Directory)
 if ($Command -ne 'unregister-service') { Assert-IndependentWindowsLocal $base }
 $runner = Join-Path $Here 'run-local.ps1'
 switch ($Command) {
-    'start'                { $forward = @('gateway-start') }
-    'stop'                 { $forward = @('gateway-stop') }
-    'restart'              { $forward = @('gateway-restart') }
-    'status'               { $forward = @('gateway-status') }
-    'logs'                 { $forward = @('logs'); if ($Server) { $forward += $Server } }
-    'register-service'     { $forward = @('register-service') }
-    'unregister-service'   { $forward = @('unregister-service') }
+    'start'                { $runnerCommand = 'gateway-start' }
+    'stop'                 { $runnerCommand = 'gateway-stop' }
+    'restart'              { $runnerCommand = 'gateway-restart' }
+    'status'               { $runnerCommand = 'gateway-status' }
+    'logs'                 { $runnerCommand = 'logs' }
+    'register-service'     { $runnerCommand = 'register-service' }
+    'unregister-service'   { $runnerCommand = 'unregister-service' }
 }
-$forward += @('-Directory', $base)
-& $runner @forward
+# run-local.ps1 has positional Server and GatewayPort parameters, so splat a
+# hashtable; an array splat would bind the literal '-Directory' as a value.
+$runnerArguments = @{ Command = $runnerCommand; Directory = $base }
+if ($Command -eq 'logs' -and $Server) { $runnerArguments.Server = $Server }
+& $runner @runnerArguments
 $code = $LASTEXITCODE
 exit $code
