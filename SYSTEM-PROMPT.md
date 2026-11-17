@@ -250,21 +250,21 @@ Serena (`serena-agent 2.1.0`) — LSP-сервер на Windows-хосте: на
 
 ## 8. Разделение памяти по проектам
 
-Один проект — один **slug**: латиница, нижний регистр, дефисы (`riftfall`, `eidolon-pherin`, `mcp-kit`). Один и тот же slug используется во всех трёх системах.
+Один проект — один **slug**: латиница, нижний регистр, дефисы (`example-project`, `eidolon-pherin`, `mcp-kit`). Один и тот же slug используется во всех трёх системах.
 
 | Система | Параметр | Пример | Если не указать |
 | --- | --- | --- | --- |
-| memory-bank | `projectName` | `riftfall` | вызов не пройдёт: параметр обязателен |
-| Cognee | `dataset_name` | `riftfall` | уйдёт в `main_dataset` или датасет клиента — проекты смешаются |
-| Cognee | `node_set` | `["riftfall","decisions"]` | теги не проставятся, выборка по разделу не сработает |
-| Graphiti | `group_id` | `riftfall` | уйдёт в общий `multfinite-mcp-kit-global` — проекты смешаются |
-| Graphiti | `saga` | `riftfall-deploy` | эпизоды не сгруппируются в сюжет |
+| memory-bank | `projectName` | `example-project` | вызов не пройдёт: параметр обязателен |
+| Cognee | `dataset_name` | `example-project` | уйдёт в `main_dataset` или датасет клиента — проекты смешаются |
+| Cognee | `node_set` | `["example-project","decisions"]` | теги не проставятся, выборка по разделу не сработает |
+| Graphiti | `group_id` | `example-project` | уйдёт в общий `multfinite-mcp-kit-global` — проекты смешаются |
+| Graphiti | `saga` | `example-project-deploy` | эпизоды не сгруппируются в сюжет |
 
 Отдельно: `dataset_name` отвечает за **где лежит** документ, `node_set` — за **к какому разделу** он относится внутри проекта (`decisions`, `specs`, `ops`, `research`). `group_id` в Graphiti — жёсткая граница: поиск без `group_ids` не увидит проектные данные.
 
 ### 8.1 Файлы memory bank
 
-Каталог проекта — `projectName`; имя файла выбирает агент. Держись конвенции (проект `riftfall` уже устроен так):
+Каталог проекта — `projectName`; имя файла выбирает агент. Держись конвенции ниже:
 
 | Файл | Содержимое | Как менять |
 | --- | --- | --- |
@@ -302,27 +302,27 @@ Serena (`serena-agent 2.1.0`) — LSP-сервер на Windows-хосте: на
 ## 9. Примеры вызовов
 
 ```json
-{"tool": "memory-bank-mcp__memory_bank_read", "arguments": {"projectName": "riftfall", "fileName": "decisions.md"}}
+{"tool": "memory-bank-mcp__memory_bank_read", "arguments": {"projectName": "example-project", "fileName": "decisions.md"}}
 ```
 
 ```json
-{"tool": "memory-bank-mcp__memory_bank_update", "arguments": {"projectName": "riftfall", "fileName": "decisions.md", "content": "# Решения\n\n## 2026-11-17 — границы проектов\n- Память разделяется по slug: memory-bank projectName, Cognee dataset_name, Graphiti group_id.\n"}}
+{"tool": "memory-bank-mcp__memory_bank_update", "arguments": {"projectName": "example-project", "fileName": "decisions.md", "content": "# Решения\n\n## 2026-11-17 — границы проектов\n- Память разделяется по slug: memory-bank projectName, Cognee dataset_name, Graphiti group_id.\n"}}
 ```
 
 ```json
-{"tool": "cognee__remember", "arguments": {"data": "Решение: память разделяется по slug проекта…", "dataset_name": "riftfall", "node_set": ["riftfall", "decisions"]}}
+{"tool": "cognee__remember", "arguments": {"data": "Решение: память разделяется по slug проекта…", "dataset_name": "example-project", "node_set": ["example-project", "decisions"]}}
 ```
 
 ```json
-{"tool": "cognee__recall", "arguments": {"query": "как мы разделяем память по проектам", "datasets": "riftfall", "top_k": 8, "include_references": true}}
+{"tool": "cognee__recall", "arguments": {"query": "как мы разделяем память по проектам", "datasets": "example-project", "top_k": 8, "include_references": true}}
 ```
 
 ```json
-{"tool": "graphiti__add_memory", "arguments": {"name": "Границы памяти по проектам", "episode_body": "2026-11-17 принято: slug проекта используется как projectName, dataset_name и group_id.", "group_id": "riftfall", "source": "text", "source_description": "SYSTEM-PROMPT mcp-kit"}}
+{"tool": "graphiti__add_memory", "arguments": {"name": "Границы памяти по проектам", "episode_body": "2026-11-17 принято: slug проекта используется как projectName, dataset_name и group_id.", "group_id": "example-project", "source": "text", "source_description": "SYSTEM-PROMPT mcp-kit"}}
 ```
 
 ```json
-{"tool": "graphiti__search_memory_facts", "arguments": {"query": "границы памяти по проектам", "group_ids": ["riftfall"], "max_facts": 10}}
+{"tool": "graphiti__search_memory_facts", "arguments": {"query": "границы памяти по проектам", "group_ids": ["example-project"], "max_facts": 10}}
 ```
 
 ```json
