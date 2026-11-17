@@ -29,6 +29,14 @@ services:
       METAMCP_ADMIN_EMAILS: ${METAMCP_ADMIN_EMAILS:-}
       TRANSFORM_LOCALHOST_TO_DOCKER_INTERNAL: "false"
       BOOTSTRAP_ENABLE: "false"
+      # One client session opens a backend connection per server in its
+      # namespace, so a wide namespace exhausts MetaMCP's default pool of 100
+      # after a few sessions. Unset SESSION_LIFETIME never expires sessions,
+      # and the next tools/list then returns an empty list instead of tools.
+      # The total also counts sessions that share one pooled connection, so the
+      # cap must exceed worst-case sessions x servers, not real sockets.
+      SESSION_LIFETIME: ${MCPKIT_SESSION_LIFETIME:-900000}
+      MAX_TOTAL_CONNECTIONS: ${MCPKIT_MAX_TOTAL_CONNECTIONS:-2000}
     ports:
       - "127.0.0.1:${MCPKIT_PORT}:12008"
     volumes:

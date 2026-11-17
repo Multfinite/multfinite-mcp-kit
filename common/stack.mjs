@@ -250,6 +250,9 @@ function config(state, { metaOriginOverride } = {}) {
   };
   if (state.type === 'meta') {
     Object.assign(common, { MCPKIT_SOURCE: path.join(state.base, 'metamcp'), MCPKIT_APP_URL: metaOriginOverride ?? configuredMetaOrigin(state) });
+    // The LAN overlay publishes on this exact address; without the variable
+    // Compose falls back to every interface and the app check rejects it.
+    if (state.lanIp) Object.assign(common, { MCPKIT_LAN_IP: state.lanIp });
     const link = readLiveGlobalLink(state);
     if (link) common.MCPKIT_GLOBAL_CLIENT_NETWORK = link.network;
   } else {

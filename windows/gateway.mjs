@@ -226,7 +226,12 @@ export async function startGateway({ settings, gatewayKey, controlKey, instanceI
         // PYTHONIOENCODING takes precedence over PYTHONUTF8, so override both
         // for MCP's UTF-8 stdio even if the caller uses a legacy code page.
         Object.assign(env, spec.env, { MCP_PROXY_API_KEY: record.internalKey, PYTHONUNBUFFERED: '1', PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' });
-        child = spawn(nodePath, [proxyPath, '--host', '127.0.0.1', '--port', String(record.port), '--server', 'stream', '--upstreamProtocol', 'auto', '--connectionTimeout', String(startupTimeoutMs), '--', spec.command, ...spec.args], {
+        // Keep the 2025 handshake. `auto` probes with server/discover and then
+        // treats any server that answers as 2026-07-28, where mcp-proxy opens a
+        // `subscriptions/listen` stream. mcp-python 2.3 answers the probe but
+        // registers the stream only when the application opts in, so each retry
+        // fails with -32601 and the proxy repeats it forever, filling the log.
+        child = spawn(nodePath, [proxyPath, '--host', '127.0.0.1', '--port', String(record.port), '--server', 'stream', '--upstreamProtocol', 'legacy', '--connectionTimeout', String(startupTimeoutMs), '--', spec.command, ...spec.args], {
           env, cwd: spec.cwd, windowsHide: true, detached: process.platform !== 'win32', stdio: ['ignore', fd, fd],
         });
       } finally { fs.closeSync(fd); }
