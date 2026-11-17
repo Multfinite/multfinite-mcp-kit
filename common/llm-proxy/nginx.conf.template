@@ -1,0 +1,56 @@
+# OpenAI-совместимая точка для Graphiti и Cognee.
+#
+# Зачем: OpenCode Go принимает запросы только с заголовком x-opencode-session
+# (без него 400 MissingSessionID), а Graphiti и Cognee такой заголовок задавать
+# не умеют. Прокси добавляет его сам и разводит запросы по назначению:
+#   /v1/chat/completions -> OpenCode Go
+#   /v1/embeddings       -> локальные эмбеддинги (профиль embeddings, Ollama)
+#   /v1/models           -> OpenCode Go
+#
+# Подстановки ${MCPKIT_*} делает официальный образ nginx (envsubst) до старта;
+# NGINX_ENVSUBST_FILTER ограничен префиксом MCPKIT_, поэтому $http_* и прочие
+# переменные nginx не затрагиваются.
+server {
+    listen 8000;
+    # Docker DNS: резолвит и соседние контейнеры, и внешние имена.
+    resolver 127.0.0.11 valid=10s ipv6=off;
+
+    location = /healthz {
+        add_header Content-Type text/plain;
+        return 200 "ok\n";
+    }
+
+    location /v1/chat/completions {
+        set $upstream_go https://opencode.ai;
+        proxy_pass $upstream_go/inference/go/openai/v1/chat/completions;
+        proxy_ssl_server_name on;
+        proxy_set_header Host opencode.ai;
+        proxy_set_header Authorization "Bearer ${MCPKIT_LLM_PROXY_API_KEY}";
+        proxy_set_header x-opencode-session "${MCPKIT_LLM_PROXY_SESSION}";
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 600s;
+        proxy_send_timeout 600s;
+    }
+
+    location /v1/models {
+        set $upstream_models https://opencode.ai;
+        proxy_pass $upstream_models/inference/go/openai/v1/models;
+        proxy_ssl_server_name on;
+        proxy_set_header Host opencode.ai;
+        proxy_set_header Authorization "Bearer ${MCPKIT_LLM_PROXY_API_KEY}";
+        proxy_set_header x-opencode-session "${MCPKIT_LLM_PROXY_SESSION}";
+        proxy_http_version 1.1;
+    }
+
+    location /v1/embeddings {
+        # Адрес задаётся переменной, чтобы nginx не падал при старте, когда
+        # профиль embeddings выключен: без него будет 502, а не мёртвый прокси.
+        set $upstream_embeddings http://embeddings:11434;
+        proxy_pass $upstream_embeddings/v1/embeddings;
+        proxy_set_header Host embeddings;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+    }
+}
