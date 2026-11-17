@@ -393,6 +393,50 @@ function ensureSource(state) {
   if (changes) fail('The owned MetaMCP source clone has local changes. The kit never modifies upstream source and will not build from a modified clone. Preserve/review the changes and create a clean upstream clone before rebuilding.');
   return source;
 }
+// Приводит принадлежащий киту клон к закреплённой upstream-ревизии и пересобирает
+// образ приложения. Локальные правки клона (например, остатки форка) сохраняются
+// в патч и в список изменённых файлов внутри .mcpkit, а не удаляются молча.
+// Настройки, база и регистрации не затрагиваются: меняются только файлы клона и образ.
+function rebuildSource(state) {
+  const source = path.join(state.base, 'metamcp');
+  const marker = path.join(source, '.git', 'mcpkit-instance');
+  if (!fs.existsSync(source)) {
+    console.log('The MetaMCP source clone is missing; it will be created at the pinned revision.');
+    return;
+  }
+  if (!fs.existsSync(marker) || fs.readFileSync(marker, 'utf8').trim() !== state.id) {
+    fail('MetaMCP clone is not owned by this installation. It was preserved.');
+  }
+  const priv = path.join(state.base, '.mcpkit');
+  const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+  const diff = run('git', ['-C', source, 'diff', 'HEAD'], { capture: true, allowFailure: true }).stdout;
+  if (diff.trim()) {
+    const patch = path.join(priv, `metamcp-clone-${stamp}.patch`);
+    privateWrite(patch, diff);
+    console.log(`Saved local clone changes to ${patch}`);
+  }
+  const status = run('git', ['-C', source, 'status', '--porcelain', '--untracked-files=all'], { capture: true, allowFailure: true }).stdout;
+  if (status.trim()) {
+    const list = path.join(priv, `metamcp-clone-${stamp}.status.txt`);
+    privateWrite(list, status);
+    console.log(`Saved the changed-file list to ${list}`);
+  }
+  console.log(`Resetting the MetaMCP clone to the pinned revision ${revision}.`);
+  run('git', ['-C', source, 'fetch', '--depth', '1', 'https://github.com/metatool-ai/metamcp.git', revision]);
+  run('git', ['-C', source, 'checkout', '--detach', revision]);
+  run('git', ['-C', source, 'clean', '-fdx']);
+  if (state.revision !== revision) {
+    privateWrite(path.join(priv, 'state.json'), `${JSON.stringify({ ...state, revision }, null, 2)}\n`);
+    state.revision = revision;
+    console.log(`Updated the recorded MetaMCP revision to ${revision}.`);
+  }
+  const image = config(state).MCPKIT_IMAGE;
+  const ctx = dockerContext();
+  if (inspect(ctx, 'image', image)) {
+    run('docker', ['--context', ctx, 'image', 'rm', image], { capture: true, allowFailure: true });
+    console.log(`Removed the ${image} image so it is rebuilt from the clean clone.`);
+  }
+}
 // Приватный build-каталог — источник сборки образов кита; init копирует туда
 // исходники один раз. После обновления кита там остаётся старый код, и контейнер
 // продолжает работать с ним, поэтому сравниваем содержимое перед каждым запуском.
@@ -1623,7 +1667,15 @@ try {
   else if (action === 'unlink-metamcp') unlinkMetaPeers(ctx, state, peerState);
   else if (action === 'share-global') await shareGlobalRegistration(ctx, state, saved, opts.metaDir, opts.registration);
   else if (action === 'share-registration') await shareRegistrationFile(ctx, state, saved, opts.registrationFile);
-  else if (action === 'apply') {
+  else if (action === 'rebuild') {
+    if (state.type !== 'meta') fail('rebuild applies only to an independent MetaMCP installation.');
+    if (setupMarker(state)) fail('Complete or remove the staged installation before rebuilding.');
+    readEnv(state.base, state.type);
+    checkResources(ctx, state);
+    rebuildSource(state);
+    await start(ctx, state);
+    console.log('The MetaMCP clone is back at the pinned upstream revision and the app image was rebuilt; database, private .env and registrations were not changed.');
+  } else if (action === 'apply') {
     if (state.type === 'meta' && setupMarker(state)) fail('Complete or remove the staged installation before applying configuration.');
     if (state.type === 'meta') await applyMetaConfig(ctx, state);
     else {
