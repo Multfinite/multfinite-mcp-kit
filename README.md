@@ -43,6 +43,7 @@ bash linux/connect-local.sh
 ## Документация
 
 - [Раздельная установка, настройки, регистрация и управление](docs/independent-installation.md)
+- [Системный промпт для агентов: инфраструктура, подключение и память проектов](SYSTEM-PROMPT.md)
 - [Конфигурация текущих установок](docs/configuration.md)
 - [Безопасное удаление проектов и данных](docs/uninstall.md)
 - [Одностороннее подключение одного MetaMCP к другому](docs/independent-installation.md#metamcp-to-metamcp)
