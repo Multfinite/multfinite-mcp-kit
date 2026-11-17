@@ -82,7 +82,7 @@ function readSourceApiKey(source) {
     fail(`The private client API key file for ${source.project} is not a protected regular file.`);
   }
   const key = fs.readFileSync(file, 'utf8').trim();
-  if (!/^sk_mt_[A-Za-z0-9]{64}$/.test(key)) fail(`The private client API key for ${source.project} is invalid.`);
+  if (!/^sk_mt_[A-Za-z0-9]{64}$/.test(key)) fail(`The private client API key for ${source.base} is invalid: expected sk_mt_ followed by 64 characters, without spaces or a placeholder. File checked: ${path.join(source.base, '.mcpkit', 'client-api-key')}.`);
   return key;
 }
 function readSavedClientKey(state) {
