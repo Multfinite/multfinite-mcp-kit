@@ -47,6 +47,7 @@ bash linux/connect-local.sh
 - [Безопасное удаление проектов и данных](docs/uninstall.md)
 - [Одностороннее подключение одного MetaMCP к другому](docs/independent-installation.md#metamcp-to-metamcp)
 - [Windows LOCAL → MetaMCP в WSL 2](docs/windows-local-to-wsl-metamcp.md)
+- [Автозапуск WSL при входе в Windows](docs/wsl-autostart.md)
 - [Сеть Hyper-V, WSL 2 и Windows-ВМ](docs/wsl-hyperv-network.md)
 
 Для сетевой связи между компьютерами заранее настройте проверяемый HTTPS либо отдельный защищённый туннель/VPN, маршруты и брандмауэр. Установка и регистраторы сами не создают сетевую инфраструктуру. HTTP не шифрует пароль, ключи и MCP-трафик.
