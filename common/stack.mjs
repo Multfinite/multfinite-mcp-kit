@@ -413,7 +413,8 @@ function syncKitBuild(state) {
     try { current = fs.readFileSync(to); } catch { current = null; }
     if (current && current.equals(desired)) continue;
     fs.mkdirSync(path.dirname(to), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(to, desired, { mode: 0o600 });
+    // 0644: файлы копируются в образ и читаются процессом под пользователем node.
+    fs.writeFileSync(to, desired, { mode: 0o644 });
     changed.add(service);
     console.log(`Updated ${target} from ${source}; the ${service} image will be rebuilt.`);
   }
