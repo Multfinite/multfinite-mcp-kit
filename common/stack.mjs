@@ -37,6 +37,16 @@ function parseArgs(args) {
 function privateWrite(file, text) {
   fs.writeFileSync(file, text, { flag: 'wx', mode: 0o600 });
 }
+// Replace an existing private file without exposing a partially written copy.
+function privateReplace(file, text) {
+  const temporary = `${file}.${process.pid}.${crypto.randomBytes(6).toString('hex')}.tmp`;
+  try {
+    fs.writeFileSync(temporary, text, { flag: 'wx', mode: 0o600 });
+    fs.renameSync(temporary, file);
+  } finally {
+    try { fs.unlinkSync(temporary); } catch { /* already renamed or absent */ }
+  }
+}
 function random() { return crypto.randomBytes(32).toString('hex'); }
 function validPort(value) {
   const port = Number(value);
@@ -313,7 +323,7 @@ function checkResources(ctx, state) {
     const network = `${state.project}_${suffix}`;
     checkLabel(inspect(ctx, 'network', network), state, 'network', network);
   }
-  const volumes = state.type === 'meta' ? ['postgres_data', 'uv_cache'] : ['gateway_data', 'neo4j_data', 'qdrant_data', 'cognee_system', 'cognee_data', 'memory_data', 'gdrive_data'];
+  const volumes = state.type === 'meta' ? ['postgres_data', 'uv_cache'] : ['gateway_data', 'neo4j_data', 'qdrant_data', 'embeddings_data', 'ollama_data', 'cognee_system', 'cognee_data', 'memory_data', 'gdrive_data'];
   for (const suffix of volumes) {
     const name = `${state.project}_${suffix}`;
     checkLabel(inspect(ctx, 'volume', name), state, 'volume', name);
@@ -326,7 +336,7 @@ function stopOwnedContainers(ctx, state) {
   // containers alone. No credentials, networks or volumes are changed.
   const order = state.type === 'meta'
     ? ['app', 'postgres']
-    : ['gateway', 'graphiti', 'cognee', 'gdrive', 'memory', 'neo4j', 'qdrant'];
+    : ['gateway', 'graphiti', 'cognee', 'llm-proxy', 'embeddings', 'gdrive', 'memory', 'ollama', 'neo4j', 'qdrant'];
   const result = run('docker', ['--context', ctx, 'container', 'ls', '-q', '--filter', `label=com.docker.compose.project=${state.project}`], { capture: true });
   const ids = result.stdout.trim().split(/\s+/).filter(Boolean);
   const groups = new Map(order.map((service) => [service, []]));
@@ -625,7 +635,7 @@ function requireRunningMetaApp(ctx, state, expectedId = null, { staged = false }
   assertLiveMetaPeerNetworks(ctx, state);
   return id;
 }
-function metaContainerSnapshot(ctx, state, { stopped = false } = {}) {
+function metaContainerSnapshot(ctx, state, { stopped = false, allowPreviousOrigin = false } = {}) {
   const service = stopped ? stoppedMetaService : ownedMetaService;
   const appId = service(ctx, state, 'app');
   const postgresId = service(ctx, state, 'postgres');
@@ -647,6 +657,12 @@ function metaContainerSnapshot(ctx, state, { stopped = false } = {}) {
   const appUrl = app.APP_URL;
   let usableAppUrl = false;
   try { usableAppUrl = parseEnvOrigin(appUrl, state) === appUrl; } catch { /* reject an unexpected container URL below */ }
+  // Enabling LAN publication changes the origin, so the container being replaced
+  // still carries the previous loopback URL. Accept exactly that documented
+  // predecessor and nothing else.
+  if (!usableAppUrl && allowPreviousOrigin && state.lanIp) {
+    try { usableAppUrl = parseEnvOrigin(appUrl, { ...state, lanIp: undefined }) === appUrl; } catch { /* reject below */ }
+  }
   const trustedPrefix = usableAppUrl ? trustedOriginPrefix(appUrl) : '';
   if (!usableAppUrl || app.NEXT_PUBLIC_APP_URL !== appUrl ||
       typeof app.METAMCP_ADMIN_EMAILS !== 'string' || typeof app.EXTRA_TRUSTED_ORIGINS !== 'string' ||
@@ -1074,9 +1090,12 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
   try { ports = JSON.parse(portsResult.stdout); } catch { fail(`Cannot inspect app port bindings. ${outcome}`); }
   const published = ports && typeof ports === 'object' && !Array.isArray(ports) ? ports['12008/tcp'] : null;
   const portHosts = state.lanIp ? ['127.0.0.1', state.lanIp] : ['127.0.0.1'];
-  if (!ports || Object.keys(ports).length !== 1 || !Array.isArray(published) || published.length !== portHosts.length ||
-      published.some((item) => item?.HostPort !== String(state.port) || !portHosts.includes(item.HostIp)) ||
-      portHosts.some((host) => published.filter((item) => item?.HostIp === host).length !== 1)) {
+  // Before the first LAN apply the running app is still loopback-only.
+  const allowedHostSets = after || !state.lanIp ? [portHosts] : [portHosts, ['127.0.0.1']];
+  const matchesHosts = (hosts) => Array.isArray(published) && published.length === hosts.length &&
+    published.every((item) => item?.HostPort === String(state.port) && hosts.includes(item.HostIp)) &&
+    hosts.every((host) => published.filter((item) => item?.HostIp === host).length === 1);
+  if (!ports || Object.keys(ports).length !== 1 || !allowedHostSets.some(matchesHosts)) {
     fail(`The app has unexpected port bindings; review them before recreation. ${outcome}`);
   }
   const mountResult = run('docker', ['--context', ctx, 'container', 'inspect', '--format', '{{json .Mounts}}', snapshot.appId], { capture: true });
@@ -1121,6 +1140,30 @@ function checkMetaApplyResources(ctx, state, snapshot, planned, { after = false 
     fail(`The app has extra or unexpected networks. Review its connection details before applying. ${outcome}`);
   }
 }
+// Publish an existing MetaMCP on a private host address, exactly like an
+// instance created with --lan-ip. Only the saved state and APP_URL change here;
+// apply recreates the app with the LAN overlay afterwards.
+function enableMetaLan(state, opts) {
+  if (state.type !== 'meta') fail('LAN publication is available only for a MetaMCP.');
+  if (setupMarker(state)) fail('Complete or remove the staged installation before changing LAN publication.');
+  if (process.platform !== 'linux') fail('LAN publication is available only on Linux.');
+  if (!opts.allowInsecureLan) fail('The Linux LAN mode requires --allow-insecure-lan. HTTP exposes credentials on the network.');
+  const lanIp = privateLanIp(opts.lanIp);
+  const local = Object.values(os.networkInterfaces()).flat().some((item) => item && item.family === 'IPv4' && item.address === lanIp);
+  if (!local) fail(`LAN address ${lanIp} is not assigned to this host.`);
+  if (state.lanIp === lanIp) return state;
+  if (state.lanIp) fail(`This MetaMCP already publishes on ${state.lanIp}; apply cannot move it to another address.`);
+  const priv = path.join(state.base, '.mcpkit');
+  const envFile = path.join(priv, '.env');
+  const appUrl = validOrigin(`http://${lanIp}:${state.port}`, { ...state, lanIp });
+  const envText = fs.readFileSync(envFile, 'utf8');
+  if (!/^APP_URL=/m.test(envText)) fail('The private .env has no APP_URL line; add it before enabling LAN publication.');
+  privateReplace(envFile, envText.replace(/^APP_URL=.*$/m, `APP_URL='${appUrl}'`));
+  const next = { ...state, appUrl, lanIp };
+  privateReplace(path.join(priv, 'state.json'), `${JSON.stringify(next, null, 2)}\n`);
+  console.log(`LAN publication enabled on ${appUrl}; passwords and keys are not encrypted on that network.`);
+  return next;
+}
 async function applyMetaConfig(ctx, state) {
   const priv = path.join(state.base, '.mcpkit');
   for (const dir of [state.base, priv]) {
@@ -1137,7 +1180,7 @@ async function applyMetaConfig(ctx, state) {
   try { savedState = JSON.parse(stateBytes.toString('utf8')); } catch { fail('Cannot read the kit state; no container was changed.'); }
   if (JSON.stringify(savedState) !== JSON.stringify(state)) fail('The kit state changed during preflight; no container was changed.');
   const values = readEnv(state.base, 'meta');
-  const before = metaContainerSnapshot(ctx, state);
+  const before = metaContainerSnapshot(ctx, state, { allowPreviousOrigin: true });
   if (before.password !== values.POSTGRES_PASSWORD || before.secret !== values.BETTER_AUTH_SECRET) {
     fail('The .env credentials differ from the existing containers. Restore the correct values before applying; no container was changed.');
   }
@@ -1174,7 +1217,7 @@ async function applyMetaConfig(ctx, state) {
     'Do not run another start, stop, apply, or edit the .env at the same time.';
   if (!(await confirm(message, `APPLY ${state.project}`))) { console.log('Cancelled; no container was changed.'); process.exitCode = 1; return; }
   if (!unchanged(stateFile, stateBytes) || !unchanged(envFile, envBytes)) fail('The kit state or private .env changed during confirmation; no container was changed.');
-  const rechecked = metaContainerSnapshot(ctx, state);
+  const rechecked = metaContainerSnapshot(ctx, state, { allowPreviousOrigin: true });
   for (const key of ['appId', 'postgresId', 'password', 'secret', 'appUrl', 'admins', 'extraOrigins']) {
     if (rechecked[key] !== before[key]) fail('Container configuration changed during confirmation; no container was changed.');
   }
@@ -1628,13 +1671,15 @@ try {
   if (isInit && opts.expectType && opts.expectType !== (action === 'init-meta' ? 'meta' : 'global')) fail('The requested and expected kit types differ.');
   if (!isInit && (opts.port || opts.appUrl)) fail('Ports and APP_URL are only accepted for new installations.');
   if (action === 'init-global' && opts.appUrl) fail('--app-url is only for MetaMCP.');
-  if (action !== 'init-meta' && (opts.staged || opts.fresh || opts.lanIp || opts.adminEmail || opts.allowInsecureLan)) fail('Staging, fresh-install and LAN options are only available for init-meta.');
+  if (action !== 'init-meta' && (opts.staged || opts.fresh || opts.adminEmail)) fail('Staging and fresh-install options are only available for init-meta.');
+  if (action !== 'init-meta' && action !== 'apply' && (opts.lanIp || opts.allowInsecureLan)) fail('LAN options are only available for init-meta and apply.');
+  if (action === 'apply' && (opts.lanIp || opts.allowInsecureLan) && !opts.lanIp) fail('--allow-insecure-lan requires --lan-ip.');
   if (opts.adminEmail && !opts.staged) fail('--admin-email requires --staged.');
   const base = path.resolve(opts.dir);
   const isSharing = action === 'share-global' || action === 'share-registration';
   const saved = isInit ? initialize(action === 'init-meta' ? 'meta' : 'global', opts) :
     originState(base, { allowRelocated: isSharing || action === 'relocate' });
-  const state = isSharing ? sharingState(saved, base) : saved;
+  let state = isSharing ? sharingState(saved, base) : saved;
   if (opts.expectType && state.type !== opts.expectType) fail(`Expected a ${opts.expectType} project at ${base}; no Docker resource was changed.`);
   if (opts.server && state.type !== 'global') fail('--server is only available for GLOBAL logs.');
   let peerState = null;
@@ -1686,12 +1731,17 @@ try {
     console.log('The MetaMCP clone is back at the pinned upstream revision and the app image was rebuilt; database, private .env and registrations were not changed.');
   } else if (action === 'apply') {
     if (state.type === 'meta' && setupMarker(state)) fail('Complete or remove the staged installation before applying configuration.');
-    if (state.type === 'meta') await applyMetaConfig(ctx, state);
-    else {
+    if (state.type === 'meta') {
+      if (opts.lanIp) state = enableMetaLan(state, opts);
+      await applyMetaConfig(ctx, state);
+    } else {
       checkResources(ctx, state);
       ensureImages(ctx, state);
-      console.log('Recreating only the kit gateway, Graphiti and Cognee containers to apply configuration. Named volumes are preserved.');
-      compose(ctx, state, ['up', '-d', '--no-deps', '--force-recreate', '--no-build', 'gateway', 'graphiti', 'cognee']);
+      // Every service whose container embeds kit files or env-driven settings
+      // must be recreated here: a mounted template can reference a variable the
+      // existing container was never given, and the proxy then crash-loops.
+      console.log('Recreating only the kit gateway, Graphiti, Cognee, llm-proxy and embeddings containers to apply configuration. Named volumes are preserved.');
+      compose(ctx, state, ['up', '-d', '--no-deps', '--force-recreate', '--no-build', 'gateway', 'llm-proxy', 'embeddings', 'graphiti', 'cognee']);
     }
   } else if (action === 'remove') {
     if (state.type === 'meta' && readLiveMetaPeerLinks(state).length) {

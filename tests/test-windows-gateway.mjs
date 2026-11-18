@@ -63,7 +63,8 @@ test('local gateway authenticates, routes independent MCP sessions and stops chi
       if (gateway.snapshot().servers.filter((s) => s.status === 'ready').length === 2) break;
       await delay(100);
     }
-    assert.deepEqual(gateway.snapshot().servers.map((s) => s.status), ['ready', 'ready', 'waiting', 'error']);
+    assert.deepEqual(gateway.snapshot().servers.map((s) => s.status), ['ready', 'ready', 'waiting', 'waiting']);
+    assert.match(gateway.snapshot().servers.find((s) => s.id === 'not-installed').detail, /Package is not installed/);
     const base = `http://127.0.0.1:${gateway.address.port}`;
     assert.equal((await fetch(`${base}/servers/one/mcp`)).status, 401);
     assert.equal((await fetch(`${base}/servers/one/mcp`, { headers: { 'X-API-Key': 'wrong' } })).status, 401);

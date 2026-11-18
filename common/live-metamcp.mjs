@@ -303,9 +303,14 @@ function validatePairNetwork(ctx, identity, apps, { requireAliases = false } = {
     const project = labels['com.docker.compose.project'];
     const id = projectId(project);
     const expected = apps.get(project);
+    // A peer that is simply stopped is not a threat: it holds no live socket on
+    // this internal network. Requiring every member to be running made a normal
+    // boot fail, because both peers start at the same time and one of them is
+    // still stopping an old container while the other validates the network.
+    const running = member?.State?.Running === true;
     if (!member || !identity.projects.includes(project) || labels['com.multfinite.mcpkit.instance'] !== id ||
-        labels['com.docker.compose.service'] !== 'app' || oneOff(labels) || !expected || expected.Id !== memberId ||
-        member.State?.Running !== true || seenProjects.has(project)) {
+        labels['com.docker.compose.service'] !== 'app' || oneOff(labels) || !expected ||
+        (running && expected.Id !== memberId) || seenProjects.has(project)) {
       fail(`Unexpected container on internal MetaMCP peer network ${identity.network}; no network was changed.`);
     }
     const endpoint = member.NetworkSettings?.Networks?.[identity.network];

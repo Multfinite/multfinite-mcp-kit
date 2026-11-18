@@ -68,6 +68,46 @@ test('run-local-servers binds its arguments to run-local by name', {
   assert.deepEqual(received, ['logs', base, 'filesystem']);
 });
 
+test('the private-directory helper applies a protected DACL on every PowerShell engine', {
+  skip: (process.platform !== 'win32' && 'Windows ACLs') || (!nativePsAvailable && 'PowerShell is unavailable'),
+}, () => {
+  // Set-Acl also writes the descriptor's other sections, which some hosts
+  // reject without SeSecurityPrivilege and abort the first install step.
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'mcpkit acl '));
+  const helper = path.join(root, 'local-common.ps1');
+  const probe = path.join(root, 'probe.ps1');
+  fs.copyFileSync(path.join(windowsDir, 'local-common.ps1'), helper);
+  fs.writeFileSync(probe, [
+    'param([string]$Helper, [string]$Target)',
+    "$ErrorActionPreference = 'Stop'",
+    '. $Helper',
+    'Protect-PrivateDirectory $Target',
+    '(Get-Acl -LiteralPath $Target).Access.Count',
+    '',
+  ].join('\n'));
+  const engines = [nativePs];
+  if (available && ps !== nativePs) engines.push(ps);
+  for (const engine of engines) {
+    const target = path.join(root, `private-${path.basename(engine)}`);
+    // Windows PowerShell 5.1 fails to load its own modules when it inherits a
+    // PowerShell 7 module path, so let that engine derive its own.
+    const fiveOne = path.basename(engine).toLowerCase().startsWith('powershell');
+    const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !(fiveOne && name.toLowerCase() === 'psmodulepath')));
+    const result = spawnSync(engine, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', probe, helper, target], { env, encoding: 'utf8', timeout: 60000 });
+    assert.equal(result.status, 0, `${engine} failed:\n${result.stdout}\n${result.stderr}`);
+    assert.equal(result.stdout.trim(), '3', `${engine} did not leave exactly three usable access rules`);
+  }
+});
+
+test('wsl-keepalive refuses conflicting modes and never starts anything by accident', {
+  skip: (!available && 'set MCP_POWERSHELL'),
+}, () => {
+  const script = path.join(windowsDir, 'wsl-keepalive.ps1');
+  const conflicting = spawnSync(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script, '-Distribution', 'NoSuchDistro', '-Ensure', '-Hold'], { encoding: 'utf8', timeout: 60000 });
+  assert.notEqual(conflicting.status, 0);
+  assert.match(`${conflicting.stdout}${conflicting.stderr}`, /Choose either -Ensure or -Hold/);
+});
+
 async function freePort() {
   const server = net.createServer();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));

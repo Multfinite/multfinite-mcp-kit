@@ -132,18 +132,37 @@ wsl.exe -l -v
 
 ## Необязательно: самовосстановление после `wsl --shutdown`
 
-Если дистрибутив должен подниматься снова и после ручной остановки, укажите в задаче не `wsl.exe`, а небольшой командный файл:
+Если дистрибутив должен подниматься снова и после ручной остановки, есть два способа из комплекта.
 
-```bat
-@echo off
-rem Keeps the WSL distribution running; restarts it after wsl --shutdown.
-:loop
-wsl.exe -d Debian --exec sleep infinity
-timeout /t 10 /nobreak >nul
-goto loop
+**1. Задача-держатель с перезапуском внутри.** Укажите в задаче скрипт комплекта в режиме `-Hold`:
+
+```powershell
+.\windows\wsl-keepalive.ps1 -Distribution Debian -Hold
 ```
 
-Действие задачи: программа `C:\Windows\System32\cmd.exe`, аргументы `/c "<полный путь к файлу>.cmd"`. Такая задача действительно работает всё время сеанса и перезапускает дистрибутив через 10 секунд после остановки. Не используйте этот вариант, если `wsl --shutdown` должен надолго освобождать память и остановить все службы.
+Он запускает `sleep infinity` и повторяет попытку через 10 секунд после завершения сеанса (`-RetrySeconds`). Действие задачи: `pwsh.exe` (или `powershell.exe`) с аргументами `-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<полный путь>\windows\wsl-keepalive.ps1" -Distribution Debian -Hold`. Не используйте этот режим, если `wsl --shutdown` должен надолго освободить память.
+
+**2. Отдельная задача-watchdog — когда держатель уже настроен.** Режим `-Ensure` проверяет состояние и запускает **один** сеанс только если дистрибутив остановлен, поэтому его безопасно вызывать по расписанию:
+
+```powershell
+$pwsh = (Get-Command pwsh.exe).Source
+$action = New-ScheduledTaskAction -Execute $pwsh `
+    -Argument '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<полный путь>\windows\wsl-keepalive.ps1" -Distribution Debian -Ensure' `
+    -WorkingDirectory '<полный путь>\windows'
+$logon = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
+$repeat = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 5)
+$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
+    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+$principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+    -LogonType Interactive -RunLevel Limited
+Register-ScheduledTask -TaskName 'Multfinite-MCPKit-wsl-Debian-keepalive' -TaskPath '\' `
+    -Action $action -Trigger @($logon, $repeat) -Settings $settings -Principal $principal `
+    -Description 'MCPKIT-MANAGED: v1 kind=wsl-keepalive' -Force
+```
+
+Проверка восстановления: `wsl.exe --terminate Debian`, затем `Start-ScheduledTask -TaskName 'Multfinite-MCPKit-wsl-Debian-keepalive'` и через минуту `wsl.exe -l -v` — дистрибутив снова `Running`, а `docker ps` показывает контейнеры с политикой `unless-stopped`.
+
+> **Кто владеет задачей.** Задачу, созданную из сеанса с повышенными правами, нельзя изменить без таких же прав: обычный сеанс получает `Отказано в доступе`. Для этого `windows\run-local.ps1` и `windows\run-global-servers.ps1` при ошибке создают отдельную задачу `<имя>-watchdog` с повтором каждые 10 минут и предупреждают об этом. Чтобы обновить саму задачу входа, повторите `register-service` из PowerShell, запущенного от имени администратора.
 
 ## Альтернатива без Планировщика
 

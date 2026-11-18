@@ -4,7 +4,7 @@ HERE="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=linux/docker-common.sh
 source "$HERE/docker-common.sh"
 command="${1:-}"; dir="${2:-}"
-[ -n "$dir" ] && [ "$#" -ge 2 ] && [ "$#" -le 3 ] || { echo "Usage: $0 {start|stop|status|logs|check-env|apply|rebuild|remove|recover-env|setup|register-service|unregister-service} DIRECTORY [--delete-volumes|--allow-local-source]" >&2; exit 2; }
+[ -n "$dir" ] && [ "$#" -ge 2 ] || { echo "Usage: $0 {start|stop|status|logs|check-env|apply|rebuild|remove|recover-env|setup|register-service|unregister-service} DIRECTORY [--delete-volumes|--allow-local-source|--lan-ip IP --allow-insecure-lan]" >&2; exit 2; }
 case "$command" in
     register-service)
         [ "$#" -eq 2 ] || { echo 'register-service takes only a MetaMCP directory.' >&2; exit 2; }
@@ -31,5 +31,5 @@ case "$command" in
     *) echo "Unknown command: $command" >&2; exit 2 ;;
 esac
 args=("$command" --dir "$dir" --expect-type meta)
-[ "$#" -lt 3 ] || args+=("$3")
+[ "$#" -lt 3 ] || args+=("${@:3}")
 exec node "$HERE/../common/stack.mjs" "${args[@]}"

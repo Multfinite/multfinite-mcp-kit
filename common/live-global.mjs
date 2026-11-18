@@ -4,7 +4,14 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const services = ['gateway', 'neo4j', 'qdrant', 'graphiti', 'cognee', 'memory', 'gdrive'];
+// Dependency order with the gateway last. Every service in
+// common/global-compose.yml must be listed here exactly once: the live GLOBAL
+// is only read, so an unlisted service means this kit cannot verify the whole
+// project and stops instead of touching it.
+export const globalServices = ['neo4j', 'qdrant', 'llm-proxy', 'embeddings', 'memory', 'gdrive', 'graphiti', 'cognee', 'gateway'];
+// Services behind an opt-in Compose profile (for example ollama). They are
+// never required, never started by the kit, and must still be unique.
+export const optionalGlobalServices = ['ollama'];
 const statusIds = ['sequentialthinking', 'graphiti', 'cognee', 'memory-bank-mcp', 'context7', 'duckduckgo', 'fetch', 'io-draw', 'mcp-compass', 'gdrive', 'neo4j-global', 'qdrant-global', 'playwright'];
 function fail(message) { throw new Error(message); }
 function cleanEnv() {
@@ -54,11 +61,11 @@ export function inspectLiveGlobal(ctx, project, { requireRunning = true } = {}) 
     checkGlobalLabels(labels, project, id);
     if (String(labels['com.docker.compose.oneoff'] || '').toLowerCase() === 'true') continue;
     const service = labels['com.docker.compose.service'];
-    if (!services.includes(service) || items.has(service)) fail('GLOBAL services are missing or ambiguous; no container was changed.');
+    if (!(globalServices.includes(service) || optionalGlobalServices.includes(service)) || items.has(service)) fail('GLOBAL services are missing or ambiguous; no container was changed.');
     items.set(service, item);
   }
-  if (services.some((service) => !items.has(service))) fail('The installed GLOBAL is incomplete; no container or data was deleted.');
-  if (requireRunning && services.some((service) => items.get(service).State?.Running !== true)) fail('One or more existing GLOBAL containers are stopped.');
+  if (globalServices.some((service) => !items.has(service))) fail('The installed GLOBAL is incomplete; no container or data was deleted.');
+  if (requireRunning && globalServices.some((service) => items.get(service).State?.Running !== true)) fail('One or more existing GLOBAL containers are stopped.');
   const gateway = items.get('gateway');
   if (!new RegExp(`^/${project}-gateway-[0-9]+$`).test(gateway.Name || '')) fail('Unexpected GLOBAL gateway name.');
   const env = envMap(gateway.Config?.Env);
@@ -124,7 +131,7 @@ export function assertLiveGlobalNetwork(ctx, metaState) {
 // changes to the older GLOBAL or to any volume, network definition or files.
 export function startLiveGlobal(info) {
   const current = inspectLiveGlobal(info.ctx, info.project, { requireRunning: false });
-  for (const service of ['neo4j', 'qdrant', 'memory', 'gdrive', 'graphiti', 'cognee', 'gateway']) {
+  for (const service of globalServices) {
     const item = current.items.get(service);
     if (!item.State?.Running) command(info.ctx, ['container', 'start', item.Id], { inherit: true });
   }
@@ -132,10 +139,10 @@ export function startLiveGlobal(info) {
 }
 export function enableLiveGlobalRestart(info) {
   const current = inspectLiveGlobal(info.ctx, info.project);
-  const ids = services.map((service) => current.items.get(service).Id);
+  const ids = globalServices.map((service) => current.items.get(service).Id);
   command(info.ctx, ['container', 'update', '--restart', 'unless-stopped', ...ids], { inherit: true });
   const after = inspectLiveGlobal(info.ctx, info.project);
-  if (services.some((service) => after.items.get(service).Id !== current.items.get(service).Id ||
+  if (globalServices.some((service) => after.items.get(service).Id !== current.items.get(service).Id ||
       after.items.get(service).HostConfig?.RestartPolicy?.Name !== 'unless-stopped')) fail('Could not confirm the restart policy of every existing GLOBAL container.');
 }
 export function liveGlobalStatus(info) {

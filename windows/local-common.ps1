@@ -32,5 +32,16 @@ function Protect-PrivateDirectory([string]$Directory) {
         $rule = New-Object Security.AccessControl.FileSystemAccessRule($sid, 'FullControl', $inherit, $propagate, $allow)
         $acl.AddAccessRule($rule)
     }
-    Set-Acl -LiteralPath $Directory -AclObject $acl
+    # Replace only the DACL. Set-Acl also writes the descriptor's other sections
+    # on some hosts, which fails with "The process does not possess the
+    # 'SeSecurityPrivilege' privilege" for a normal user session and would stop
+    # every installation at its first step.
+    $access = [Security.AccessControl.AccessControlSections]::Access
+    $dacl = New-Object Security.AccessControl.DirectorySecurity
+    $dacl.SetSecurityDescriptorSddlForm($acl.GetSecurityDescriptorSddlForm($access), $access)
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [System.IO.FileSystemAclExtensions]::SetAccessControl((New-Object IO.DirectoryInfo($Directory)), $dacl)
+    } else {
+        [IO.Directory]::SetAccessControl($Directory, $dacl)
+    }
 }

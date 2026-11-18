@@ -198,7 +198,10 @@ export async function startGateway({ settings, gatewayKey, controlKey, instanceI
       return;
     }
     if (!fs.existsSync(spec.command) || (spec.entry && !fs.existsSync(spec.entry))) {
-      record.status = 'error';
+      // Known, actionable gap (for example a native package that needs the C++
+      // build tools). Keep the rest of the LOCAL set usable instead of failing
+      // the whole gateway start and the registered autostart task.
+      record.status = 'waiting';
       record.detail = 'Package is not installed; rerun install-local-server.ps1.';
       return;
     }
