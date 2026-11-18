@@ -68,6 +68,24 @@ mcpkit_require_user_systemd() {
     }
 }
 
+# A system-level unit that also runs this runner competes with the kit's own
+# per-user unit: its ExecStop stops the containers the kit just started. Report
+# it before registering, because the symptom (containers disappearing a minute
+# after a manual start) does not point at the duplicate unit.
+mcpkit_warn_legacy_system_units() {
+    local directory="$1" unit fragment
+    command -v systemctl >/dev/null 2>&1 || return 0
+    for unit in $(systemctl list-unit-files 'metamcp@*.service' --no-legend --no-pager 2>/dev/null | awk '{print $1}'); do
+        fragment="$(systemctl show "$unit" -p FragmentPath --value 2>/dev/null || true)"
+        [ -n "$fragment" ] && [ -f "$fragment" ] || continue
+        grep -q 'mcpkit-managed-service' "$fragment" && continue
+        grep -q 'run-metamcp\.sh' "$fragment" || continue
+        grep -qF -- "$directory" "$fragment" || continue
+        echo "WARNING: system unit $unit also manages $directory and will stop these containers." >&2
+        echo "WARNING: inspect it with 'bash linux/fix-legacy-metamcp-units.sh' and remove it as root; the kit registers user units instead." >&2
+    done
+}
+
 mcpkit_register_service() {
     local kind="$1" runner="$2" directory="$3" start_command="$4" stop_command="$5" pass_directory="$6"
     local runner_abs bash_path quoted_command quoted_dir env_name env_value unit_dir temp_file install_target working_directory
@@ -83,8 +101,10 @@ mcpkit_register_service() {
     mcpkit_install_mcp_target || return 1
     if [ "$kind" = metamcp ]; then
         install_target=default.target
+        mcpkit_warn_legacy_system_units "$directory" || true
     else
         install_target=mcpkit-mcp-servers.target
+        mcpkit_warn_legacy_system_units "$directory" || true
     fi
     working_directory="$(mcpkit_systemd_path_value "$directory")" || return 1
 

@@ -105,7 +105,7 @@ test('wsl-keepalive refuses conflicting modes and never starts anything by accid
   const script = path.join(windowsDir, 'wsl-keepalive.ps1');
   const conflicting = spawnSync(ps, ['-NoLogo', '-NoProfile', '-NonInteractive', '-File', script, '-Distribution', 'NoSuchDistro', '-Ensure', '-Hold'], { encoding: 'utf8', timeout: 60000 });
   assert.notEqual(conflicting.status, 0);
-  assert.match(`${conflicting.stdout}${conflicting.stderr}`, /Choose either -Ensure or -Hold/);
+  assert.match(`${conflicting.stdout}${conflicting.stderr}`, /Choose only one of -Ensure, -Hold, -Register or -Unregister/);
 });
 
 async function freePort() {

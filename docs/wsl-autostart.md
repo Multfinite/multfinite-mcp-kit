@@ -18,6 +18,15 @@
 
 Поэтому задача должна держать один долгоживущий процесс внутри дистрибутива. В примерах ниже это `sleep infinity`: он не требует прав root, не пишет в журналы и завершается только вместе с задачей.
 
+> **Важное уточнение по WSL 3.x.** Даже при `Linger=yes` WSL останавливает **пользовательский manager** (`user@1000.service`), когда закрывается последний сеанс дистрибутива; сама ВМ при этом может остаться запущенной. Тогда все юниты, созданные `run-metamcp.sh register-service`, останавливаются, и их `ExecStop` вызывает `run-metamcp.sh stop` — контейнеры, которые только что поднялись, гаснут. В журнале это видно так:
+>
+> ```text
+> systemd[1]: Stopping user@1000.service - User Manager for UID 1000...
+> bash[…]: Kit service containers stopped. Credentials, files and volumes were not changed.
+> ```
+>
+> Поэтому держатель сеанса — не необязательная деталь, а условие живучести. Готовый способ — `windows\wsl-keepalive.ps1`: он держит один сеанс, а также сам поднимает дистрибутив и перезапускает юниты кита, у которых остановился контейнер.
+
 ## Шаг 1. systemd, linger и Docker (внутри Debian)
 
 Сохраните существующий `/etc/wsl.conf` и добавьте параметр, если его ещё нет:
@@ -46,7 +55,24 @@ docker info
 
 ## Шаг 2. Задача Планировщика при входе
 
-### PowerShell (рекомендуется)
+Рекомендуемый способ — встроенный помощник кита: он сам создаёт задачу, а его режим `-Ensure` держит сеанс, поднимает дистрибутив и перезапускает юниты, у которых остановился контейнер.
+
+```powershell
+.\windows\wsl-keepalive.ps1 -Distribution Debian -Register
+```
+
+Задача `Multfinite-MCPKit-wsl-Debian-keepalive` запускается при входе и повторяется каждые 5 минут. Один проход занимает секунды, поэтому нет долгоживущего процесса, который Планировщик иногда завершает с кодом `0xC000013A`. Отдельный длинный держатель при этом не нужен: его создаёт сам скрипт (через `Win32_Process.Create`, вне job-объекта задачи), а повторный проход лишь проверяет, что сеанс и контейнеры на месте.
+
+Проверить и убрать регистрацию:
+
+```powershell
+.\windows\wsl-keepalive.ps1 -Distribution Debian -Ensure      # один проход вручную
+.\windows\wsl-keepalive.ps1 -Distribution Debian -Unregister  # убрать задачу
+```
+
+Если задача-держатель уже настроена вручную, её можно оставить: она не мешает, но и не восстанавливает контейнеры.
+
+### Ручной вариант
 
 Выполните в обычном сеансе пользователя, под которым должны работать службы. Права администратора не нужны.
 
@@ -117,9 +143,10 @@ wsl.exe -l -v
 
 ## Обслуживание
 
-- **Остановить автозапуск:** `Stop-ScheduledTask -TaskName 'Multfinite-MCPKit-wsl-Debian'; Unregister-ScheduledTask -TaskName 'Multfinite-MCPKit-wsl-Debian' -Confirm:$false`, затем при необходимости `wsl --terminate Debian`. Это не удаляет установки и данные.
-- **После `wsl --shutdown`:** дистрибутив и задача останавливаются; запустите задачу снова (`Start-ScheduledTask ...`). Открытие терминала дистрибутива само по себе не восстанавливает задачу.
-- **Диагностика:** `Get-ScheduledTaskInfo -TaskName ...` (код последнего запуска), `systemctl --user --failed`, `journalctl --user -b`, `docker info`.
+- **Остановить автозапуск:** `.\windows\wsl-keepalive.ps1 -Distribution Debian -Unregister`, затем при необходимости `wsl --terminate Debian`. Это не удаляет установки и данные.
+- **После `wsl --shutdown`:** дистрибутив и держатель останавливаются; следующий проход задачи-keepalive поднимет дистрибутив сам (до 5 минут). Открытие терминала дистрибутива тоже поднимает ВМ, но не восстанавливает остановленные контейнеры — это делает проход `-Ensure`.
+- **Контейнеры пропали через минуту-две после запуска:** проверьте `bash linux/fix-legacy-metamcp-units.sh`. Такой симптом даёт конкурирующий системный юнит, а не сеть или образ.
+- **Диагностика:** `Get-ScheduledTaskInfo -TaskName ...` (код последнего запуска), `systemctl --user --failed`, `journalctl --user -b`, `journalctl -b | grep user@1000` (остановки пользовательского manager), `docker info`.
 - **Обновления WSL и Windows** могут менять поведение; после крупного обновления повторите приёмку из шага 3.
 
 ## Ограничения и подводные камни
@@ -129,38 +156,19 @@ wsl.exe -l -v
 - Не задавайте лимит времени выполнения и не включайте остановку задачи при работе от батареи — держатель должен работать всё время сеанса.
 - Не используйте `vmIdleTimeout` в `.wslconfig` как замену держателю: он управляет простоем виртуальной машины WSL, а не временем жизни дистрибутива и его пользовательских служб.
 - Одна задача на дистрибутив. Для второго дистрибутива повторите шаги с другим именем задачи и идентификатором из `wsl -l -q`.
+- **Не регистрируйте системные юниты.** `systemctl` (без `--user`) и файлы в `/etc/systemd/system` не нужны: кит создаёт пользовательские юниты. Системный шаблон вида `/etc/systemd/system/metamcp@.service` с `Type=forking` и `Restart=on-failure` конфликтует с ними — `run-metamcp.sh start` работает в foreground, systemd считает запуск неуспешным и на каждом рестарте выполняет `ExecStop`, то есть останавливает только что поднятые контейнеры. Проверка и удаление: `bash linux/fix-legacy-metamcp-units.sh`, затем `sudo bash linux/fix-legacy-metamcp-units.sh --remove`.
 
-## Необязательно: самовосстановление после `wsl --shutdown`
+## Необязательно: перезапуск внутри процесса
 
-Если дистрибутив должен подниматься снова и после ручной остановки, есть два способа из комплекта.
-
-**1. Задача-держатель с перезапуском внутри.** Укажите в задаче скрипт комплекта в режиме `-Hold`:
+Режим `-Hold` держит сеанс в foreground и повторяет попытку через `-RetrySeconds`, если сеанс завершился:
 
 ```powershell
 .\windows\wsl-keepalive.ps1 -Distribution Debian -Hold
 ```
 
-Он запускает `sleep infinity` и повторяет попытку через 10 секунд после завершения сеанса (`-RetrySeconds`). Действие задачи: `pwsh.exe` (или `powershell.exe`) с аргументами `-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<полный путь>\windows\wsl-keepalive.ps1" -Distribution Debian -Hold`. Не используйте этот режим, если `wsl --shutdown` должен надолго освободить память.
+Используйте его из терминала или для ручной задачи. Для Планировщика предпочтителен `-Register`: короткие повторяющиеся проходы надёжнее одного долгоживущего процесса, который Планировщик может завершить с кодом `0xC000013A`.
 
-**2. Отдельная задача-watchdog — когда держатель уже настроен.** Режим `-Ensure` проверяет состояние и запускает **один** сеанс только если дистрибутив остановлен, поэтому его безопасно вызывать по расписанию:
-
-```powershell
-$pwsh = (Get-Command pwsh.exe).Source
-$action = New-ScheduledTaskAction -Execute $pwsh `
-    -Argument '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "<полный путь>\windows\wsl-keepalive.ps1" -Distribution Debian -Ensure' `
-    -WorkingDirectory '<полный путь>\windows'
-$logon = New-ScheduledTaskTrigger -AtLogOn -User ([Security.Principal.WindowsIdentity]::GetCurrent().Name)
-$repeat = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddMinutes(1)) -RepetitionInterval (New-TimeSpan -Minutes 5)
-$settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -MultipleInstances IgnoreNew `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 5) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
-$principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) `
-    -LogonType Interactive -RunLevel Limited
-Register-ScheduledTask -TaskName 'Multfinite-MCPKit-wsl-Debian-keepalive' -TaskPath '\' `
-    -Action $action -Trigger @($logon, $repeat) -Settings $settings -Principal $principal `
-    -Description 'MCPKIT-MANAGED: v1 kind=wsl-keepalive' -Force
-```
-
-Проверка восстановления: `wsl.exe --terminate Debian`, затем `Start-ScheduledTask -TaskName 'Multfinite-MCPKit-wsl-Debian-keepalive'` и через минуту `wsl.exe -l -v` — дистрибутив снова `Running`, а `docker ps` показывает контейнеры с политикой `unless-stopped`.
+Проверка восстановления: `wsl.exe --terminate Debian`, затем дождитесь следующего прохода задачи (до 5 минут) — дистрибутив снова `Running`, а `docker ps` показывает контейнеры кита. Остановленный вручную контейнер приложения тоже поднимается: `docker stop <project>-app-1` и следующий проход перезапускает соответствующий юнит.
 
 > **Кто владеет задачей.** Задачу, созданную из сеанса с повышенными правами, нельзя изменить без таких же прав: обычный сеанс получает `Отказано в доступе`. Для этого `windows\run-local.ps1` и `windows\run-global-servers.ps1` при ошибке создают отдельную задачу `<имя>-watchdog` с повтором каждые 10 минут и предупреждают об этом. Чтобы обновить саму задачу входа, повторите `register-service` из PowerShell, запущенного от имени администратора.
 
